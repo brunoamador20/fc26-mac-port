@@ -1,0 +1,6 @@
+cryptography==50.0.2
+lz4==4.4.5
+capstone==5.0.9
+unicorn==2.1.4
+Pillow==12.3.0
+brotli==1.2.0

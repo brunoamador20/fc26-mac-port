@@ -1,0 +1,22 @@
+.DS_Store
+__pycache__/
+*.pyc
+# never commit keys or game files
+*.keys
+*.xci
+*.nsp
+*.nca
+# build output (the work folder normally lives next to the card image)
+TOTK_build/
+*.app/
+games/totk/.venv
+games/totk/build/
+games/totk/extracted/
+games/totk/rewritten/
+games/totk/analysis/
+games/totk/tooling/
+games/totk/user-data/
+games/totk/tools/totk_xlate/obj/
+games/totk/tools/totk_xlate/bin/
+games/totk/scripts/shader_inventory/obj/
+games/totk/scripts/shader_inventory/bin/

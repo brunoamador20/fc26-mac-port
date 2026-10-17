@@ -1,0 +1,30 @@
+.venv/
+tooling/
+build/
+rewritten/
+extracted/
+ghidra-projects/
+analysis/*.json
+analysis/*.log
+analysis/*.c
+analysis/*.txt
+*.keys
+
+scripts/shader_inventory/bin/
+scripts/shader_inventory/obj/
+
+user-data/
+tools/totk_xlate/obj/
+tools/totk_xlate/bin/
+
+tests/reverb/bin/
+tests/reverb/obj/
+
+# Worktrees made by scripts/dev/new_worktree.sh link these to the main checkout; the patterns above with a
+# trailing slash match directories only, these also match the symlinks.
+/.venv
+/tooling
+/rewritten
+/extracted
+/analysis
+/ghidra-projects
