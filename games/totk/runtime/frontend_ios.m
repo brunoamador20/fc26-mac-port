@@ -79,7 +79,9 @@ void runtime_ios_attach_layer(CAMetalLayer *layer,UIView *host){
     game picture (1280x720 canvas) lands about 1:1 and the system compositor scales it to the screen instead of our GPU. */
  double vw=round(host.bounds.size.width*s),vh=round(host.bounds.size.height*s);
  const char *dh=getenv("TOTK_IOS_DRAWABLE_H");long want=dh?strtol(dh,NULL,10):720;
- if(want>0&&want<vh){vw=round(vw*(double)want/vh);vh=(double)want;}
+ /* the 16:9 picture should get about want rows: a screen narrower than 16:9 (an iPad, about 4:3; 2026-10-17) holds it by
+    width, so there the drawable is want*16/9 columns wide (1281x890 on a 2360x1640 iPad); an iPhone keeps want rows */
+ if(want>0){double h=vw/vh<16.0/9.0?round(want*16.0/9.0*vh/vw):(double)want;if(h<vh){vw=round(vw*h/vh);vh=h;}}
  metalLayer.drawableSize=CGSizeMake(vw,vh);
  fprintf(stderr,"[totk] view drawable %.0fx%.0f (screen scale %.1f, TOTK_IOS_DRAWABLE_H=%ld)\n",vw,vh,s,want);
  bootOverlay=[[UIView alloc] initWithFrame:host.bounds];bootOverlay.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
