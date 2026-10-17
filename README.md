@@ -6,7 +6,9 @@
 
 [中文说明](#中文说明)
 
-Play your own copy of **The Legend of Zelda: Tears of the Kingdom** natively on an Apple silicon Mac. Bring your game file (XCI or NSP) and your `prod.keys`; one script turns them into a Mac app. This project currently supports **Mac only**, not iPhone or iPad.
+Play your own copy of **The Legend of Zelda: Tears of the Kingdom** natively on an Apple silicon Mac. Bring your game file (XCI or NSP) and your `prod.keys`; one script turns them into a Mac app. This project currently supports **Mac only**.
+
+**iPhone and iPad support is coming soon. iPhone 16 or newer models are recommended for the upcoming iPhone version.**
 
 It is not an emulator: the game's own ARM64 code runs directly on the Apple chip (rewritten only where macOS requires it), the Switch system services are answered by a small host, and the game's NVN graphics are rebuilt on Metal 4. Nothing from the game is in this repository, and the project is not affiliated with Nintendo.
 
@@ -96,7 +98,9 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 
 # 中文说明
 
-在 Apple 芯片的 Mac 上原生运行你自己的《塞尔达传说 王国之泪》。准备好游戏文件（XCI 或 NSP）和你的 `prod.keys`，一个脚本就把它们做成一个 Mac App。项目目前**只支持 Mac，不支持 iPhone 或 iPad**。
+在 Apple 芯片的 Mac 上原生运行你自己的《塞尔达传说 王国之泪》。准备好游戏文件（XCI 或 NSP）和你的 `prod.keys`，一个脚本就把它们做成一个 Mac App。项目目前**只支持 Mac**。
+
+**即将支持 iPhone 和 iPad。未来的 iPhone 版本推荐使用 iPhone 16 及更新机型。**
 
 这不是模拟器：游戏自己的 ARM64 代码直接跑在苹果芯片上（只改写 macOS 不允许的地方），Switch 的系统服务由一个小宿主应答，游戏的 NVN 图形在 Metal 4 上重建。本仓库不含任何游戏内容，项目与任天堂无关。
 
