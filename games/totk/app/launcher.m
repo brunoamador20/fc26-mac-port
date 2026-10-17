@@ -14,6 +14,7 @@
 #include <sys/proc.h>
 #include <unistd.h>
 #include "dmsh_chain.h"   // DMSH_CHAIN: the shader translation chain the cache folder is named after
+#include "game_version.h"
 
 static void show_error(NSString *detail) {
     NSAlert *alert = [NSAlert new];
@@ -66,7 +67,9 @@ int main(int argc, char **argv) {
            makes the player's first start immediate. */
         if (argc > 1 && !strcmp(argv[1], "--check")) {
             int ok = access(binary.fileSystemRepresentation, X_OK) == 0;
-            printf("%s\n", ok ? "ok" : "the game binary is missing");
+            NSString *declared = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+            ok = ok && [declared isEqualToString:@TOTK_GAME_VERSION];
+            printf("%s: game version %s\n", ok ? "ok" : "missing binary or version mismatch", TOTK_GAME_VERSION);
             return ok ? 0 : 1;
         }
         if (access(binary.fileSystemRepresentation, X_OK) != 0) {
@@ -92,6 +95,20 @@ int main(int argc, char **argv) {
             [[NSRunningApplication runningApplicationWithProcessIdentifier:running] activateWithOptions:NSApplicationActivateAllWindows];
             return 0;
         }
+#ifdef TOTK_GAME_V112
+        NSString *backup = [profile stringByAppendingString:@"-before-1.1.2"];
+        NSFileManager *fm = NSFileManager.defaultManager;
+        if (![fm fileExistsAtPath:backup]) {
+            NSString *temporary = [backup stringByAppendingFormat:@".copy-%d", getpid()];
+            NSError *error = nil;
+            if (![fm copyItemAtPath:profile toPath:temporary error:&error] ||
+                ![fm moveItemAtPath:temporary toPath:backup error:&error]) {
+                [fm removeItemAtPath:temporary error:nil];
+                show_error([@"Cannot back up saves before upgrading: " stringByAppendingString:error.localizedDescription ?: @"unknown error"]);
+                return 1;
+            }
+        }
+#endif
         if (chdir(root.fileSystemRepresentation) != 0) {   // the game reads its data relative to this folder
             show_error(@"Cannot open the game folder inside the app.");
             return 1;
@@ -123,7 +140,7 @@ int main(int argc, char **argv) {
             dup2(fileno(lf), STDERR_FILENO);
             fclose(lf);
         }
-        char *const arguments[] = {(char *)binary.fileSystemRepresentation, "rewritten/v0", "boot", NULL};
+        char *const arguments[] = {(char *)binary.fileSystemRepresentation, "rewritten/" TOTK_GAME_DIR, "boot", NULL};
         execv(arguments[0], arguments);
         fprintf(stderr, "[launcher] execv failed: %s\n", strerror(errno));
         show_error([NSString stringWithFormat:@"Starting the game failed. See %@.", log]);

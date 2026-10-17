@@ -128,7 +128,8 @@ static class SwshXlate
                 var flags = (job["debug"] is JsonNode dbg && !(bool)dbg ? 0 : TranslationFlags.DebugMode) | ((string)job["stage"] == "cs" ? TranslationFlags.Compute : 0);
                 var ctx = Translator.CreateContext(0, acc, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags));
                 ShaderProgram p = ctx.Translate();
-                File.WriteAllBytes(Path.Combine(outDir, key + ".spv"), p.BinaryCode);
+                File.WriteAllBytes(Path.Combine(outDir, key + ".spv"),
+                    VertexCounterLowering.Apply(code, (string)job["stage"], p.BinaryCode, acc.Notes));
                 var res = new JsonObject
                 {
                     ["key"] = key, ["stage"] = (string)job["stage"], ["notes"] = new JsonArray(acc.Notes.ConvertAll(n => (JsonNode)n).ToArray()),

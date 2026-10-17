@@ -1,9 +1,10 @@
-/* Live map survey for TOTK v1.0.0. No arbitrary memory writes and no raw position pokes.
+/* Live map survey for the selected TOTK version. No arbitrary memory writes and no raw position pokes.
    Offset leads: aquacluck/totk-lotuskit 59dcfcc; independently checked against our main in
    analysis/continuous-survey-entry-named.c. forceSetMatrix routes through the physics component,
    or queues a next transform, unlike merely changing the actor's displayed position.
    Only called after the actual game frame-end GPU wait, never from the input file thread. */
 #include "world_survey.h"
+#include "game_version.h"
 #include <ctype.h>
 #include <limits.h>
 #include <mach/mach.h>
@@ -13,7 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { SCENE_SLOT = 0x4663f08, FORCE_MATRIX = 0x69a18c, ACTOR_POS = 0x2ac, ACTOR_ROT = 0x2b8 };
+enum { SCENE_SLOT = GAME_ADDR(0x4663f08), FORCE_MATRIX = GAME_ADDR(0x69a18c), ACTOR_POS = GAME_ACTOR_POS, ACTOR_ROT = GAME_ACTOR_ROT };
 static uintptr_t survey_main;
 static void (*survey_force)(void *, const float *, uint32_t);
 static _Atomic int survey_enabled;
@@ -35,9 +36,31 @@ static int valid_xyz(const float xyz[3]) {
     return isfinite(xyz[0]) && isfinite(xyz[1]) && isfinite(xyz[2]) &&
            fabsf(xyz[0]) <= 5500 && xyz[1] >= -1500 && xyz[1] <= 3500 && fabsf(xyz[2]) <= 5000;
 }
+static void survey_debug_layout(uintptr_t module, uintptr_t scene) {
+    static unsigned reports;
+    if (!getenv("TOTK_SURVEY_DEBUG") || reports++ >= 3) return;
+    fprintf(stderr, "[survey-layout] module=%#llx scene=%#llx\n", (unsigned long long)module, (unsigned long long)scene);
+    int count = 0; read_mem(scene + 0x50, &count, 4);
+    uintptr_t components = read_ptr(scene + 0x58);
+    fprintf(stderr, "[survey-layout] components=%#llx count=%d\n", (unsigned long long)components, count);
+    if (count < 1 || count > 256) return;
+    for (int i = 0; i < count; ++i) {
+        uintptr_t c = read_ptr(components + i * 8), ref = read_ptr(c + 8);
+        char name[200] = {0}; read_mem(ref, name, sizeof name - 1);
+        int n = 0; read_mem(c + 0x20, &n, 4); uintptr_t links = read_ptr(c + 0x28);
+        fprintf(stderr, "[survey-layout] component=%d ptr=%#llx ref=%.199s count=%d links=%#llx\n", i, (unsigned long long)c, name, n, (unsigned long long)links);
+        if (i != 13 || n < 1 || n > 64) continue;
+        for (int j = 0; j < n; ++j) {
+            uintptr_t data = read_ptr(links + j * 0x70 + 8), actor = read_ptr(data + 0x40), actor_name = read_ptr(actor + GAME_ACTOR_NAME);
+            char text[64] = {0}; read_mem(actor_name, text, sizeof text - 1);
+            fprintf(stderr, "[survey-layout] link=%d data=%#llx actor=%#llx name=%.63s\n", j, (unsigned long long)data, (unsigned long long)actor, text);
+        }
+    }
+}
 static uintptr_t player_actor(void) {
     uintptr_t module = read_ptr(survey_main + SCENE_SLOT);
     uintptr_t scene = module ? read_ptr(module + 0x1e8) : 0;
+    survey_debug_layout(module, scene);
     int count = 0;
     if (!scene || !read_mem(scene + 0x50, &count, 4) || count < 14 || count > 256) return 0;
     uintptr_t components = read_ptr(scene + 0x58);
@@ -48,7 +71,7 @@ static uintptr_t player_actor(void) {
     for (int i = 0; i < count; ++i) {
         uintptr_t data = read_ptr(links + (uintptr_t)i * 0x70 + 8);
         uintptr_t actor = data ? read_ptr(data + 0x40) : 0;
-        uintptr_t name = actor ? read_ptr(actor + 0x210) : 0;
+        uintptr_t name = actor ? read_ptr(actor + GAME_ACTOR_NAME) : 0;
         char text[7];
         if (name && read_mem(name, text, sizeof text) && !memcmp(text, "Player", 7)) {
             float xyz[3];
@@ -68,7 +91,7 @@ void runtime_survey_init(Module *m) {
     const uint32_t expected[] = {0xa9bd7bfd, 0xf9000bf5, 0x910003fd, 0xa9024ff4};
     if (strcmp(m->name, "main") || SCENE_SLOT + 8u > m->size || FORCE_MATRIX + sizeof expected > m->text_end ||
         memcmp(m->base + FORCE_MATRIX, expected, sizeof expected))
-        runtime_fail("survey requires verified TOTK v1.0.0 forceSetMatrix entry");
+        runtime_fail("survey requires verified game-version forceSetMatrix entry");
     survey_main = (uintptr_t)m->base;
     survey_force = (void (*)(void *, const float *, uint32_t))(m->base + FORCE_MATRIX);
     survey_enabled = 1;

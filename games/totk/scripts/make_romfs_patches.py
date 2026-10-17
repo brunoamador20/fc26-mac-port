@@ -30,9 +30,12 @@ root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--output-dir', type=Path, default=root / 'extracted/v0/romfs-patches')
 parser.add_argument('--capture-frame', type=float, default=0.0)
+parser.add_argument('--version', choices=('v0','v112'), default='v0')
 args = parser.parse_args()
+version = args.version
+if args.output_dir == root / 'extracted/v0/romfs-patches': args.output_dir = root / f'extracted/{version}/romfs-patches'
 assert 0 <= args.capture_frame <= 0.5
-manifest = json.loads((root / 'extracted/v0/romfs/index.json').read_text())
+manifest = json.loads((root / f'extracted/{version}/romfs/index.json').read_text())
 assert manifest['status'] == 'pass'
 files = {f['path']: f for f in manifest['files']}
 out_dir = args.output_dir
@@ -74,13 +77,13 @@ def flvi_keys(data, base):
         pos += size
     return out
 
-ARCHIVE = 'UI/LayoutArchive/Common.Product.100.Nin_NX_NVN.blarc.zs'
+ARCHIVE = 'UI/LayoutArchive/Common.Product.' + ('110' if version == 'v112' else '100') + '.Nin_NX_NVN.blarc.zs'
 MEMBERS = {
     'anim/ShortCutBG_00_In.bflan': ('C_CaptureBG_00', 'C_CaptureClearBG_00', 'P_CaptureClearBG_00'),
     'anim/AutoBuilder_00_In.bflan': ('C_CaptureBG_00',),
 }
 
-with (root / 'extracted/v0/romfs/romfs.bin').open('rb') as image:
+with (root / f'extracted/{version}/romfs/romfs.bin').open('rb') as image:
     def read(path): f = files[path]; image.seek(f['offset']); b = image.read(f['size']); assert len(b) == f['size']; return b
     dictionaries = {}
     for name, (lo, hi) in sarc_members(pack := zstd.decompress(read('Pack/ZsDic.pack.zs'))).items():
@@ -114,9 +117,11 @@ print(json.dumps(dict(status='pass', path=ARCHIVE, members=patched, frame=f'1.0 
 # The game over flow: Event14 (EventTriggerPauseMgrRequestPause GameOverPause) ends its branch instead of going on to
 # Event25 (EventWait, Frames 1). BFEVFL events are 0x28 bytes from 0x1f0 (name ref at +0, type at +8, next at +0xa);
 # the original's SHA-256 pins the layout these offsets come from.
+# v112 additionally has DmF_SY_GameOver.110 with EventWaitUpdate instead of EventWait.
+# Preserve that updated flow; this guarded patch only covers the retained original file.
 FLOW = 'Event/EventFlow/DmF_SY_GameOver.bfevfl.zs'
 FLOW_SHA256 = 'c59975494fb30063b7a339fd66bbde8b456b11c73a5b4332bc070d63ece66b7d'
-with (root / 'extracted/v0/romfs/romfs.bin').open('rb') as image:
+with (root / f'extracted/{version}/romfs/romfs.bin').open('rb') as image:
     f = files[FLOW]; image.seek(f['offset']); raw = image.read(f['size']); assert len(raw) == f['size']
 info = zstd.get_frame_info(raw); dictionary = dictionaries[info.dictionary_id]
 flow = bytearray(zstd.decompress(raw, zstd_dict=dictionary))

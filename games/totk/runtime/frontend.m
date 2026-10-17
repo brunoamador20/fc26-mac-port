@@ -6,6 +6,7 @@
 #include <stdatomic.h>
 #include <math.h>
 #include "runtime.h"
+#include "game_version.h"
 static NSWindow *window;
 uint64_t dm_nvn_frame_count(void);   /* gfx/nvn/hle_nvn.c: game frames presented so far */
 static CAMetalLayer *metalLayer;
@@ -133,7 +134,7 @@ void runtime_front_run(void(*callback)(void)){
   window.releasedWhenClosed=NO;   /* a close that waits for a save (windowWillClose) must not free the window the static pointer still holds */
   /* An agent's test game (TOTK_SLOT_OWNER other than user) says so in its title: it plays a save copy and its script closes it. */
   const char *owner=getenv("TOTK_SLOT_OWNER"),*purpose=getenv("TOTK_SLOT_PURPOSE");
-  window.title=owner&&*owner&&strcmp(owner,"user")?[NSString stringWithFormat:@"测试局（%s）：%s — 存档副本，进度不会存进你的存档，脚本会自己关闭",owner,purpose&&*purpose?purpose:"代理测试"]:@"Tears of the Kingdom  Mac";
+  window.title=owner&&*owner&&strcmp(owner,"user")?[NSString stringWithFormat:@"测试局（%s）Ver. %s：%s — 存档副本，进度不会存进你的存档，脚本会自己关闭",owner,TOTK_GAME_VERSION,purpose&&*purpose?purpose:"代理测试"]:[NSString stringWithFormat:@"Tears of the Kingdom  Mac — Ver. %s",TOTK_GAME_VERSION];
   windowDelegate=[TOTKWindowDelegate new];window.delegate=windowDelegate;
   window.collectionBehavior|=NSWindowCollectionBehaviorFullScreenPrimary;
   window.contentView=[[TOTKInputView alloc] initWithFrame:NSMakeRect(0,0,ww,wh)];

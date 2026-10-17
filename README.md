@@ -16,7 +16,7 @@ It is not an emulator: the game's own ARM64 code runs directly on the Apple chip
 
 - A Mac with Apple silicon and **macOS 26** or later (the graphics use Metal 4). 16 GB of memory or more is recommended.
 - About **25 GB** of free disk space for the work folder, in addition to your game file. Keep the output app on the **same APFS volume** to share the large data files through cloning. If cloning is unavailable or the app is on another volume, allow roughly **17 GB more** for the app copy.
-- Your Tears of the Kingdom **base game version 1.0.0** (`0100F2C0115B6000`) as an **XCI or NSP**, and your `prod.keys`. All updates, including **1.2.1 and 1.4.3**, DLC and combined base/update packages are unsupported by this checkout. NSP support does not add support for newer game versions.
+- Your Tears of the Kingdom **base game 1.0.0** (`0100F2C0115B6000`) as an **XCI or NSP**, and your `prod.keys`. To build **1.1.2**, also supply its separate cumulative update NSP with `--update`. No intermediate 1.1.0 update is required. Other updates (including **1.2.1 and 1.4.3**), DLC and combined packages remain unsupported.
 - For NSP: its common ticket must be included unless the NCAs are rights-free. NSPs do not contain system shared fonts: supply an unpacked firmware NCA directory with `--firmware`, or previously extracted fonts with `--shared-fonts`. The six fonts must match this project’s verified hashes; valid fonts already in the work folder are reused.
 
 ## Build the app
@@ -44,11 +44,27 @@ python3.14 build_app.py ~/Games/totk.nsp -k ~/keys/prod.keys --shared-fonts /pat
 
 `--firmware` accepts a directory of `.nca` files (unpack a firmware archive first), or an installed firmware `registered` directory. `--shared-fonts` accepts the extracted directory containing `0-standard.bfttf` through `5-nintendo-extension.bfttf`. No fonts or keys are downloaded. For an XCI, fonts are read from its system update partition by default; if that partition is missing, use one of these font options too. Both input formats produce a macOS `.app`.
 
-The app appears next to the game file (`Tears of the Kingdom.app`; `-o` chooses another place). A local clean build took about 6 minutes on an M4 Mac mini (hardware, disk and network conditions affect the time): about a minute each to rewrite the main code module and to decrypt the 17 GB of game data, and two to three minutes for macOS to check the finished app once. Building needs no .NET and no cmake, and the finished game needs no Python: its shader translator is a native program that comes with this repository (`games/totk/prebuilt`). Every intermediate file is in a work folder next to the game file (`TOTK_build`, or `--work`); running the script again reuses what is already done.
+The app appears next to the game file (`Tears of the Kingdom.app`; `-o` chooses another place). A local clean base-1.0.0 build took about 6 minutes on an M4 Mac mini (hardware, disk and network conditions affect the time): about a minute each to rewrite the main code module and to decrypt the 17 GB of game data, and two to three minutes for macOS to check the finished app once. Building needs no .NET and no cmake, and the finished game needs no Python: its shader translator is a native program that comes with this repository (`games/totk/prebuilt`). Every intermediate file is in a work folder next to the game file (`TOTK_build`, or `--work`); running the script again reuses what is already done.
 
-The extracted code modules, rewritten modules, RomFS and shared fonts are checked against `games/totk/assets/expected-v1.0.0.json`; the prebuilt shader translator has its own SHA-256 check. A mismatch stops the build. Key values are never printed.
+The extracted code modules, rewritten modules, RomFS and shared fonts are checked against `games/totk/assets/expected-v1.0.0.json` or `expected-v1.1.2.json` for the selected version; the prebuilt shader translator has its own SHA-256 check. A mismatch stops the build. Key values are never printed.
 
 **3. Play:** open the app from Finder. The build starts the launcher in `--check` mode, which checks that the game executable exists and allows macOS to perform its first-launch checks; it does not run a gameplay test. You can keep the app where it was built or move it to `/Applications`. Copying it to a different volume can use additional disk space and trigger another macOS check, during which no window may appear. The first game launch verifies the game data (about 20 seconds in local testing). Newly encountered shaders can cause stutters; cached shaders reduce this work on later visits.
+
+
+### Build version 1.1.2
+
+```sh
+python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.1.2.nsp
+# With a base NSP, keep --firmware or --shared-fonts as described above.
+```
+
+This produces the same **Tears of the Kingdom.app**, containing only the selected version. Quit the running game, then rebuild to the same `-o` path to replace the old app; there is no second game entry or version-selection menu. The window title shows **Ver. 1.1.2**. Without `--update`, the script still builds 1.0.0.
+
+Allow about **60 GB free for a fresh update build**, or **35 GB extra** when the base data is already cached. The merge temporarily copies the base/update NCAs and verifies every IVFC level. It fetches a pinned [hactool](https://github.com/SciresM/hactool) source and builds it with clang/make. Temporary ticket files are private and removed after the merge; key values are not passed on the command line or printed.
+
+Saves stay in the same profile folder. Before the first 1.1.2 launch, the app makes a complete `profile-before-1.1.2` backup beside it; failure stops startup. Keep this backup if you need to return to 1.0.0—do not assume an updated save is backward compatible.
+
+The source runtime passed basic Mac checks: load, movement/jumps, menus/map, 2K, save/reload and death retry. Full-map, long-session and fair 1.0/1.1.2 performance comparisons remain pending; the earlier FPS observations are not a promise of 1.1.2 performance. Packaging validation is recorded in [the build notes](docs/how-it-works.md#112-validation).
 
 ## Controls
 
@@ -73,10 +89,10 @@ Extra keys: **1** MetalFX upscaling on / off (MetalFX is used only for 2K: when 
 
 ## Known issues
 
-- Only base game 1.0.0 in XCI or NSP format. No updates, DLC, combined packages, compressed NSZ/XCZ, or personalized tickets. Mac only.
+- Supports base 1.0.0, or base plus the separate 1.1.2 update NSP. Other versions, DLC, combined packages, compressed NSZ/XCZ and personalized tickets remain unsupported. Mac only.
 - No online features, no amiibo.
 - New shaders can cause compilation stutters. Cache reuse reduces these, but does not guarantee stutter-free gameplay.
-- NSP validation currently covers 11 automated container tests and a complete Mac build from a local XCI-derived NSP fixture with a generated common ticket. An independent retail base NSP and gameplay from that input have not yet been tested.
+- Container/update validation now covers 16 automated tests and a complete Mac build from a local XCI-derived NSP fixture with a generated common ticket. An independent retail base NSP and gameplay from that input have not yet been tested.
 
 ## How it works
 
@@ -108,7 +124,7 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 
 - Apple 芯片的 Mac，**macOS 26** 或更高（图形用 Metal 4）。建议使用 16 GB 或更多内存。
 - 除游戏文件外，为工作目录预留约 **25 GB** 空闲空间。成品 App 与工作目录放在**同一个 APFS 卷**上时，大型数据文件可通过克隆共享磁盘空间；无法克隆或输出到其他卷时，还需为 App 副本另留约 **17 GB**。
-- 你的《王国之泪》**本体 1.0.0 版**（`0100F2C0115B6000`），格式为 **XCI 或 NSP**，以及你的 `prod.keys`。当前仓库不支持任何更新版（包括 **1.2.1 和 1.4.3**）、DLC 或本体与更新合并的包。支持 NSP 格式不代表已适配新版游戏。
+- 你的《王国之泪》**本体 1.0.0**（`0100F2C0115B6000`），格式为 **XCI 或 NSP**，以及你的 `prod.keys`。构建 **1.1.2** 时，再通过 `--update` 提供单独的累计更新 NSP；无需先安装 1.1.0。其他更新（包括 **1.2.1、1.4.3**）、DLC 和合并包仍不支持。
 - 使用 NSP 时：除不依赖票据的 NCA 外，包内必须包含通用票据。NSP 不含系统共享字体，需要通过 `--firmware` 指定已解包的固件 NCA 目录，或通过 `--shared-fonts` 提供以前提取的字体。六个字体必须符合本项目已验证的哈希；工作目录中已有且校验通过的字体会自动复用。
 
 ## 打包 App
@@ -136,11 +152,27 @@ python3.14 build_app.py ~/Games/totk.nsp -k ~/keys/prod.keys --shared-fonts /pat
 
 `--firmware` 接受包含 `.nca` 文件的目录（固件压缩包需先解压），也接受已安装固件的 `registered` 目录。`--shared-fonts` 接受包含 `0-standard.bfttf` 至 `5-nintendo-extension.bfttf` 的提取目录。工具不会下载字体或密钥。XCI 默认从其系统更新分区提取字体；如果该分区缺失，也可以使用上述字体选项。两种输入格式最终都生成 macOS `.app`。
 
-App 出现在游戏文件旁边（`Tears of the Kingdom.app`；`-o` 指定别处）。本地一次全新构建在 M4 Mac mini 上约 6 分钟（耗时受硬件、磁盘和网络影响）：改写主代码模块、解密 17 GB 的游戏数据各约 1 分钟，macOS 把做好的 App 检查一遍要 2–3 分钟。打包不需要 .NET 和 cmake，做好的游戏运行时也不需要 Python：着色器翻译器是本仓库自带的原生程序（`games/totk/prebuilt`）。所有中间文件都在游戏文件旁边的工作目录里（`TOTK_build`，或用 `--work` 指定），再运行一次会复用已经做好的部分。
+App 出现在游戏文件旁边（`Tears of the Kingdom.app`；`-o` 指定别处）。本地一次本体 1.0.0 全新构建在 M4 Mac mini 上约 6 分钟（耗时受硬件、磁盘和网络影响）：改写主代码模块、解密 17 GB 的游戏数据各约 1 分钟，macOS 把做好的 App 检查一遍要 2–3 分钟。打包不需要 .NET 和 cmake，做好的游戏运行时也不需要 Python：着色器翻译器是本仓库自带的原生程序（`games/totk/prebuilt`）。所有中间文件都在游戏文件旁边的工作目录里（`TOTK_build`，或用 `--work` 指定），再运行一次会复用已经做好的部分。
 
-提取的程序模块、改写后的模块、RomFS 和共享字体会与 `games/totk/assets/expected-v1.0.0.json` 中的哈希核对；预编译着色器翻译器另有 SHA-256 校验。不匹配时停止构建。密钥的值不会被打印。
+提取的程序模块、改写后的模块、RomFS 和共享字体会与所选版本的 `games/totk/assets/expected-v1.0.0.json` 或 `expected-v1.1.2.json` 中的哈希核对；预编译着色器翻译器另有 SHA-256 校验。不匹配时停止构建。密钥的值不会被打印。
 
 **3. 游玩：** 在访达里打开 App。构建结束时会以 `--check` 模式启动启动器，检查游戏可执行文件是否存在，并让 macOS 执行首次启动检查；这一步不进行游戏游玩测试。App 可以留在原位置，也可以移到“应用程序”。拷贝到另一个卷可能额外占用磁盘空间，并触发 macOS 再次检查，期间可能没有窗口。第一次进入游戏会校验游戏数据（本地测试约 20 秒）。首次遇到的着色器可能造成编译卡顿，缓存可减少后续访问时的重复工作。
+
+
+### 构建 1.1.2
+
+```sh
+python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.1.2.nsp
+# 本体为 NSP 时，继续提供上文的 --firmware 或 --shared-fonts。
+```
+
+仍然只生成同一个 **Tears of the Kingdom.app**，包内只含选定版本。先退出正在运行的游戏，再用相同 `-o` 路径重新构建即可替换旧 App，不增加第二个游戏入口或版本选择菜单。窗口标题显示 **Ver. 1.1.2**。不加 `--update` 时仍构建 1.0.0。
+
+首次完整更新构建建议预留约 **60 GB**，已缓存本体数据时还需约 **35 GB** 临时空间。合并时临时复制本体 / 更新 NCA，并校验全部 IVFC 层；工具会获取固定提交的 [hactool](https://github.com/SciresM/hactool)，用 clang / make 编译。临时票据文件仅当前用户可读，合并结束即清理；密钥值不进入命令行或日志。
+
+存档继续保存在原 profile 目录。首次启动 1.1.2 前，App 会在旁边完整备份为 `profile-before-1.1.2`；备份失败就不启动。需要回退 1.0.0 时保留并使用这份备份，不能假定新版存档向下兼容。
+
+来源运行时已通过 Mac 基础检查：读档、移动 / 跳跃、菜单 / 地图、2K、保存重读及死亡重试。全地图、长局与 1.0 / 1.1.2 公平性能对比仍待测试；前面的帧率观察不是对 1.1.2 的性能承诺。打包验证范围见[构建记录](docs/how-it-works.md#112-validation)。
 
 ## 操作
 
@@ -165,10 +197,10 @@ macOS 能识别的手柄（如 DualSense、Xbox 手柄）会映射为 Switch Pro
 
 ## 已知问题
 
-- 只支持本体 1.0.0 的 XCI 或 NSP。暂不支持更新、DLC、合并包、NSZ/XCZ 压缩格式和个性化票据。平台仅限 Mac。
+- 支持本体 1.0.0，或本体加单独的 1.1.2 更新 NSP。其他版本、DLC、合并包、NSZ/XCZ 压缩格式和个性化票据仍不支持。平台仅限 Mac。
 - 没有联网功能，没有 amiibo。
 - 首次遇到新着色器可能出现编译卡顿，缓存能减少重复编译，但不保证完全没有卡顿。
-- NSP 当前验证范围：11 项容器自动测试，以及使用本地 XCI 构造、附带生成通用票据的 NSP 测试副本完成完整 Mac 打包。尚未验证独立的零售本体 NSP，也未测试从该类输入构建后的实际游玩。
+- 容器 / 更新当前验证范围：16 项自动测试，以及使用本地 XCI 构造、附带生成通用票据的 NSP 测试副本完成完整 Mac 打包。尚未验证独立的零售本体 NSP，也未测试从该类输入构建后的实际游玩。
 
 ## 工作原理
 

@@ -93,12 +93,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('directory', type=Path)
     ap.add_argument('nso', type=Path)
+    ap.add_argument('--version', choices=('v0','v112'), default='v0')
     args = ap.parse_args()
     original = nsoimg.load(args.nso)
     patched = (args.directory / 'main.patched.bin').read_bytes()
     header = nsoimg.header(args.directory, 'main')
+    starts = [0x72AFDC, 0x7AA630] if args.version == "v0" else [0x74CB68, 0x80B3A0]
     cases = 0
-    for start in [0x72AFDC, 0x7AA630]:
+    for start in starts:
         for failure in [False, True]:
             for seed in range(64):
                 expected = run(original, patched, header, start, failure, seed, False)
@@ -109,7 +111,7 @@ def main():
     # Reproduce the wrong fallthrough edge in the actual generated trampoline.
     md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
     md.detail = True
-    for start in [0x72AFDC, 0x7AA630]:
+    for start in starts:
         trampoline = target(struct.unpack_from('<I', patched, start)[0], start)
         fallthrough = next(i for i in md.disasm(patched[trampoline:trampoline + 128], trampoline)
                            if i.mnemonic == 'b' and i.operands[0].imm == start + 16)
@@ -123,7 +125,7 @@ def main():
             negative_controls += 1
         else:
             raise AssertionError('Wrong fallthrough negative control was not detected')
-    print(json.dumps({'status': 'pass', 'cases': cases, 'windows': ['0x72afdc', '0x7aa630'],
+    print(json.dumps({'status': 'pass', 'cases': cases, 'windows': [hex(x) for x in starts],
                       'wrong_exit_negative_controls_detected': negative_controls,
                       'success': 'real LDXR/STXR without deexcl',
                       'failure': 'injected failed-store status and restored memory',

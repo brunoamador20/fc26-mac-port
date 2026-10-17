@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read an XCI or NSP in place; extract and verify only its base Program ExeFS.
+"""Read an XCI or NSP in place; extract and verify its base or explicitly selected update Program ExeFS.
 
 Supports NCA3, key-area or common-ticket AES-CTR, and hierarchical SHA-256 PFS0.
 Keys stay in memory. No RomFS extraction, executable launch, or network calls.
@@ -103,7 +103,8 @@ def common_tickets(f, entries):
         if not name.lower().endswith('.tik'):
             continue
         require(size >= 4, 'Truncated NSP ticket')
-        sig = struct.unpack('>I', read_at(f, offset, 4))[0]
+        # Switch ticket signature type is little-endian: RSA2048/SHA256 = 04 00 01 00.
+        sig = struct.unpack('<I', read_at(f, offset, 4))[0]
         require(sig in bodies, 'Unsupported NSP ticket signature type')
         body = bodies[sig]
         require(size >= body + 0x180, 'Truncated NSP ticket body')
@@ -156,7 +157,15 @@ def nca_inventory(f, entries, keys):
     return records
 
 
-def program_nca(records):
+def program_nca(records, update=False):
+    if update:
+        programs = [(r, h) for r, h in records if r["content_type"] == 0]
+        require(len(programs) == 1, "Expected one update Program NCA; combined packages are unsupported")
+        record, hdr = programs[0]
+        require(record["title_id"] == "0100F2C0115B6000", "Update belongs to another game")
+        require(any(hdr[0x400 + i*512 + 4] == 4 for i in range(4)), "Expected a BKTR update, not a base game")
+        require(all(r["title_id"] in ("0100F2C0115B6000", "0100F2C0115B6800") for r, _ in records), "Mixed-title update package")
+        return record, hdr
     # Update Program NCAs can retain the base title ID; their Meta NCA carries the update ID.
     metadata = [r for r, _ in records if r['content_type'] == 1]
     require(len(metadata) <= 1 and all(r['title_id'] == '0100F2C0115B6000' for r in metadata),
@@ -178,6 +187,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('game', type=Path, help='base game 1.0.0 (.xci or .nsp)')
     parser.add_argument('--keys', required=True, type=Path)
+    parser.add_argument('--update', action='store_true', help='extract update code; caller must verify supported version hashes')
     parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
     require(not args.output.exists(), 'Output already exists; choose a new directory')
@@ -186,7 +196,7 @@ def main():
         kind, entries = container_entries(f, args.game.stat().st_size)
         tickets = common_tickets(f, entries)
         records = nca_inventory(f, entries, keys)
-        record, hdr = program_nca(records)
+        record, hdr = program_nca(records, update=args.update)
         ctr_key = nca_ctr_key(hdr, keys, tickets)
         for i in range(4):
             start, end = struct.unpack_from('<II', hdr, 0x240 + 16 * i)

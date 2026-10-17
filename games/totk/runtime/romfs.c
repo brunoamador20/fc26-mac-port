@@ -1,6 +1,7 @@
 /* Read-only game RomFS, backed by the player's fully IVFC-verified image. */
 #include "runtime.h"
 #include "romfs_config.h"
+#include "game_version.h"
 #include "fs_host.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <fcntl.h>
@@ -159,13 +160,13 @@ static void overlay_load(const char *dir,int required) {
 /* TOTK_ROMFS_PATCHES (default extracted/v0/romfs-patches; 0 = none), and with a true-2K output bigger than 1920x1080 also
    <TOTK_ROMFS_PATCHES_OUT, default extracted/v0/romfs-patches-out>/<w>x<h> (the HeapDef sizes, scripts/make_output_res_overlay.py). */
 static void overlay_init(void) {
- const char *dir=getenv("TOTK_ROMFS_PATCHES");if(!dir||strcmp(dir,"0"))overlay_load(dir?dir:"extracted/v0/romfs-patches",0);
+ const char *dir=getenv("TOTK_ROMFS_PATCHES");if(!dir||strcmp(dir,"0"))overlay_load(dir?dir:"extracted/" TOTK_GAME_DIR "/romfs-patches",0);
  unsigned w,h;if(runtime_output_res(&w,&h)&&runtime_output_res_extra_bytes()){const char *out=getenv("TOTK_ROMFS_PATCHES_OUT");char d[4096];
-  need(snprintf(d,sizeof(d),"%s/%ux%u",out?out:"extracted/v0/romfs-patches-out",w,h)<(int)sizeof(d),"RomFS output overlay path");overlay_load(d,1);}
+  need(snprintf(d,sizeof(d),"%s/%ux%u",out?out:"extracted/" TOTK_GAME_DIR "/romfs-patches-out",w,h)<(int)sizeof(d),"RomFS output overlay path");overlay_load(d,1);}
 }
 void runtime_fs_init(void) {
  if(image_fd>=0)return;
- const char *dir=getenv("TOTK_ROMFS");if(!dir)dir="extracted/v0/romfs";char path[4096];
+ const char *dir=getenv("TOTK_ROMFS");if(!dir)dir="extracted/" TOTK_GAME_DIR "/romfs";char path[4096];
  need(snprintf(path,sizeof(path),"%s/runtime-index.bin",dir)<(int)sizeof(path),"RomFS path");int fd=open(path,O_RDONLY);need(fd>=0,"RomFS index missing");
  struct stat st;need(fstat(fd,&st)==0&&st.st_size>=24&&st.st_size<128*1024*1024,"RomFS index size");runtime_boot_progress("读取资源索引",0,0);sha_fd(fd,ROMFS_INDEX_SHA256,0,NULL);
  index_size=(size_t)st.st_size;index_bytes=mmap(NULL,index_size,PROT_READ,MAP_PRIVATE,fd,0);close(fd);need(index_bytes!=MAP_FAILED,"map RomFS index");

@@ -1,4 +1,5 @@
 #include "game_patches.h"
+#include "game_version.h"
 #include "world_survey.h"
 #include <TargetConditionals.h>
 #include <stdio.h>
@@ -22,13 +23,13 @@
 typedef struct { uint64_t offset; uint32_t original, replacement; const char *what; } GamePatch;
 
 static const GamePatch fps60_sites[] = {
-    {0x8f6c60, 0x6b08015f, 0x7100055f, "clamp: cmp w10, #1 (was cmp w10, w8 = minimum)"},
-    {0x8f6c64, 0x1a89b10a, 0x1a9fa52a, "clamp: csinc w10, w9, wzr, ge (desired = max(desired, 1))"},
-    {0x8f6c88, 0xb9401a8a, 0xd503201f, "lower trigger: nop the stored-candidate load (try lower when desired < current)"},
-    {0x8f6d18, 0x6b08015f, 0x7100055f, "raise path: cmp w10, #1"},
-    {0x8f6d28, 0x1a88c1ac, 0x1a9fc5ac, "raise path: csinc w12, w13, wzr, gt (next lower candidate floors at 1)"},
-    {0x8f6d7c, 0xb9400288, 0x52800028, "lower path: mov w8, #1 (minimum interval 1)"},
-    {0x8f6d98, 0x2a0a03f5, 0x1a9fa555, "lower path: csinc w21, w10, wzr, ge (result never below 1)"},
+    {GAME_ADDR(0x8f6c60), 0x6b08015f, 0x7100055f, "clamp: cmp w10, #1 (was cmp w10, w8 = minimum)"},
+    {GAME_ADDR(0x8f6c64), 0x1a89b10a, 0x1a9fa52a, "clamp: csinc w10, w9, wzr, ge (desired = max(desired, 1))"},
+    {GAME_ADDR(0x8f6c88), 0xb9401a8a, 0xd503201f, "lower trigger: nop the stored-candidate load (try lower when desired < current)"},
+    {GAME_ADDR(0x8f6d18), 0x6b08015f, 0x7100055f, "raise path: cmp w10, #1"},
+    {GAME_ADDR(0x8f6d28), 0x1a88c1ac, 0x1a9fc5ac, "raise path: csinc w12, w13, wzr, gt (next lower candidate floors at 1)"},
+    {GAME_ADDR(0x8f6d7c), 0xb9400288, 0x52800028, "lower path: mov w8, #1 (minimum interval 1)"},
+    {GAME_ADDR(0x8f6d98), 0x2a0a03f5, 0x1a9fa555, "lower path: csinc w21, w10, wzr, ge (result never below 1)"},
 };
 
 static int fps60_enabled(void) {
@@ -116,10 +117,10 @@ static void patch_realtime(Module *m) {
     uint64_t data_off = (m->file_size + 0x3fff) & ~0x3fffULL;
     if (data_off + 0x4000 != m->size || data_off & 0xfff) runtime_fail("real-time frame-step page layout");
     static const struct { uint64_t off; uint32_t original; } sites[] = {
-        {0x7a83f4,0x1e220020}, {0x7a83f8,0x52a84e08}, {0x7a83fc,0x1e270101},
-        {0x7a8400,0x1e2c1002}, {0x7a840c,0x1e211801}, {0x7a8410,0x1e220800},
-        {0x8f68b8,0xbd425e60}, {0x8f68bc,0x1e2c1001},
-        {0x8f68cc,0x5e21d800}, {0x8f68d0,0x1e210800}
+        {GAME_ADDR(0x7a83f4),0x1e220020}, {GAME_ADDR(0x7a83f8),0x52a84e08}, {GAME_ADDR(0x7a83fc),0x1e270101},
+        {GAME_ADDR(0x7a8400),0x1e2c1002}, {GAME_ADDR(0x7a840c),0x1e211801}, {GAME_ADDR(0x7a8410),0x1e220800},
+        {GAME_ADDR(0x8f68b8),0xbd425e60}, {GAME_ADDR(0x8f68bc),0x1e2c1001},
+        {GAME_ADDR(0x8f68cc),0x5e21d800}, {GAME_ADDR(0x8f68d0),0x1e210800}
     };
     for (size_t i = 0; i < sizeof sites / sizeof *sites; i++) {
         uint32_t word = 0;
@@ -129,16 +130,16 @@ static void patch_realtime(Module *m) {
         if (word != sites[i].original) {
             fprintf(stderr,"[totk] real-time frame-step main+%#llx: found %08x expected %08x\n",
                     (unsigned long long)sites[i].off, word, sites[i].original);
-            runtime_fail("real-time frame-step requires TOTK v1.0.0 original instructions");
+            runtime_fail("real-time frame-step requires matching game-version original instructions");
         }
     }
     const uint32_t nop = 0xd503201f;
     uint32_t repl[] = {
-        adrp_x9((uintptr_t)m->base + 0x7a83f4, (uintptr_t)m->base + data_off),
+        adrp_x9((uintptr_t)m->base + GAME_ADDR(0x7a83f4), (uintptr_t)m->base + data_off),
         0xbd400120, /* ldr s0, [x9]       : ratio = dt * 30 */
         0xbd400521, /* ldr s1, [x9, #4]   : dt in seconds  */
         nop, nop, nop,
-        adrp_x9((uintptr_t)m->base + 0x8f68b8, (uintptr_t)m->base + data_off),
+        adrp_x9((uintptr_t)m->base + GAME_ADDR(0x8f68b8), (uintptr_t)m->base + data_off),
         0xbd400120, /* global ratio, same shared value */
         nop, nop
     };
@@ -164,9 +165,9 @@ static void patch_realtime(Module *m) {
    game's handheld 1280x720 when unset / 0 (the phone always reports handheld mode). The game's final passes scale the
    scene to its output (1280x720 handheld). */
 static const GamePatch render_res_sites[3] = {
-    {0xc630bc, 0x5e21d900, 0, "scvtf s0, s8 -> adrp x9, <data page>"},
-    {0xc630c4, 0xbd0cc660, 0x2d420520, "str s0, [x19, #0xcc4] -> ldp s0, s1, [x9, #16]"},
-    {0xc630c8, 0x5e21d921, 0xbd0cc660, "scvtf s1, s9 -> str s0, [x19, #0xcc4]"},
+    {GAME_ADDR(0xc630bc), 0x5e21d900, 0, "scvtf s0, s8 -> adrp x9, <data page>"},
+    {GAME_ADDR(0xc630c4), 0xbd0cc660, 0x2d420520, "str s0, [x19, #0xcc4] -> ldp s0, s1, [x9, #16]"},
+    {GAME_ADDR(0xc630c8), 0x5e21d921, 0xbd0cc660, "scvtf s1, s9 -> str s0, [x19, #0xcc4]"},
 };
 static int render_res(unsigned *w, unsigned *h) {
     const char *e = getenv("TOTK_RENDER_RES");
@@ -190,7 +191,7 @@ static void patch_render_res(Module *m) {
             if (word != render_res_sites[i].original) {
                 fprintf(stderr, "[totk] render resolution patch main+%#llx: found %08x, expected %08x (%s)\n",
                         (unsigned long long)render_res_sites[i].offset, word, render_res_sites[i].original, render_res_sites[i].what);
-                runtime_fail("render resolution patch: main does not match TOTK v1.0.0");
+                runtime_fail("render resolution patch: main does not match the selected game version");
             }
         }
         for (int i = 0; i < 3; i++) memcpy(m->base + render_res_sites[i].offset, &want[i], 4);
@@ -235,7 +236,7 @@ static int output_res_auto(unsigned *w, unsigned *h) {
 #if TARGET_OS_OSX
     if (getenv("TOTK_EXPORT_IOS")) return 0;
     const char *dir = getenv("TOTK_ROMFS_PATCHES_OUT"); char path[4096];
-    snprintf(path, sizeof path, "%s/2560x1440/manifest.tsv", dir ? dir : "extracted/v0/romfs-patches-out");
+    snprintf(path, sizeof path, "%s/2560x1440/manifest.tsv", dir ? dir : "extracted/" TOTK_GAME_DIR "/romfs-patches-out");
     FILE *f = fopen(path, "r");
     if (!f) { fprintf(stderr, "[totk] true 2K (TOTK_OUTPUT_RES=auto): off, %s is missing (make romfs-patches)\n", path); return 0; }
     fclose(f);
@@ -284,17 +285,17 @@ static void patch_output_res(Module *m) {
     uint64_t data_off = (m->file_size + 0x3fff) & ~0x3fffULL;
     if (data_off + 0x4000 != m->size || data_off & 0xfff) runtime_fail("output resolution data page layout");
     const GamePatch sites[5] = {
-        {0xe996ac, 0xd280f008, 0xd2800000u | (w << 5) | 8u, "mov x8, #0x780 (1920) -> mov x8, #w (the swapchain)"},
-        {0xe996b0, 0xf2c08708, 0xf2c00000u | (h << 5) | 8u, "movk x8, #0x438, lsl #32 (1080) -> movk x8, #h, lsl #32"},
-        {0xc630a4, 0xaa1403e0, adrp_reg(21, (uintptr_t)m->base + 0xc630a4, (uintptr_t)m->base + data_off), "mov x0, x20 -> adrp x21, <data page>"},
-        {0xc630a8, 0x94000082, 0xf90016b3, "bl main+0xc632b0 (the parameters' output size) -> str x19, [x21, #40] (the renderer)"},
-        {0xc630ac, 0xf9400015, 0xf94012b5, "ldr x21, [x0] -> ldr x21, [x21, #32] (the output size)"},
+        {GAME_ADDR(0xe996ac), 0xd280f008, 0xd2800000u | (w << 5) | 8u, "mov x8, #0x780 (1920) -> mov x8, #w (the swapchain)"},
+        {GAME_ADDR(0xe996b0), 0xf2c08708, 0xf2c00000u | (h << 5) | 8u, "movk x8, #0x438, lsl #32 (1080) -> movk x8, #h, lsl #32"},
+        {GAME_ADDR(0xc630a4), 0xaa1403e0, adrp_reg(21, (uintptr_t)m->base + GAME_ADDR(0xc630a4), (uintptr_t)m->base + data_off), "mov x0, x20 -> adrp x21, <data page>"},
+        {GAME_ADDR(0xc630a8), GAME_OUTPUT_CALL_WORD, 0xf90016b3, "bl main+0xc632b0 (the parameters' output size) -> str x19, [x21, #40] (the renderer)"},
+        {GAME_ADDR(0xc630ac), 0xf9400015, 0xf94012b5, "ldr x21, [x0] -> ldr x21, [x21, #32] (the output size)"},
     };
     for (int i = 0; i < 5; i++) {
         uint32_t word; memcpy(&word, m->base + sites[i].offset, 4);
         if (word != sites[i].original) {
             fprintf(stderr, "[totk] output resolution patch main+%#llx: found %08x, expected %08x (%s)\n", (unsigned long long)sites[i].offset, word, sites[i].original, sites[i].what);
-            runtime_fail("output resolution patch: main does not match TOTK v1.0.0");
+            runtime_fail("output resolution patch: main does not match the selected game version");
         }
     }
     output_page = m->base + data_off; output_w = w; output_h = h;
@@ -345,7 +346,7 @@ static void check_site(const Module *m, const GamePatch *p) {
     if (word != p->original) {
         fprintf(stderr, "[totk] 60 FPS patch main+%#llx: found %08x, expected %08x (%s)\n",
                 (unsigned long long)p->offset, word, p->original, p->what);
-        runtime_fail("60 FPS patch: main does not match TOTK v1.0.0");
+        runtime_fail("60 FPS patch: main does not match the selected game version");
     }
 }
 
@@ -381,5 +382,5 @@ void runtime_game_patches(Module *m) {
     }
     for (size_t i = 0; i < n; i++) check_site(m, &fps60_sites[i]);   /* verify all before writing any */
     for (size_t i = 0; i < n; i++) memcpy(m->base + fps60_sites[i].offset, &fps60_sites[i].replacement, 4);
-    fprintf(stderr, "[totk] 60 FPS patch: %zu instructions in the present-interval controller main+0x8f6bec (interval range 1..3)\n", n);
+    fprintf(stderr, "[totk] %s 60 FPS patch: %zu instructions (interval range 1..3)\n", TOTK_GAME_VERSION, n);
 }

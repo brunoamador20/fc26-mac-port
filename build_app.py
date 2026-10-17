@@ -3,11 +3,11 @@
 
     python3 build_app.py <game.xci|game.nsp> -k <prod.keys> [-o "<output>.app"] [--work <folder>]
 
-Supported: The Legend of Zelda: Tears of the Kingdom, base game version 1.0.0 (title 0100F2C0115B6000), as an XCI or NSP.
+Supported: TOTK base 1.0.0 (0100F2C0115B6000), XCI or NSP; optional --update with the separate cumulative 1.1.2 NSP.
 NSPs need common tickets (unless rights-free) and a separate shared-font source. No iPhone/iOS builds are supported.
 Nothing from the game is in this repository; everything is made from your files on your Mac. Key values are never printed.
 
-Steps (each one checked against games/totk/assets/expected-v1.0.0.json, so a damaged dump or another version stops the
+Steps (each one checked against games/totk/assets/expected-v<version>.json, so a damaged dump or another version stops the
 build at the first wrong file):
   1. code: ExeFS out of the XCI or NSP, the three code modules rewritten for Apple silicon (games/totk/third_party/d2r)
   2. data: RomFS (17 GB), the system shared fonts (from XCI firmware or an explicit font source), the RomFS overlays
@@ -29,6 +29,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent
 GAME = REPO / 'games/totk'
 EXPECTED = json.loads((GAME / 'assets/expected-v1.0.0.json').read_text())
+UPDATED = json.loads((GAME / 'assets/expected-v1.1.2.json').read_text())
+HACTOOL = ('https://github.com/SciresM/hactool.git', '1d64a83450e025622f3468c28fc4164dad2c5ef6')
 APP_NAME = 'Tears of the Kingdom'
 BUNDLE_ID = 'org.macnativegames.totk'
 # Pinned upstream sources fetched at build time (repository, commit)
@@ -204,36 +206,42 @@ def fonts_valid(folder):
         return False
 
 
-def step_code(tree, game, keys, env, logs):
+def step_code(tree, game, keys, env, logs, *, version="v0"):
+    expected = EXPECTED if version == "v0" else UPDATED
+    update_args = [] if version == "v0" else ["--update"]
     py = tree / '.venv/bin/python'
-    exefs = tree / 'extracted/v0/exefs'
-    want = EXPECTED['exefs_sha256']
+    exefs = tree / f'extracted/{version}/exefs'
+    want = expected['exefs_sha256']
     manifest = exefs.parent / 'extraction-manifest.json'
     if not source_matches(manifest, game) or not all((exefs / n).is_file() and sha256(exefs / n) == h for n, h in want.items()):
         say('1/4 code: extracting the ExeFS from the game file')
         if exefs.exists():
             shutil.rmtree(exefs)
-        run([py, 'scripts/extract_exefs.py', game, '--keys', keys, '--output', exefs], logs / 'extract_exefs.log', cwd=tree)
+        run([py, 'scripts/extract_exefs.py', game, '--keys', keys, '--output', exefs, *update_args], logs / f'extract_exefs-{version}.log', cwd=tree)
         for n, h in want.items():
+            if not (exefs / n).is_file():
+                raise BuildError(f'ExeFS {n} is missing; not the supported version')
             check(f'ExeFS {n}', sha256(exefs / n), h)
-    if not (tree / 'extracted/v0/elf/main-inventory.json').exists():
-        run([py, 'scripts/prepare_modules.py', exefs, '--output', tree / 'extracted/v0/elf'], logs / 'prepare_modules.log', cwd=tree)
-    out = tree / 'rewritten/v0'
+    if not (tree / f'extracted/{version}/elf/main-inventory.json').exists():
+        run([py, 'scripts/prepare_modules.py', exefs, '--output', tree / f'extracted/{version}/elf'], logs / 'prepare_modules.log', cwd=tree)
+    out = tree / f'rewritten/{version}'
     out.mkdir(parents=True, exist_ok=True)
     for name in ('sdk', 'subsdk0', 'main'):
-        image, h = out / f'{name}.patched.bin', EXPECTED['rewritten_sha256'][f'{name}.patched.bin']
+        image, h = out / f'{name}.patched.bin', expected['rewritten_sha256'][f'{name}.patched.bin']
         if image.exists() and sha256(image) == h:
             continue
         say(f'1/4 code: rewriting {name} for Apple silicon' + (' (the big one: about a minute)' if name == 'main' else ''))
-        run([py, 'third_party/d2r/patch_nso.py', exefs / name, out, name], logs / f'rewrite_{name}.log', cwd=tree,
+        run([py, 'third_party/d2r/patch_nso.py', exefs / name, out, name], logs / f'rewrite_{version}_{name}.log', cwd=tree,
             env=dict(env, DM_RULESET='native', DM_PRIVATE_GATES='0'))
         check(f'rewritten {name}', sha256(image), h)
     # The loader binds itself to these images (scripts/prepare_runtime.py): they are the same bytes as the rewrite that
     # was verified site by site (python3 games/totk/scripts/verify_rewrites.py re-runs that verification, hours).
-    report = dict(format=1, status='pass', rom_version='1.0.0', scope='hash match with the verified 1.0.0 rewrite',
-                  module_file_sha256={**{f'extracted/v0/exefs/{n}': want[n] for n in ('main', 'sdk', 'subsdk0')},
-                                      **{f'rewritten/v0/{n}.patched.bin': EXPECTED['rewritten_sha256'][f'{n}.patched.bin'] for n in ('main', 'sdk', 'subsdk0')}})
-    (tree / 'analysis/phase12-validation.json').write_text(json.dumps(report, indent=2) + '\n')
+    report = dict(format=1, status='pass', rom_version=version, scope=f'hash match with verified {expected["display_version"]} rewrite',
+                  module_file_sha256={**{f'extracted/{version}/exefs/{n}': want[n] for n in ('main', 'sdk', 'subsdk0')},
+                                      **{f'rewritten/{version}/{n}.patched.bin': expected['rewritten_sha256'][f'{n}.patched.bin'] for n in ('main', 'sdk', 'subsdk0')}})
+    report_path = tree / ('analysis/phase12-validation.json' if version == 'v0' else 'analysis/v112-port/phase12-validation.json')
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2) + '\n')
 
 
 def step_data(tree, game, keys, logs, *, firmware=None, shared_fonts=None):
@@ -280,6 +288,52 @@ def step_data(tree, game, keys, logs, *, firmware=None, shared_fonts=None):
         run([py, 'scripts/make_output_res_overlay.py', '2560x1440'], logs / 'output_res_overlay.log', cwd=tree)
 
 
+def build_hactool(tree, logs):
+    source = tree.parent / 'src/hactool'
+    git_fetch(*HACTOOL, source, logs/'fetch-hactool.log')
+    # Add an explicit private title-key file, so base NSP and update tickets do not
+    # need command-line keys or changes to the player's HOME/.switch files.
+    main = source/'main.c'
+    text = main.read_text()
+    old = 'FILE *titlekeyfile = open_key_file("title");'
+    new = 'FILE *titlekeyfile = getenv("MNG_TITLE_KEYS") ? fopen(getenv("MNG_TITLE_KEYS"), "rb") : open_key_file("title");'
+    if new not in text:
+        if text.count(old) != 1:
+            raise BuildError('pinned hactool title-key hook changed')
+        main.write_text(text.replace(old, new))
+    config = source/'config.mk'
+    if not config.exists():
+        shutil.copy2(source/'config.mk.template', config)
+    run(['make', '-j2', 'CC=clang'], logs/'hactool-build.log', cwd=source)
+    return source/'hactool'
+
+
+def step_update_data(tree, game, update, keys, logs):
+    folder = tree/'extracted/v112/romfs'
+    index = folder/'index.json'
+    valid = False
+    if index.is_file() and (folder/'romfs.bin').is_file():
+        try:
+            report = json.loads(index.read_text())
+            valid = (report.get('status') == 'pass' and report['romfs_sha256'] == UPDATED['romfs']['sha256']
+                     and (folder/'romfs.bin').stat().st_size == UPDATED['romfs']['size'])
+        except (ValueError, KeyError):
+            pass
+    if not valid:
+        hactool = build_hactool(tree, logs)
+        if folder.exists():
+            shutil.rmtree(folder)
+        say('2/4 update: merging base + 1.1.2 and verifying all IVFC levels')
+        run([tree/'.venv/bin/python', 'scripts/extract_update_romfs.py', game, update,
+             '--keys', keys, '--hactool', hactool, '--output', folder], logs/'update-romfs.log', cwd=tree)
+        report = json.loads(index.read_text())
+        check('1.1.2 RomFS', report['romfs_sha256'], UPDATED['romfs']['sha256'])
+        check('1.1.2 RomFS size', report['romfs_size'], UPDATED['romfs']['size'])
+    for script, arguments in [('make_romfs_patches.py', []), ('make_output_res_overlay.py', ['2560x1440'])]:
+        run([tree/'.venv/bin/python', 'scripts/'+script, *arguments, '--version', 'v112'],
+            logs/('v112-'+script+'.log'), cwd=tree)
+
+
 def build_spirv_cross(tree, logs):
     """The spirv-cross program with clang (the sources and flags of SPIRV-Cross's CMake Release build of it)."""
     src, out = tree / 'tooling/spirv-cross', tree / 'build/spirv-cross'
@@ -307,10 +361,10 @@ def step_shaders(tree, logs):
                          f'totk_xlate.sha256); check it out again, or rebuild it with games/totk/tools/totk_xlate/publish_native.sh')
 
 
-def step_binary(tree, game, keys, env, logs):
+def step_binary(tree, game, keys, env, logs, *, version="v0"):
     say('4/4 app: building the game binary and the launcher')
-    run(['make', 'runtime'], logs / 'runtime.log', cwd=tree, env=env)
-    run(['xcrun', 'clang', '-fobjc-arc', '-O2', '-Wall', '-Ithird_party/d2r_gfx/gfx/nvn', 'app/launcher.m', '-framework', 'AppKit',
+    run(['make', 'runtime' if version == 'v0' else 'runtime-v112'], logs / 'runtime.log', cwd=tree, env=env)
+    run(['xcrun', 'clang', '-fobjc-arc', '-O2', '-Wall', '-Ithird_party/d2r_gfx/gfx/nvn', '-Iruntime', *([] if version == 'v0' else ['-DTOTK_GAME_V112=1']), 'app/launcher.m', '-framework', 'AppKit',
          '-o', 'build/app-launcher'], logs / 'launcher.log', cwd=tree, env=env)
     if not (tree / 'build/AppIcon.icns').exists():   # the game's own icon from its control data; optional
         try:
@@ -333,22 +387,24 @@ def copy_tree(src, dst):
             clone(p, dst / p.relative_to(src))
 
 
-def step_app(tree, out, logs):
+def step_app(tree, out, logs, *, version="v0"):
+    expected = EXPECTED if version == "v0" else UPDATED
     tmp = out.with_name(out.name + '.partial')
     if tmp.exists():
         shutil.rmtree(tmp)
     res = tmp / 'Contents/Resources/totk'
-    for rel in ('build/totk-native', 'build/pso_manifest.tsv', 'build/spirv-cross/spirv-cross',
-                'rewritten/v0/main.patched.bin', 'rewritten/v0/sdk.patched.bin',
-                'rewritten/v0/subsdk0.patched.bin', 'extracted/v0/romfs/romfs.bin', 'extracted/v0/romfs/runtime-index.bin'):
+    clone(tree / ('build/totk-native' if version == 'v0' else 'build/totk-native-v112'), res/'build/totk-native')
+    for rel in ('build/pso_manifest.tsv', 'build/spirv-cross/spirv-cross',
+                f'rewritten/{version}/main.patched.bin', f'rewritten/{version}/sdk.patched.bin',
+                f'rewritten/{version}/subsdk0.patched.bin', f'extracted/{version}/romfs/romfs.bin', f'extracted/{version}/romfs/runtime-index.bin'):
         clone(tree / rel, res / rel)
     clone(tree / 'prebuilt/macos-arm64/totk_xlate', res / 'build/shader-service/totk_xlate')   # where totk_shader_rt.m looks for it
-    for rel in ('extracted/v0/romfs-patches', 'extracted/v0/romfs-patches-out', 'extracted/firmware/shared-fonts'):
+    for rel in (f'extracted/{version}/romfs-patches', f'extracted/{version}/romfs-patches-out', 'extracted/firmware/shared-fonts'):
         copy_tree(tree / rel, res / rel)
     clone(tree / 'build/app-launcher', tmp / 'Contents/MacOS/TOTK')
     info = dict(CFBundleDevelopmentRegion='en', CFBundleExecutable='TOTK', CFBundleIdentifier=BUNDLE_ID, CFBundleName=APP_NAME,
-                CFBundleDisplayName=APP_NAME, CFBundlePackageType='APPL', CFBundleShortVersionString=EXPECTED['display_version'],
-                CFBundleVersion='1', LSMinimumSystemVersion='26.0', NSHighResolutionCapable=True,
+                CFBundleDisplayName=APP_NAME, CFBundlePackageType='APPL', CFBundleShortVersionString=expected['display_version'],
+                CFBundleVersion=str(expected['version'] + 1), LSMinimumSystemVersion='26.0', NSHighResolutionCapable=True,
                 LSApplicationCategoryType='public.app-category.action-games', LSSupportsGameMode=True,
                 GCSupportsControllerUserInteraction=True)
     icon = tree / 'build/AppIcon.icns'
@@ -364,9 +420,10 @@ def step_app(tree, out, logs):
 
 
 def parse_args(argv):
-    ap = argparse.ArgumentParser(description='Build a macOS-only native app from your own Tears of the Kingdom 1.0.0 XCI or NSP.',
+    ap = argparse.ArgumentParser(description='Build one native macOS app from TOTK base 1.0.0 (XCI/NSP), optionally with the separate 1.1.2 update.',
                                  epilog='example: python3 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys')
     ap.add_argument('game', type=Path, help='the game file (.xci or .nsp), base game 1.0.0')
+    ap.add_argument('--update', type=Path, help='separate cumulative 1.1.2 update NSP; outputs the same single app')
     ap.add_argument('-k', '--keys', type=Path, required=True, help='your prod.keys')
     ap.add_argument('-o', '--out', type=Path, help=f'the app to write (default: "{APP_NAME}.app" next to the game file)')
     ap.add_argument('--work', type=Path, help='work folder (default: TOTK_build next to the game file)')
@@ -388,6 +445,10 @@ def main(argv):
     if out.suffix != '.app':
         raise BuildError(f'the output must end in .app: {out}')
     kind = input_kind(game)
+    update = args.update.expanduser().resolve() if args.update else None
+    if update and (not update.is_file() or input_kind(update) != 'nsp'):
+        raise BuildError('--update must be a separate 1.1.2 NSP')
+    version = 'v112' if update else 'v0'
     firmware = args.firmware.expanduser().resolve() if args.firmware else None
     shared_fonts = args.shared_fonts.expanduser().resolve() if args.shared_fonts else None
     if firmware and not firmware.is_dir():
@@ -400,6 +461,8 @@ def main(argv):
     py = prerequisites(args)
     free = shutil.disk_usage(work.parent if work.parent.exists() else game.parent).free / 2**30
     say(f'work folder {work} ({free:.0f} GB free on its volume)')
+    if update and free < 60 and not (work / 'totk/extracted/v0/romfs/romfs.bin').exists():
+        raise BuildError('needs about 60 GB free for a fresh base + update build (35 GB extra with base data cached)')
     if free < 25 and not (work / 'totk/extracted/v0/romfs/romfs.bin').exists():
         raise BuildError('needs about 25 GB free for the work folder (the app itself is an APFS clone of it when on the same volume)')
     logs = work / 'logs'
@@ -407,11 +470,15 @@ def main(argv):
     t0 = time.time()
     tree = prepare_work(work, py, logs)
     step_code(tree, game, keys, env, logs)
+    if update:
+        step_code(tree, update, keys, env, logs, version='v112')
     step_data(tree, game, keys, logs, firmware=firmware, shared_fonts=shared_fonts)
+    if update:
+        step_update_data(tree, game, update, keys, logs)
     step_shaders(tree, logs)
-    step_binary(tree, game, keys, env, logs)
+    step_binary(tree, game, keys, env, logs, version=version)
     say(f'4/4 app: assembling {out}')
-    step_app(tree, out, logs)
+    step_app(tree, out, logs, version=version)
     # macOS scans a new app the first time it runs (minutes for 16 GB, with nothing on screen): run it once here, in its
     # check-only mode, so the player's first start is immediate.
     say('4/4 app: macOS checks the new app once (a few minutes for the 16 GB bundle)')

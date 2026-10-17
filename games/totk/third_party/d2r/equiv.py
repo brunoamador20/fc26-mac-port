@@ -138,7 +138,11 @@ def state(u, st, patched):
     tp = u.reg_read(UC_ARM64_REG_TPIDR_EL0)
     if patched: g[18] = struct.unpack('<Q', u.mem_read(TSD + 8 * SLOT18, 8))[0]; tp = struct.unpack('<Q', u.mem_read(TSD + 8 * SLOTTLS, 8))[0]
     g = g + [tp]
-    w = [x for x in st['w'] if not (patched and TSD <= x[0] < TSD + 0x10000)]
+    # Only the runtime's actual TLS slots are private. A guest register-offset
+    # store may legitimately land elsewhere in the mapped TSD page (v1.1.2
+    # main+0x24dd68 did so in the fixed random corpus). Do not hide that write.
+    private_slots = {TSD + 8 * slot for slot in KEY_SLOT.values()}
+    w = [x for x in st['w'] if not (patched and x[0] in private_slots and x[1] == 8)]
     return g, u.reg_read(UC_ARM64_REG_SP), u.reg_read(UC_ARM64_REG_NZCV), [u.reg_read(r) for r in VR], w, st['fault']
 
 def run(u, st, start, patched, init):

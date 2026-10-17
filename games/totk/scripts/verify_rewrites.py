@@ -32,32 +32,34 @@ def gate(command, output, environment):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--version', choices=('v0','v112'), default='v0')
     parser.add_argument('--collect-existing', action='store_true')
     parser.add_argument('--jobs', type=int, default=2)
     args = parser.parse_args()
     if args.jobs < 1:
         parser.error('--jobs must be positive')
-    analysis = ROOT / 'analysis'
-    analysis.mkdir(exist_ok=True)
+    version = args.version
+    analysis = ROOT / ('analysis' if version == 'v0' else 'analysis/v112-port')
+    analysis.mkdir(parents=True, exist_ok=True)
     vendor = ROOT / 'third_party/d2r'
-    outputs = ROOT / 'rewritten/v0'
+    outputs = ROOT / f'rewritten/{version}'
     source_hash = digest(vendor / 'patch_nso.py')
     if (outputs / 'build_src.sha256').read_text().split()[0] != source_hash:
         raise RuntimeError('Rewrite source changed since artifacts were generated; rebuild first')
     environment = os.environ.copy()
     environment.setdefault('LLVM_BIN', '/opt/homebrew/opt/llvm/bin')
     environment['DM_VCACHE'] = str(analysis / 'llvm-cache')
-    inputs = [ROOT / f'extracted/v0/exefs/{module}' for module in ['main', 'sdk', 'subsdk0']]
+    inputs = [ROOT / f'extracted/{version}/exefs/{module}' for module in ['main', 'sdk', 'subsdk0']]
     binaries = [outputs / f'{module}.patched.bin' for module in ['main', 'sdk', 'subsdk0']]
     fingerprints = {str(path.relative_to(ROOT)): digest(path) for path in inputs + binaries}
-    extraction_manifest = ROOT / 'extracted/v0/extraction-manifest.json'
+    extraction_manifest = ROOT / f'extracted/{version}/extraction-manifest.json'
     extracted = {entry['name']: entry['sha256'] for entry in json.loads(extraction_manifest.read_text())['files']}
     for path in inputs:
         if fingerprints[str(path.relative_to(ROOT))] != extracted[path.name]:
             raise RuntimeError(f'Module differs from verified ExeFS extraction: {path.name}')
     modules = {}
     for module in ['main', 'sdk', 'subsdk0']:
-        nso = ROOT / f'extracted/v0/exefs/{module}'
+        nso = ROOT / f'extracted/{version}/exefs/{module}'
         structure = analysis / f'{module}-structure-v3.log'
         equivalence = analysis / f'{module}-equivalence-v3.log'
         if not args.collect_existing:
@@ -81,12 +83,12 @@ def main():
     atomic_json = analysis / 'exclusive-window-tests.json'
     if not args.collect_existing:
         gate([sys.executable, str(ROOT / 'scripts/test_call_window.py')], call_log, environment)
-        gate([sys.executable, str(ROOT / 'scripts/test_exclusive_windows.py'), str(outputs), str(inputs[0])], atomic_json, environment)
+        gate([sys.executable, str(ROOT / 'scripts/test_exclusive_windows.py'), str(outputs), str(inputs[0]), "--version", version], atomic_json, environment)
         gate(['make', 'probe-call'], analysis / 'native-call-build.log', environment)
     if not re.search(r'^OK$', call_log.read_text(), re.M):
         raise RuntimeError('Prepared-call differential tests did not pass')
     atomic = json.loads(atomic_json.read_text())
-    native = json.loads((analysis / 'native-call-probe.json').read_text())
+    native = json.loads((ROOT / 'analysis/native-call-probe.json').read_text())
     if atomic['status'] != 'pass' or atomic['wrong_exit_negative_controls_detected'] != 2:
         raise RuntimeError('Atomic-window regression tests did not pass')
     if native['status'] != 'pass' or native['completed_calls'] != 20000 or native['errors'] != 0:
@@ -98,7 +100,7 @@ def main():
     source_files += [ROOT / 'scripts' / name for name in ['test_call_window.py', 'test_exclusive_windows.py', 'native_call_probe.c', 'emit_native_call_fixture.py', 'verify_rewrites.py']]
     summary = {
         'format': 'totk-native-phase12-validation-v1', 'status': 'pass',
-        'recorded_at': datetime.now(timezone.utc).isoformat(), 'rom_version': 'v0',
+        'recorded_at': datetime.now(timezone.utc).isoformat(), 'rom_version': version,
         'modules': modules, 'module_file_sha256': fingerprints,
         'validation_source_sha256': {str(p.relative_to(ROOT)): digest(p) for p in source_files},
         'extraction_manifest_sha256': digest(extraction_manifest),

@@ -196,7 +196,8 @@ void runtime_swkbd_selftest(void) {
 }
 
 /* ---------- probe (make probe-swkbd): guest SDK arguments, main's PLT stub, no window ---------- */
-enum { MAIN_PLT_SHOW_KEYBOARD = 0x2aa4fa0, MAIN_GOT_SHOW_KEYBOARD = 0x453f648 };   /* scripts/re/calls.py main <ShowKeyboard> */
+#include "game_version.h"
+enum { MAIN_PLT_SHOW_KEYBOARD = GAME_ADDR(0x2aa4fa0), MAIN_GOT_SHOW_KEYBOARD = GAME_ADDR(0x453f648) };   /* scripts/re/calls.py main <ShowKeyboard> */
 static unsigned checks;
 static void need(int ok, const char *what) { checks++; if (!ok) { fprintf(stderr, "swkbd probe: %s\n", what); runtime_fail("software keyboard probe failed"); } }
 static void *sym(const char *name) { void *p = runtime_symbol(name); if (!p) { fprintf(stderr, "swkbd probe: no %s\n", name); runtime_fail("software keyboard probe: guest symbol"); } return p; }

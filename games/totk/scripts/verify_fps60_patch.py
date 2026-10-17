@@ -11,20 +11,26 @@ from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM
 from unicorn.arm64_const import UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_SP, UC_ARM64_REG_LR, UC_ARM64_REG_PC
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 
-IMAGE = 'rewritten/v0/main.patched.bin'
-FN, FN_END = 0x8f6bec, 0x8f6da0
+from game_version_test import options, offsets, adrp_ldr
+args=options();addr=offsets(args.version)
+IMAGE = f'rewritten/{args.version}/main.patched.bin'
+FN, FN_END = addr(0x8f6c60)-0x74, addr(0x8f6d98)+8
 TICK_GOT, WINDOW_FN_GOT = 0x45577b0, 0x4540c00   # adrp/ldr pairs at main+0x8f6c24 and main+0x8f6ca8
+raw_image=open(IMAGE,'rb').read()
+TICK_GOT=adrp_ldr(raw_image,FN+0x38,FN+0x3c)
+WINDOW_FN_GOT=adrp_ldr(raw_image,FN+0xbc,FN+0xc4)
 TICK_HZ = 19_200_000
 STOP, STUBS, HEAP, STACK = 0x10000, 0x20000, 0x100000, 0x200000
 
 def patch_table():
     src = open('runtime/game_patches.c').read()
+    src = re.sub(r'GAME_ADDR\((0x[0-9a-f]+)\)', r'\1', src)
     # only the 60 FPS controller table: game_patches.c also holds the real-time frame-step and render-resolution tables
     m = re.search(r'fps60_sites\[[^\]]*\] = \{(.*?)\n\};', src, re.S)
     if not m: raise SystemExit('fps60_sites table not found in runtime/game_patches.c')
     rows = re.findall(r'\{(0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+), "', m.group(1))
     if len(rows) != 7: raise SystemExit('expected 7 rows in fps60_sites, found %d' % len(rows))
-    return [tuple(int(x, 16) for x in r) for r in rows]
+    return [(addr(int(a,16)),int(b,16),int(c,16)) for a,b,c in rows]
 
 def function_bytes(patched, skip=()):
     img = open(IMAGE, 'rb').read()
@@ -49,7 +55,7 @@ ASM = {   # tiny stub routines (pre-assembled AArch64)
 class Controller:
     def __init__(self, patched, cand, cooldown, current=2, bias=0.0, threshold=3, cd_init=30, listener=None, skip=()):
         mu = self.mu = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
-        mu.mem_map(0x8f6000, 0x2000); mu.mem_write(FN, function_bytes(patched, skip))
+        mu.mem_map(FN & ~0xfff, 0x2000); mu.mem_write(FN, function_bytes(patched, skip))
         mu.mem_map(STOP, 0x1000); mu.mem_write(STOP, struct.pack('<I', 0xd4200000))   # brk #0
         mu.mem_map(STUBS, 0x1000)
         stub = {}
@@ -112,7 +118,7 @@ for cand in (0, 2, 3):
             base = run(Controller(False, max(cand, 2), cooldown, listener=listener), [(LIGHT, 200), (MEDIUM, 60), (HEAVY, 60), (LIGHT, 300)])
             check('unpatched ' + tag + ': never below 2 (negative control)', min(base) >= 2, 'min %d' % min(base))
 
-no_trigger = run(Controller(True, 2, 0, listener='ret', skip={0x8f6c88}), [(LIGHT, 300)])
+no_trigger = run(Controller(True, 2, 0, listener='ret', skip={addr(0x8f6c88)}), [(LIGHT, 300)])
 check('negative control: without the lower-trigger site a stored candidate of 2 never reaches 1', 1 not in no_trigger, 'seen %s' % sorted(set(no_trigger)))
 veto = run(Controller(True, 2, 0, listener='veto'), [(LIGHT, 300)])
 check('patched with a vetoing listener stays at 2', set(veto) == {2}, 'seen %s' % sorted(set(veto)))
@@ -120,6 +126,6 @@ biased = run(Controller(True, 2, 0, bias=0.5), [(LIGHT, 200), (12.0, 200)])
 check('bias 0.5: 8 ms frames reach 1, 12 ms frames go back to 2', 1 in biased[:200] and biased[-1] == 2, 'last %d' % biased[-1])
 
 print(json.dumps({'status': 'fail' if failures else 'pass', 'checked': len(results), 'failures': failures,
-                  'scope': 'main+0x8f6bec emulated from the rewritten image; patch rows parsed from runtime/game_patches.c',
+                  'version': args.version, 'scope': 'present controller emulated from the rewritten image; patch rows parsed from runtime/game_patches.c',
                   'results': results}, ensure_ascii=False, indent=1))
 sys.exit(1 if failures else 0)

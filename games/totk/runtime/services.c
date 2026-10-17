@@ -166,7 +166,7 @@ void runtime_guest_resident(uint64_t *resident,uint64_t *dirty,uint64_t *compres
 }
 static void host_diag_init(void) { fprintf(stderr,"[totk] native diagnostics initialized\n"); }
 static void host_oe_init(void) { fprintf(stderr,"[totk] application environment: local macOS process\n"); }
-static void host_aoc_init(void) { fprintf(stderr,"[totk] add-on content: base v0 only\n"); }
+static void host_aoc_init(void) { fprintf(stderr,"[totk] add-on content: no DLC\n"); }
 static void host_error_init(void) { fprintf(stderr,"[totk] error contexts: local diagnostics\n"); }
 static void host_fs_init(void) { runtime_fs_init(); }
 static void host_pctl_init(void) { fprintf(stderr,"[totk] local application parental controls initialized\n"); }

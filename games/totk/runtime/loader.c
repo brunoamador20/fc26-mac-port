@@ -19,6 +19,7 @@
 #include <sys/ucontext.h>
 #include "runtime_tables.h"
 #include "game_patches.h"
+#include "game_version.h"
 #define NM (sizeof(modules)/sizeof(modules[0]))
 pthread_key_t runtime_keys[8];
 static uint64_t timer_calls, svc_calls;
@@ -245,7 +246,7 @@ static void crash(int num,siginfo_t *info,void *context) {
  /* During save load, this optional game object can contain a tagged invalid
     reference. Treat it as absent, as the following cbz path expects. */
  if(num==SIGSEGV&&modules[0].base&&
-    u->uc_mcontext->__ss.__pc==(uintptr_t)modules[0].base+0x15ecb0c&&
+    u->uc_mcontext->__ss.__pc==(uintptr_t)modules[0].base+GAME_ADDR(0x15ecb0c)&&
     (uintptr_t)info->si_addr==0xffff0000ffffffffULL&&
     u->uc_mcontext->__ss.__x[8]==0xffff0000ffffffffULL){
   uintptr_t field=u->uc_mcontext->__ss.__x[19]+0x6b0;
@@ -338,6 +339,7 @@ int runtime_module_offset(uint64_t pc,const char **name,uint64_t *off) {
  for(unsigned i=0;i<NM;i++)if(pc>=(uintptr_t)modules[i].base&&pc<(uintptr_t)modules[i].base+modules[i].size){*name=modules[i].name;*off=pc-(uintptr_t)modules[i].base;return 1;}
  return 0;
 }
+uintptr_t runtime_frame_controller_return_pc(void) { return (uintptr_t)modules[0].base + GAME_ADDR(0x8f6cbc); }
 uint64_t runtime_image_bytes(void) { uint64_t total=0;for(unsigned i=0;i<NM;i++)total+=modules[i].key_off;return page_up(total); }
 static void loader_ready(void) { fprintf(stderr,"[totk] rtld callback: modules linked\n"); }
 static void module_inits(void) {
@@ -347,12 +349,13 @@ static void module_inits(void) {
 }
 void runtime_startup_checkpoint(uintptr_t caller) {
  if(!getenv("TOTK_VERIFY_STARTUP"))return;
- need(caller==(uintptr_t)modules[0].base+0xe995c4,"checkpoint not reached from original nnMain");
+ need(caller==(uintptr_t)modules[0].base+GAME_ADDR(0xe995c4),"checkpoint not reached from original nnMain");
  for(unsigned i=0;i<NM;i++){uint32_t state;memcpy(&state,modules[i].base+modules[i].ctor_flag,4);need(state==2,"constructor checkpoint state");}
- puts("{\"status\":\"pass\",\"phase\":4,\"original_nnMain_return_pc\":\"0xe995c4\",\"scope\":\"all DT_INIT constructor loops completed; original nnMain prefix executed; stops at focus setup\"}");fflush(stdout);_exit(0);
+ printf("{\"status\":\"pass\",\"phase\":4,\"original_nnMain_return_pc\":\"0x%x\",\"scope\":\"all DT_INIT constructor loops completed; original nnMain prefix executed; stops at focus setup\"}\n", GAME_ADDR(0xe995c4));fflush(stdout);_exit(0);
 }
 static void module_finis(void) { runtime_fail("guest exited: module finalizers not yet implemented"); }
 static void boot(void) {
+ fprintf(stderr,"[totk] game version %s\n", TOTK_GAME_VERSION);
  runtime_thread_init();uint32_t main_handle=svc_thread_main_init();
  fprintf(stderr,"[totk] ENTER original nn::init::Start sdk+0xfa060\n");
  ((void(*)(uint64_t,uint64_t,void(*)(void),void(*)(void),void(*)(void)))required("_ZN2nn4init5StartEmmPFvvES2_S2_"))(main_handle,0,loader_ready,module_inits,module_finis);

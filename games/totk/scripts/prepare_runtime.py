@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Bind a native loader to verified v0 images; generated tables stay local."""
+import argparse
 import hashlib
 import json
 import struct
@@ -7,19 +8,25 @@ from pathlib import Path
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / 'build'
-OUT.mkdir(exist_ok=True)
-report = json.loads((ROOT / 'analysis/phase12-validation.json').read_text())
-assert report['status'] == 'pass'
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--version', choices=('v0','v112'), default='v0')
+version = parser.parse_args().version
+OUT = ROOT / ('build' if version == 'v0' else 'build/v112')
+OUT.mkdir(parents=True, exist_ok=True)
+report = json.loads((ROOT / ('analysis/phase12-validation.json' if version == 'v0' else 'analysis/v112-port/phase12-validation.json')).read_text())
+assert report['status'] == 'pass' and report['rom_version'] == version
+if version == 'v112':
+    expected = 'f04fbebdaacbcde0bcca20cbe0caff06bd51f7c8f904d217e5f17efe3308d1ac'
+    assert report['module_file_sha256']['extracted/v112/exefs/main'] == expected, 'Unsupported 1.1.2 main image'
 modules = []
 for name in ['main', 'subsdk0', 'sdk']:
-    path = ROOT / f'rewritten/v0/{name}.patched.bin'
+    path = ROOT / f'rewritten/{version}/{name}.patched.bin'
     image = path.read_bytes()
     digest = hashlib.sha256(image).hexdigest()
     assert digest == report['module_file_sha256'][str(path.relative_to(ROOT))], 'Unverified rewrite'
-    inv = json.loads((ROOT / f'extracted/v0/elf/{name}-inventory.json').read_text())
+    inv = json.loads((ROOT / f'extracted/{version}/elf/{name}-inventory.json').read_text())
     layout = {}
-    for line in (ROOT / f'rewritten/v0/{name}.fixups.tsv').read_text().splitlines():
+    for line in (ROOT / f'rewritten/{version}/{name}.fixups.tsv').read_text().splitlines():
         _, key, value = line.split()
         layout[key] = int(value, 0)
     mod0 = struct.unpack_from('<I', image, 4)[0]
@@ -50,7 +57,7 @@ for name in ['main', 'subsdk0', 'sdk']:
             assert kind != 1027 or 0 <= addend < layout['KEY_PAGE_OFF']
             relocs.append(dict(where=where, kind=kind, symbol=si, addend=addend))
     gates = []
-    for line in (ROOT / f'rewritten/v0/{name}.gates.tsv').read_text().splitlines():
+    for line in (ROOT / f'rewritten/{version}/{name}.gates.tsv').read_text().splitlines():
         ret, kind, arg, original = line.split()
         assert kind in ['cntpct', 'cntvct', 'svc']
         gates.append(dict(ret=int(ret, 0), timer=kind != 'svc', arg=int(arg), original=int(original, 0)))
@@ -68,7 +75,7 @@ for name in ['main', 'subsdk0', 'sdk']:
 main = modules[0]
 target = '_ZN2nn2os13GetSystemTickEv'
 slot = next(r['where'] for r in main['relocs'] if main['symbols'][r['symbol']]['name'] == target and r['kind'] == 1026)
-image = (ROOT / 'rewritten/v0/main.patched.bin').read_bytes()
+image = (ROOT / f'rewritten/{version}/main.patched.bin').read_bytes()
 plt = []
 for address in range(main['layout']['TEXT_END'] - 0x10000, main['layout']['TEXT_END'] - 12, 4):
     a, b, c, d = struct.unpack_from('<IIII', image, address)
@@ -101,5 +108,5 @@ lines.append('};')
 lines.append(f'#define PROBE_PLT {main["probe_plt"]}ULL\n#define PROBE_SLOT {slot}ULL')
 (OUT / 'runtime_tables.h').write_text('\n'.join(lines) + '\n')
 # Details are evidence, not additional source code.
-(ROOT / 'analysis/runtime-layout.json').write_text(json.dumps(modules, indent=2) + '\n')
+(ROOT / ('analysis/runtime-layout.json' if version == 'v0' else 'analysis/v112-port/runtime-layout.json')).write_text(json.dumps(modules, indent=2) + '\n')
 print(json.dumps(dict(modules=len(modules), relocations=sum(len(m['relocs']) for m in modules), original_main_plt=hex(plt[0]), original_main_slot=hex(slot))))

@@ -2075,12 +2075,13 @@ NVN(nvnWindowInitialize, NVNboolean, NVNwindow *w, const NVNwindowBuilder *b) {
    x29 + 0x38), so it is picked up here, and every frame's +0x118 is reported with the controller state (game_work_tick). */
 static int dcmp(const void *a, const void *b);
 static int vm_read8(uint64_t a, uint64_t *out) { vm_size_t got = 0; return a && !(a & 7) && vm_read_overwrite(mach_task_self(), (vm_address_t)a, 8, (vm_address_t)out, &got) == KERN_SUCCESS && got == 8; }
+extern uintptr_t runtime_frame_controller_return_pc(void);
 static void find_game_sys(void) {
+    uintptr_t controller_return = runtime_frame_controller_return_pc();
     uint64_t fp = (uint64_t)(uintptr_t)__builtin_frame_address(0);
     for (int i = 0; i < 24 && fp && !(fp & 7); i++) {
         uint64_t f0, f1; if (!vm_read8(fp, &f0) || !vm_read8(fp + 8, &f1)) return;
-        char w[96]; runtime_describe_address(f1, w, sizeof w);
-        if (!strcmp(w, "main+0x8f6cbc")) { uint64_t sys = 0; if (vm_read8(f0 + 0x38, &sys) && sys) { g_game_sys = sys; LOG("[nvn] 游戏系统对象 %#llx（出图间隔控制器的帧里取得）", (unsigned long long)sys); } return; }
+        if (f1 == controller_return) { uint64_t sys = 0; if (vm_read8(f0 + 0x38, &sys) && sys) { g_game_sys = sys; LOG("[nvn] 游戏系统对象 %#llx（出图间隔控制器的帧里取得）", (unsigned long long)sys); } return; }
         if (f0 == fp) return; fp = f0;
     }
 }

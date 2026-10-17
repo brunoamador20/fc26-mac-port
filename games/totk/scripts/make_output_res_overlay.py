@@ -34,10 +34,13 @@ root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument('size', help='<width>x<height>, e.g. 2560x1440')
 parser.add_argument('--output-root', type=Path, default=root / 'extracted/v0/romfs-patches-out')
+parser.add_argument('--version', choices=('v0','v112'), default='v0')
 args = parser.parse_args()
+version = args.version
+if args.output_root == root / 'extracted/v0/romfs-patches-out': args.output_root = root / f'extracted/{version}/romfs-patches-out'
 w, h = (int(v) for v in args.size.lower().split('x'))
 assert 640 <= w <= 7680 and 360 <= h <= 4320, 'size out of range'
-manifest = json.loads((root / 'extracted/v0/romfs/index.json').read_text())
+manifest = json.loads((root / f'extracted/{version}/romfs/index.json').read_text())
 assert manifest['status'] == 'pass'
 files = {f['path']: f for f in manifest['files']}
 
@@ -52,7 +55,7 @@ def sarc_members(data):
         out[data[offset:data.index(0, offset, start)].decode()] = (start + lo, start + hi)
     return out
 
-with (root / 'extracted/v0/romfs/romfs.bin').open('rb') as image:
+with (root / f'extracted/{version}/romfs/romfs.bin').open('rb') as image:
     def read(path): f = files[path]; image.seek(f['offset']); b = image.read(f['size']); assert len(b) == f['size']; return b
     dictionaries = {}
     pack = zstd.decompress(read('Pack/ZsDic.pack.zs'))

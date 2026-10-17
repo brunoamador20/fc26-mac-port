@@ -108,7 +108,7 @@ def nca(managed=False, title=TITLE, content=0):
 
 def ticket(personalized=False, bad_key=False):
     data = bytearray(0x2c0)
-    struct.pack_into('>I', data, 0, 0x10004)
+    struct.pack_into('<I', data, 0, 0x10004)
     data[0x180:0x190] = encrypt(TITLEKEK, modes.ECB(), bytes(16) if bad_key else CONTENT)
     data[0x281] = int(personalized)
     data[0x2a0:0x2b0] = RIGHTS
