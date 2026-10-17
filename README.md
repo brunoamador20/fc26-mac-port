@@ -1,36 +1,47 @@
 # MacNativeGames
 
-> **请使用你的 AI 助理帮你完成 Mac App 的构建。推荐 Claude Code、Codex，或其他你喜欢的 AI 助理。**
->
+# English
+
 > **Use your AI assistant to help you build the Mac app. We recommend Claude Code, Codex, or any other AI assistant you prefer.**
 
-[中文说明](#中文说明)
+[English](#english) | [中文](#chinese)
 
-Play your own copy of **The Legend of Zelda: Tears of the Kingdom** natively on an Apple silicon Mac. Bring your game file (XCI or NSP) and your `prod.keys`; one script turns them into a Mac app. This project currently supports **Mac only**.
+Play your own copy of **The Legend of Zelda: Tears of the Kingdom** natively on an Apple silicon Mac. Bring your game file (XCI or NSP) and your `prod.keys`; one script turns them into a Mac app. This project currently supports **Mac only**. It is not an emulator: the game's own ARM64 code runs directly on the Apple chip (rewritten only where macOS requires it), the Switch system services are answered by a small host, and the game's NVN graphics are rebuilt on Metal 4. Nothing from the game is in this repository, and the project is not affiliated with Nintendo.
+
+
+**Stuttering when you first start playing or enter a new scene is expected while new shaders compile—don't be surprised.** Performance typically improves as the cache warms up.
+
+## Local testing
+
+Tested on **MacBook Air M4 and Mac mini M4**. Local testing has collected **8,582 shaders**, with performance at approximately **90 FPS after shader warm-up, reaching 120 FPS in menus**.
+
+Shaders are automatically collected, compiled and cached as you play. Returning to previously visited scenes typically brings noticeable improvements in frame rates and smoothness because cached shaders can be reused. **8,582 is the number collected so far in local testing, not the game's total shader count or a collection limit**; the cache continues to grow as you explore.
+
+**Shader prewarming:** The app automatically prewarms the compatible entries in its bundled PSO manifest at startup; no manual setup is needed. Playing adds newly encountered shaders and pipelines to your local `pso_collected.tsv`, which is reused on later launches. To share your collected list, send `~/Library/Application Support/MacNativeGames/TOTK/shader-cache/rt-totk-native-v4-unverified/pso_collected.tsv`. It contains shader and pipeline identifiers, not game saves or compiled shader binaries. Lists are tied to the matching translation-chain version.
+
 
 **iPhone and iPad support is coming soon. iPhone 16 or newer models are recommended for the upcoming iPhone version.**
 
-It is not an emulator: the game's own ARM64 code runs directly on the Apple chip (rewritten only where macOS requires it), the Switch system services are answered by a small host, and the game's NVN graphics are rebuilt on Metal 4. Nothing from the game is in this repository, and the project is not affiliated with Nintendo.
 
 ## What you need
 
 - A Mac with Apple silicon and **macOS 26** or later (the graphics use Metal 4). 16 GB of memory or more is recommended.
 - About **25 GB** of free disk space for the work folder, in addition to your game file. Keep the output app on the **same APFS volume** to share the large data files through cloning. If cloning is unavailable or the app is on another volume, allow roughly **17 GB more** for the app copy.
-- Your Tears of the Kingdom **base game 1.0.0** (`0100F2C0115B6000`) as an **XCI or NSP**, and your `prod.keys`. To build **1.1.2**, also supply its separate cumulative update NSP with `--update`. No intermediate 1.1.0 update is required. Other updates (including **1.2.1 and 1.4.3**), DLC and combined packages remain unsupported.
+- Your Tears of the Kingdom **base game 1.0.0** (`0100F2C0115B6000`) as an **XCI or NSP**, and your `prod.keys`. To build **1.1.2**, supply its separate cumulative update as NSP or NSZ with `--update`; no intermediate 1.1.0 update is required. NSZ is decompressed and its NCA hashes are verified before extraction. **1.4.3 is recognized and its ExeFS hashes are verified, but its runtime code rewrites and address tables are not yet supported**, so the build stops safely. DLC and combined packages are unsupported.
 - For NSP: its common ticket must be included unless the NCAs are rights-free. NSPs do not contain system shared fonts: supply an unpacked firmware NCA directory with `--firmware`, or previously extracted fonts with `--shared-fonts`. The six fonts must match this project’s verified hashes; valid fonts already in the work folder are reused.
 
 ## Build the app
 
 **1. Tools** (once): the Xcode command line tools and [Homebrew](https://brew.sh). An internet connection is needed to install the build dependencies and fetch the pinned SPIRV-Cross source:
 
-```
+```sh
 xcode-select --install
 brew install opus libvpx python@3.14
 ```
 
 **2. Download or clone this repository**, then open Terminal in its `MacNativeGames` folder and run the script with your game file and keys:
 
-```
+```sh
 python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys
 ```
 
@@ -55,6 +66,8 @@ The extracted code modules, rewritten modules, RomFS and shared fonts are checke
 
 ```sh
 python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.1.2.nsp
+# NSZ updates are also accepted:
+python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.1.2.nsz
 # With a base NSP, keep --firmware or --shared-fonts as described above.
 ```
 
@@ -79,7 +92,7 @@ Controllers recognized by macOS (such as DualSense and Xbox controllers) are map
 | F T H G | d-pad left / up / right / down | | Z / C | left / right stick press |
 | Return | + (menu) | | Tab, Esc | − (map) |
 
-Extra keys: **1** MetalFX upscaling on / off (MetalFX is used only for 2K: when the picture on screen is bigger than 1080p), **2** frame interpolation (off → 30+30 → half the refresh rate → unlimited), **3** the game's own 2560×1440 output ↔ 1080p output upscaled by MetalFX. Text entry (naming a horse) uses the Mac keyboard.
+Extra keys: **1** show or hide all on-screen overlays (shortcut reminder, FPS, shader count and system-load readings), **2** frame interpolation (off → 30+30 → half the refresh rate → unlimited), **3** cycle picture mode (MetalFX 2K → native 2K → off). MetalFX is off by default and only starts when you select its mode with **3**; resizing the window never enables it automatically. Text entry (naming a horse) uses the Mac keyboard.
 
 ## Where things are
 
@@ -112,33 +125,50 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 
 ---
 
+<a id="chinese"></a>
+
 # 中文说明
 
-在 Apple 芯片的 Mac 上原生运行你自己的《塞尔达传说 王国之泪》。准备好游戏文件（XCI 或 NSP）和你的 `prod.keys`，一个脚本就把它们做成一个 Mac App。项目目前**只支持 Mac**。
+> **请使用你的 AI 助理帮你完成 Mac App 的构建。推荐 Claude Code、Codex，或其他你喜欢的 AI 助理。**
+
+[英文说明](#english) | [中文说明](#chinese)
+
+在 Apple 芯片的 Mac 上原生运行你自己拥有的**《塞尔达传说 王国之泪》**。准备好游戏文件（XCI 或 NSP）和你的 `prod.keys`，一个脚本就把它们做成一个 Mac App。项目目前**只支持 Mac**。这不是模拟器：游戏自己的 ARM64 代码直接跑在苹果芯片上（只改写 macOS 不允许的地方），Switch 的系统服务由一个小宿主应答，游戏的 NVN 图形在 Metal 4 上重建。本仓库不含任何游戏内容，项目与任天堂无关。
+
+
+**第一次进入游戏或新场景时，新着色器的编译可能造成卡顿，这是预期现象，不必惊讶。** 随着着色器缓存逐步预热，表现通常会改善。
+
+## 本机测试
+
+已在 **MacBook Air M4 和 Mac mini M4** 上测试。本机测试已收集 **8,582 个着色器**，着色器预热后约 **90 帧/秒，菜单中可达 120 帧/秒**。
+
+着色器会在游玩过程中自动收集、编译并缓存。再次进入已经去过的场景时，可以复用已有缓存，帧数和流畅度通常会明显改善。**8,582 只是本机测试目前收集到的数量，不是游戏的着色器总数，也不是收集上限**；随着探索更多场景，缓存还会继续增加。
+
+**着色器预热：** App 启动时会自动预热内置 PSO 清单中兼容的项目，无需手动设置。游玩时新遇到的着色器和管线会写入本机的 `pso_collected.tsv`，下次启动时继续预热。如需分享自己收集的清单，请提供 `~/Library/Application Support/MacNativeGames/TOTK/shader-cache/rt-totk-native-v4-unverified/pso_collected.tsv`。它只包含着色器和管线标识，不含游戏存档或编译后的着色器文件。清单与对应的着色器转换链版本绑定。
+
 
 **即将支持 iPhone 和 iPad。未来的 iPhone 版本推荐使用 iPhone 16 及更新机型。**
 
-这不是模拟器：游戏自己的 ARM64 代码直接跑在苹果芯片上（只改写 macOS 不允许的地方），Switch 的系统服务由一个小宿主应答，游戏的 NVN 图形在 Metal 4 上重建。本仓库不含任何游戏内容，项目与任天堂无关。
 
 ## 需要准备
 
 - Apple 芯片的 Mac，**macOS 26** 或更高（图形用 Metal 4）。建议使用 16 GB 或更多内存。
 - 除游戏文件外，为工作目录预留约 **25 GB** 空闲空间。成品 App 与工作目录放在**同一个 APFS 卷**上时，大型数据文件可通过克隆共享磁盘空间；无法克隆或输出到其他卷时，还需为 App 副本另留约 **17 GB**。
-- 你的《王国之泪》**本体 1.0.0**（`0100F2C0115B6000`），格式为 **XCI 或 NSP**，以及你的 `prod.keys`。构建 **1.1.2** 时，再通过 `--update` 提供单独的累计更新 NSP；无需先安装 1.1.0。其他更新（包括 **1.2.1、1.4.3**）、DLC 和合并包仍不支持。
+- 你的《王国之泪》**本体 1.0.0**（`0100F2C0115B6000`），格式为 **XCI 或 NSP**，以及你的 `prod.keys`。构建 **1.1.2** 时，通过 `--update` 提供单独的累计更新 NSP 或 NSZ；无需先安装 1.1.0。NSZ 会先解压并校验其中的 NCA 哈希。**1.4.3 已能识别并验证 ExeFS 哈希，但尚无对应的安全代码改写和运行时地址表，因此构建会安全停止。**DLC 和合并包不支持。
 - 使用 NSP 时：除不依赖票据的 NCA 外，包内必须包含通用票据。NSP 不含系统共享字体，需要通过 `--firmware` 指定已解包的固件 NCA 目录，或通过 `--shared-fonts` 提供以前提取的字体。六个字体必须符合本项目已验证的哈希；工作目录中已有且校验通过的字体会自动复用。
 
 ## 打包 App
 
 **1. 工具**（只需一次）：Xcode 命令行工具和 [Homebrew](https://brew.sh)。安装构建依赖和获取固定版本的 SPIRV-Cross 源码需要联网：
 
-```
+```sh
 xcode-select --install
 brew install opus libvpx python@3.14
 ```
 
 **2. 下载或克隆本仓库**，在终端中进入 `MacNativeGames` 目录，再运行脚本，给出游戏文件和密钥：
 
-```
+```sh
 python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys
 ```
 
@@ -156,13 +186,15 @@ App 出现在游戏文件旁边（`Tears of the Kingdom.app`；`-o` 指定别处
 
 提取的程序模块、改写后的模块、RomFS 和共享字体会与所选版本的 `games/totk/assets/expected-v1.0.0.json` 或 `expected-v1.1.2.json` 中的哈希核对；预编译着色器翻译器另有 SHA-256 校验。不匹配时停止构建。密钥的值不会被打印。
 
-**3. 游玩：** 在访达里打开 App。构建结束时会以 `--check` 模式启动启动器，检查游戏可执行文件是否存在，并让 macOS 执行首次启动检查；这一步不进行游戏游玩测试。App 可以留在原位置，也可以移到“应用程序”。拷贝到另一个卷可能额外占用磁盘空间，并触发 macOS 再次检查，期间可能没有窗口。第一次进入游戏会校验游戏数据（本地测试约 20 秒）。首次遇到的着色器可能造成编译卡顿，缓存可减少后续访问时的重复工作。
+**3. 游玩：** 在访达里打开 App。构建结束时会以 `--check` 模式启动启动器，检查游戏可执行文件是否存在，并让 macOS 执行首次启动检查；这一步不进行游戏游玩测试。App 可以留在原位置，也可以移到 `/Applications`。拷贝到另一个卷可能额外占用磁盘空间，并触发 macOS 再次检查，期间可能没有窗口。第一次进入游戏会校验游戏数据（本地测试约 20 秒）。首次遇到的着色器可能造成编译卡顿，缓存可减少后续访问时的重复工作。
 
 
 ### 构建 1.1.2
 
 ```sh
 python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.1.2.nsp
+# 也可以使用 NSZ 更新包：
+python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.1.2.nsz
 # 本体为 NSP 时，继续提供上文的 --firmware 或 --shared-fonts。
 ```
 
@@ -187,7 +219,7 @@ macOS 能识别的手柄（如 DualSense、Xbox 手柄）会映射为 Switch Pro
 | F T H G | 十字键 左 / 上 / 右 / 下 | | Z / C | 左 / 右摇杆按下 |
 | Return | +（菜单） | | Tab、Esc | −（地图） |
 
-额外按键：**1** 开关 MetalFX 放大（MetalFX 只在 2K 用：画面在屏幕上大于 1080p 时），**2** 补帧（关 → 30+30 → 刷新率一半 → 不限帧），**3** 游戏自己输出 2560×1440 ↔ 输出 1080p 再由 MetalFX 放大。文字输入（给马取名）直接用 Mac 键盘。
+额外按键：**1** 同时隐藏或重新显示所有屏幕提示（快捷键说明、FPS、着色器计数和系统负载）；**2** 补帧（关 → 30+30 → 刷新率一半 → 不限帧），**3** 循环切换画质（MetalFX 2K → 原生 2K → 关闭）。MetalFX 默认关闭，只有按 **3** 手动切换到该模式才会启用；放大窗口不会自动开启。文字输入（给马取名）直接用 Mac 键盘。
 
 ## 文件位置
 
@@ -197,7 +229,7 @@ macOS 能识别的手柄（如 DualSense、Xbox 手柄）会映射为 Switch Pro
 
 ## 已知问题
 
-- 支持本体 1.0.0，或本体加单独的 1.1.2 更新 NSP。其他版本、DLC、合并包、NSZ/XCZ 压缩格式和个性化票据仍不支持。平台仅限 Mac。
+- 支持本体 1.0.0，或本体加单独的 1.1.2 更新（NSP/NSZ）。1.4.3 包可识别并验证，但尚不支持构建可运行版本。其他版本、DLC、合并包、XCZ 和个性化票据仍不支持。平台仅限 Mac。
 - 没有联网功能，没有 amiibo。
 - 首次遇到新着色器可能出现编译卡顿，缓存能减少重复编译，但不保证完全没有卡顿。
 - 容器 / 更新当前验证范围：16 项自动测试，以及使用本地 XCI 构造、附带生成通用票据的 NSP 测试副本完成完整 Mac 打包。尚未验证独立的零售本体 NSP，也未测试从该类输入构建后的实际游玩。
