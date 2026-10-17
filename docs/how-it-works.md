@@ -34,15 +34,31 @@ translator (to SPIR-V), SPIRV-Cross (to Metal Shading Language) and Metal, and t
 (`~/Library/Application Support/MacNativeGames/TOTK/shader-cache`). The translator runs as one native program,
 `totk_xlate --service` (`games/totk/tools/totk_xlate`: the Ryujinx translator with this project's patches and the
 service that turns each request into the MSL and its reflection file), compiled ahead of time with .NET NativeAOT; it
-ships ready-made in `games/totk/prebuilt/macos-arm64`, so neither building nor playing needs .NET or Python. MetalFX upscales the game's 1600x900 scene into its
+ships ready-made in `games/totk/prebuilt/macos-arm64`, so neither building nor playing needs .NET, and playing needs no Python. Building still requires Python 3.14. MetalFX upscales the game's 1600x900 scene into its
 1080p or 1440p canvas and can generate in-between frames.
 
 ## The build (build_app.py)
 
-1. ExeFS out of the card image's program NCA, the three modules rewritten and checked.
-2. The RomFS (17 GB) decrypted and verified, the shared fonts taken from the card's system update partition, and the
+1. Detect XCI (HFS0 secure partition) or NSP (PFS0) by its header. Read the base Program NCA in place, extract ExeFS,
+   then rewrite and check the three modules against the verified 1.0.0 hashes. NSP common tickets supply encrypted
+   title keys in memory; `prod.keys` supplies the matching titlekek. Rights-free NCAs use their key area, as before.
+   The importer follows nxnative's container/common-ticket approach without its iOS packaging or .NET dependency.
+2. The RomFS (17 GB) decrypted and verified through all six IVFC levels. The shared fonts come from the XCI's
+   system update partition, `--firmware` (an unpacked firmware NCA directory), or `--shared-fonts` (six extracted
+   BFTTF files). Actual font bytes and the complete manifest are verified before reuse. Then the
    RomFS overlays (small data patches: quick-menu capture timing at high frame rates, the game-over retry, the heap
-   sizes the 1440p output needs) made from your own files.
+   sizes the 1440p output needs) are made from your own files.
 3. SPIRV-Cross compiled with clang; the prebuilt shader translator checked against its SHA-256.
 4. The game binary built against your extracted files (it checks their hashes at every start) and everything put into
    an app bundle; the app's launcher points the game at your profile, cache and log folders.
+
+The output is macOS-only: Apple silicon, macOS 26 or later, and an AppKit launcher. There is no iPhone/iOS build option.
+Updates, DLC, combined packages, personalized tickets, and NSZ/XCZ inputs are outside the supported input set.
+Changing an input path, size, or modification time invalidates the extraction manifest, including its NCA offsets;
+verified version-specific output can still be reused after the new input's code passes the hash checks.
+
+Container tests use generated encrypted fixtures with no game data or real keys:
+
+```sh
+/path/to/TOTK_build/venv/bin/python -m unittest discover -s tests -v
+```

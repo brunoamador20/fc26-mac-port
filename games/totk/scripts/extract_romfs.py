@@ -6,7 +6,8 @@ import json
 import struct
 from pathlib import Path
 from cryptography.hazmat.primitives.ciphers import modes
-from extract_exefs import decrypt, read_at, require
+from extract_exefs import (decrypt, read_at, require, load_keys, container_entries, common_tickets,
+                           nca_inventory, program_nca, nca_ctr_key, record_offset)
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -14,17 +15,14 @@ def main():
     parser.add_argument('--manifest',type=Path,default=Path('extracted/v0/extraction-manifest.json'))
     parser.add_argument('--output',type=Path,default=Path('extracted/v0/romfs'))
     args=parser.parse_args(); require(not args.output.exists(),'Output already exists')
-    manifest=json.loads(args.manifest.read_text());record=manifest['program'];keys={}
-    for line in args.keys.read_text().splitlines():
-        if '=' in line:
-            name,value=line.split('=',1);keys[name.strip().lower()]=bytes.fromhex(value.strip())
+    manifest=json.loads(args.manifest.read_text());record=manifest['program'];keys=load_keys(args.keys)
     source=Path(manifest['source']);require(source.stat().st_size==manifest['source_size'],'Source size changed')
     with source.open('rb') as f:
-        raw=read_at(f,record['xci_offset'],0xc00)
-        hdr=b''.join(decrypt(keys['header_key'],modes.XTS(i.to_bytes(16,'big')),raw[i*512:(i+1)*512]) for i in range(6))
-        require(hdr[0x200:0x204]==b'NCA3' and hdr[0x230:0x240]==bytes(16),'Unsupported NCA')
-        gen=max(max(hdr[0x206],hdr[0x220])-1,0);area=['application','ocean','system'][hdr[0x207]]
-        area_keys=decrypt(keys[f'key_area_key_{area}_{gen:02x}'],modes.ECB(),hdr[0x300:0x340])
+        _,entries=container_entries(f,source.stat().st_size)
+        actual,hdr=program_nca(nca_inventory(f,entries,keys))
+        require(actual['name']==record['name'] and actual['size']==record['size'] and
+                record_offset(actual)==record_offset(record),'Source Program NCA changed; extract ExeFS again')
+        ctr_key=nca_ctr_key(hdr,keys,common_tickets(f,entries))
         for i in range(4):
             start,end=struct.unpack_from('<II',hdr,0x240+i*16)
             if not start:continue
@@ -37,7 +35,7 @@ def main():
                 require(0<=relative<=relative+size<=(end-start)*512,'Section bounds')
                 absolute=start*512+relative;aligned=absolute&~15;skip=absolute-aligned
                 iv=fs[0x140:0x148][::-1]+(aligned//16).to_bytes(8,'big')
-                return decrypt(area_keys[32:48],modes.CTR(iv),read_at(f,record['xci_offset']+aligned,size+skip))[skip:]
+                return decrypt(ctr_key,modes.CTR(iv),read_at(f,record_offset(record)+aligned,size+skip))[skip:]
             args.output.mkdir(parents=True);image_path=args.output/'romfs.bin';digest=hashlib.sha256();counts=[]
             parent=fs[0xc8:0xe8]
             with image_path.open('wb') as image:

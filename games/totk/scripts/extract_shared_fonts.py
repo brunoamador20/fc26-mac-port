@@ -4,14 +4,15 @@ all six IVFC levels and each BFTTF header. Fonts stay in the BFTTF form that har
 shared memory; only local copies are written, never printed.
 
 Sources: --xci <game card image> reads the data NCAs from the card's system update partition (a game card carries the
-system update it needs, shared fonts included); otherwise --inventory lists the NCAs of an installed firmware."""
+system update it needs, shared fonts included); --firmware reads an unpacked NCA directory. The older --inventory
+mode lists the NCAs of an installed firmware."""
 import argparse
 import hashlib
 import json
 import struct
 from pathlib import Path
 from cryptography.hazmat.primitives.ciphers import modes
-from extract_exefs import decrypt, read_at, require
+from extract_exefs import decrypt, read_at, require, load_keys, hfs, nca_ctr_key
 from extract_romfs import index_romfs
 
 FIRMWARE = Path.home() / 'Library/Application Support/Ryujinx/bis/system/Contents/registered'
@@ -25,15 +26,6 @@ FONTS = [
     (5, 'nintendo-extension', '0100000000000810', 'nintendo_ext_003.bfttf'),
 ]
 BFTTF_DECODED_MAGIC = 0x7f9a0218
-
-
-def load_keys(path):
-    keys = {}
-    for line in path.read_text().splitlines():
-        if '=' in line:
-            name, value = line.split('=', 1)
-            keys[name.strip().lower()] = bytes.fromhex(value.strip())
-    return keys
 
 
 class Slice:
@@ -56,17 +48,8 @@ class Slice:
 
 def hfs0_entries(f, offset):
     """(name, absolute offset, size) of each file in the HFS0 partition at offset."""
-    head = read_at(f, offset, 16)
-    require(head[:4] == b'HFS0', 'Unsupported game card partition')
-    count, strings = struct.unpack_from('<II', head, 4)
-    table = read_at(f, offset + 16, count * 0x40 + strings)
-    data = offset + 16 + count * 0x40 + strings
-    names = table[count * 0x40:]
-    out = []
-    for i in range(count):
-        rel, size, name_off = struct.unpack_from('<QQI', table, i * 0x40)
-        out.append((names[name_off:names.index(b'\0', name_off)].decode(), data + rel, size))
-    return out
+    length = f.seek(0, 2)
+    return hfs(f, offset, length - offset)
 
 
 def nca_header(f, keys):
@@ -92,15 +75,13 @@ def xci_data_ncas(xci, keys):
     return found
 
 
-def nca_romfs(source, keys, image_path):
+def nca_romfs(source, keys, image_path, tickets=None):
     """Write the verified RomFS image of a data NCA (a Path, or a Slice of a game card image) to image_path."""
     with (source if isinstance(source, Slice) else Slice(source)) as f:
         raw = read_at(f, 0, 0xc00)
         hdr = b''.join(decrypt(keys['header_key'], modes.XTS(i.to_bytes(16, 'big')), raw[i * 512:(i + 1) * 512]) for i in range(6))
-        require(hdr[0x200:0x204] == b'NCA3' and hdr[0x230:0x240] == bytes(16), f'Unsupported NCA at {f.base:#x}')
-        gen = max(max(hdr[0x206], hdr[0x220]) - 1, 0)
-        area = ['application', 'ocean', 'system'][hdr[0x207]]
-        area_keys = decrypt(keys[f'key_area_key_{area}_{gen:02x}'], modes.ECB(), hdr[0x300:0x340])
+        require(hdr[0x200:0x204] == b'NCA3', f'Unsupported NCA at {f.base:#x}')
+        ctr_key = nca_ctr_key(hdr, keys, tickets or {})
         for i in range(4):
             start, end = struct.unpack_from('<II', hdr, 0x240 + i * 16)
             if not start:
@@ -118,7 +99,7 @@ def nca_romfs(source, keys, image_path):
                 aligned = absolute & ~15
                 skip = absolute - aligned
                 iv = fs[0x140:0x148][::-1] + (aligned // 16).to_bytes(8, 'big')
-                return decrypt(area_keys[32:48], modes.CTR(iv), read_at(f, aligned, size + skip))[skip:]
+                return decrypt(ctr_key, modes.CTR(iv), read_at(f, aligned, size + skip))[skip:]
 
             parent = fs[0xc8:0xe8]
             image = bytearray()
@@ -148,10 +129,33 @@ def bfttf_size(data):
     return decoded
 
 
+def firmware_data_ncas(folder, keys):
+    """Accept an unpacked firmware directory or an installed registered/ directory."""
+    require(folder.is_dir(), 'Firmware must be a directory containing NCA files')
+    wanted = {title for _, _, title, _ in FONTS}
+    found = {}
+    for path in sorted(folder.iterdir()):
+        if path.is_dir():
+            path = path / '00'
+        if not path.is_file() or (path.name != '00' and path.suffix.lower() != '.nca'):
+            continue
+        with path.open('rb') as f:
+            hdr = nca_header(f, keys)
+        require(hdr[0x200:0x204] == b'NCA3', 'Invalid firmware NCA header (check prod.keys)')
+        title = f'{struct.unpack_from("<Q", hdr, 0x210)[0]:016x}'
+        if hdr[0x205] == 4 and title in wanted:
+            require(title not in found, f'Duplicate shared-font title {title} in firmware')
+            found[title] = path
+    require(wanted <= found.keys(), 'Firmware is missing shared-font data NCAs: ' + ', '.join(sorted(wanted - found.keys())))
+    return found
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--keys', type=Path, required=True)
-    parser.add_argument('--xci', type=Path, help='game card image: take the fonts from its system update partition')
+    sources = parser.add_mutually_exclusive_group()
+    sources.add_argument('--xci', type=Path, help='game card image: take the fonts from its system update partition')
+    sources.add_argument('--firmware', type=Path, help='unpacked firmware NCA directory (for NSP builds)')
     parser.add_argument('--inventory', type=Path, default=Path('analysis/firmware-inventory.json'))
     parser.add_argument('--output', type=Path, default=Path('extracted/firmware/shared-fonts'))
     args = parser.parse_args()
@@ -162,6 +166,9 @@ def main():
         missing = sorted({t for _, _, t, _ in FONTS} - card.keys())
         require(not missing, f'Shared font data missing from the card update partition: {", ".join(missing)}')
         source = lambda title: Slice(args.xci, card[title])
+    elif args.firmware:
+        firmware = firmware_data_ncas(args.firmware, keys)
+        source = lambda title: firmware[title]
     else:
         rows = json.loads(args.inventory.read_text())['rows']
         data_nca = {r['title_id']: r['file'] for r in rows if r['content_type'] == 4}

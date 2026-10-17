@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""MacNativeGames: turn your own game card image into a native Mac app.
+"""MacNativeGames: turn your own XCI or NSP into a native Mac app (macOS only).
 
-    python3 build_app.py <game.xci> -k <prod.keys> [-o "<output>.app"] [--work <folder>]
+    python3 build_app.py <game.xci|game.nsp> -k <prod.keys> [-o "<output>.app"] [--work <folder>]
 
-Supported: The Legend of Zelda: Tears of the Kingdom, base game version 1.0.0 (title 0100F2C0115B6000), as a game card
-image (XCI). Nothing from the game is in this repository; everything is made from your files on your Mac, and key
-values are never printed.
+Supported: The Legend of Zelda: Tears of the Kingdom, base game version 1.0.0 (title 0100F2C0115B6000), as an XCI or NSP.
+NSPs need common tickets (unless rights-free) and a separate shared-font source. No iPhone/iOS builds are supported.
+Nothing from the game is in this repository; everything is made from your files on your Mac. Key values are never printed.
 
 Steps (each one checked against games/totk/assets/expected-v1.0.0.json, so a damaged dump or another version stops the
 build at the first wrong file):
-  1. code: ExeFS out of the card image, the three code modules rewritten for Apple silicon (games/totk/third_party/d2r)
-  2. data: RomFS (17 GB), the system shared fonts (from the card's own system update partition), the RomFS overlays
+  1. code: ExeFS out of the XCI or NSP, the three code modules rewritten for Apple silicon (games/totk/third_party/d2r)
+  2. data: RomFS (17 GB), the system shared fonts (from XCI firmware or an explicit font source), the RomFS overlays
   3. shaders: SPIRV-Cross (fetched at a pinned commit, compiled with clang) and the shader translator, which ships
      ready-made as a native program (games/totk/prebuilt/macos-arm64: vendor/ryujinx + patches + Service.cs, made with
      games/totk/tools/totk_xlate/publish_native.sh); the game uses both to translate each shader once and cache it
   4. the game binary, the launcher, and the app bundle (the 17 GB RomFS is an APFS clone when on the same volume)
 
-Every intermediate file is in the work folder (default: "<card image folder>/TOTK_build"); a second run reuses
+Every intermediate file is in the work folder (default: "<game file folder>/TOTK_build"); a second run reuses
 what is already done and correct. The finished app keeps no writable state: saves, the shader cache and logs go to
 ~/Library/Application Support/MacNativeGames/TOTK and ~/Library/Logs/MacNativeGames.
 
@@ -150,15 +150,70 @@ def prepare_work(work, py, logs):
 
 
 # ---- steps ----
-def step_code(tree, xci, keys, env, logs):
+def input_kind(game):
+    with game.open('rb') as f:
+        if f.read(4) == b'PFS0':
+            return 'nsp'
+        f.seek(0x100)
+        if f.read(4) == b'HEAD':
+            return 'xci'
+    raise BuildError('expected an XCI or NSP (PFS0) game file; compressed NSZ/XCZ files are unsupported')
+
+
+def source_matches(manifest, game):
+    try:
+        data = json.loads(manifest.read_text())
+        stat = game.stat()
+        return (data['source'] == str(game.resolve()) and data['source_size'] == stat.st_size
+                and data['source_mtime_ns'] == stat.st_mtime_ns)
+    except (OSError, ValueError, KeyError):
+        return False
+
+
+def font_report(folder):
+    """Only known font bytes can be bound into this version's runtime."""
+    rows = []
+    for kind, (name, expected) in enumerate(EXPECTED['shared_fonts_sha256'].items()):
+        path = folder / f'{kind}-{name}.bfttf'
+        if not path.is_file():
+            raise BuildError(f'missing shared font: {path}')
+        check(f'shared font {name}', sha256(path), expected)
+        size = path.stat().st_size
+        rows.append(dict(type=kind, name=name, bfttf_bytes=size, font_bytes=size - 8, sha256=expected))
+    return dict(status='pass', integrity='Each shared font matches the verified SHA-256 for this build', fonts=rows)
+
+
+def validate_fonts(folder):
+    report = font_report(folder)
+    try:
+        manifest = json.loads((folder / 'manifest.json').read_text())
+        rows = manifest['fonts']
+        if manifest['status'] != 'pass' or len(rows) != 6 or any(
+                any(row.get(k) != value for k, value in expected.items())
+                for row, expected in zip(rows, report['fonts'])):
+            raise ValueError('font manifest differs from its files')
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        raise BuildError(f'invalid shared-font manifest in {folder}: {e}') from None
+
+
+def fonts_valid(folder):
+    try:
+        validate_fonts(folder)
+        return True
+    except (BuildError, OSError):
+        return False
+
+
+def step_code(tree, game, keys, env, logs):
     py = tree / '.venv/bin/python'
     exefs = tree / 'extracted/v0/exefs'
     want = EXPECTED['exefs_sha256']
-    if not all((exefs / n).exists() and sha256(exefs / n) == h for n, h in want.items()):
-        say('1/4 code: extracting the ExeFS from the card image')
+    manifest = exefs.parent / 'extraction-manifest.json'
+    if not source_matches(manifest, game) or not all((exefs / n).is_file() and sha256(exefs / n) == h for n, h in want.items()):
+        say('1/4 code: extracting the ExeFS from the game file')
         if exefs.exists():
             shutil.rmtree(exefs)
-        run([py, 'scripts/extract_exefs.py', xci, '--keys', keys, '--output', exefs], logs / 'extract_exefs.log', cwd=tree)
+        run([py, 'scripts/extract_exefs.py', game, '--keys', keys, '--output', exefs], logs / 'extract_exefs.log', cwd=tree)
         for n, h in want.items():
             check(f'ExeFS {n}', sha256(exefs / n), h)
     if not (tree / 'extracted/v0/elf/main-inventory.json').exists():
@@ -181,11 +236,11 @@ def step_code(tree, xci, keys, env, logs):
     (tree / 'analysis/phase12-validation.json').write_text(json.dumps(report, indent=2) + '\n')
 
 
-def step_data(tree, xci, keys, logs):
+def step_data(tree, game, keys, logs, *, firmware=None, shared_fonts=None):
     py = tree / '.venv/bin/python'
     romfs = tree / 'extracted/v0/romfs'
     index = romfs / 'index.json'
-    ok = index.exists() and json.loads(index.read_text()).get('romfs_sha256') == EXPECTED['romfs']['sha256'] and \
+    ok = index.exists() and (romfs / 'romfs.bin').is_file() and json.loads(index.read_text()).get('romfs_sha256') == EXPECTED['romfs']['sha256'] and \
         (romfs / 'romfs.bin').stat().st_size == EXPECTED['romfs']['size']
     if not ok:
         say('2/4 data: extracting and verifying the RomFS (17 GB, a minute or two)')
@@ -195,14 +250,28 @@ def step_data(tree, xci, keys, logs):
         r = json.loads(index.read_text())
         check('RomFS', r['romfs_sha256'], EXPECTED['romfs']['sha256'])
     fonts = tree / 'extracted/firmware/shared-fonts'
-    manifest = fonts / 'manifest.json'
-    if not manifest.exists():
-        say('2/4 data: the system shared fonts from the card\'s update partition')
-        if fonts.exists():
-            shutil.rmtree(fonts)
-        run([py, 'scripts/extract_shared_fonts.py', '--keys', keys, '--xci', xci, '--output', fonts], logs / 'shared_fonts.log', cwd=tree)
-    for f in json.loads(manifest.read_text())['fonts']:
-        check(f'shared font {f["name"]}', f['sha256'], EXPECTED['shared_fonts_sha256'][f['name']])
+    if not fonts_valid(fonts):
+        if shared_fonts:
+            # Validate the actual bytes before copying, not just the source's manifest.
+            report = font_report(shared_fonts)
+            if shared_fonts.resolve() != fonts.resolve():
+                if fonts.exists():
+                    shutil.rmtree(fonts)
+                fonts.mkdir(parents=True)
+                for f in report['fonts']:
+                    name = f"{f['type']}-{f['name']}.bfttf"
+                    shutil.copy2(shared_fonts / name, fonts / name)
+            (fonts / 'manifest.json').write_text(json.dumps(report, indent=2) + '\n')
+        else:
+            if not firmware and input_kind(game) == 'nsp':
+                raise BuildError('NSP needs --firmware or --shared-fonts because no valid shared fonts are cached')
+            say('2/4 data: extracting the system shared fonts')
+            if fonts.exists():
+                shutil.rmtree(fonts)
+            source_args = ['--firmware', firmware] if firmware else ['--xci', game]
+            run([py, 'scripts/extract_shared_fonts.py', '--keys', keys, *source_args, '--output', fonts],
+                logs / 'shared_fonts.log', cwd=tree)
+        validate_fonts(fonts)
     if not (tree / 'extracted/v0/romfs-patches/manifest.tsv').exists():
         say('2/4 data: RomFS overlays (quick-menu capture timing, game-over retry)')
         run([py, 'scripts/make_romfs_patches.py'], logs / 'romfs_patches.log', cwd=tree)
@@ -238,14 +307,14 @@ def step_shaders(tree, logs):
                          f'totk_xlate.sha256); check it out again, or rebuild it with games/totk/tools/totk_xlate/publish_native.sh')
 
 
-def step_binary(tree, xci, keys, env, logs):
+def step_binary(tree, game, keys, env, logs):
     say('4/4 app: building the game binary and the launcher')
     run(['make', 'runtime'], logs / 'runtime.log', cwd=tree, env=env)
     run(['xcrun', 'clang', '-fobjc-arc', '-O2', '-Wall', '-Ithird_party/d2r_gfx/gfx/nvn', 'app/launcher.m', '-framework', 'AppKit',
          '-o', 'build/app-launcher'], logs / 'launcher.log', cwd=tree, env=env)
     if not (tree / 'build/AppIcon.icns').exists():   # the game's own icon from its control data; optional
         try:
-            run([tree / '.venv/bin/python', 'scripts/extract_app_icon.py', xci, '--keys', keys, '--output', 'build/AppIcon.icns'],
+            run([tree / '.venv/bin/python', 'scripts/extract_app_icon.py', game, '--keys', keys, '--output', 'build/AppIcon.icns'],
                 logs / 'app_icon.log', cwd=tree)
         except BuildError as e:
             say(f'   no app icon, the app gets the default one ({str(e).splitlines()[0]})')
@@ -295,28 +364,41 @@ def step_app(tree, out, logs):
 
 
 def parse_args(argv):
-    ap = argparse.ArgumentParser(description='Build a native Mac app from your own Tears of the Kingdom 1.0.0 game card image.',
+    ap = argparse.ArgumentParser(description='Build a macOS-only native app from your own Tears of the Kingdom 1.0.0 XCI or NSP.',
                                  epilog='example: python3 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys')
-    ap.add_argument('xci', type=Path, help='the game card image (.xci), base game 1.0.0')
+    ap.add_argument('game', type=Path, help='the game file (.xci or .nsp), base game 1.0.0')
     ap.add_argument('-k', '--keys', type=Path, required=True, help='your prod.keys')
-    ap.add_argument('-o', '--out', type=Path, help=f'the app to write (default: "{APP_NAME}.app" next to the card image)')
-    ap.add_argument('--work', type=Path, help='work folder (default: TOTK_build next to the card image)')
+    ap.add_argument('-o', '--out', type=Path, help=f'the app to write (default: "{APP_NAME}.app" next to the game file)')
+    ap.add_argument('--work', type=Path, help='work folder (default: TOTK_build next to the game file)')
+    fonts = ap.add_mutually_exclusive_group()
+    fonts.add_argument('--firmware', type=Path, help='unpacked firmware NCA directory providing the six expected shared fonts (needed for NSP unless --shared-fonts or valid cached fonts are available)')
+    fonts.add_argument('--shared-fonts', type=Path, help='previously extracted shared-font directory containing the six verified .bfttf files')
     return ap.parse_args(argv)
 
 
 def main(argv):
     args = parse_args(argv)
-    xci, keys = args.xci.expanduser().resolve(), args.keys.expanduser().resolve()
-    if not xci.is_file():
-        raise BuildError(f'no such file: {xci}')
+    game, keys = args.game.expanduser().resolve(), args.keys.expanduser().resolve()
+    if not game.is_file():
+        raise BuildError(f'no such file: {game}')
     if not keys.is_file():
         raise BuildError(f'no such file: {keys}')
-    out = (args.out.expanduser().resolve() if args.out else xci.parent / f'{APP_NAME}.app')
-    work = (args.work.expanduser().resolve() if args.work else xci.parent / 'TOTK_build')
+    out = (args.out.expanduser().resolve() if args.out else game.parent / f'{APP_NAME}.app')
+    work = (args.work.expanduser().resolve() if args.work else game.parent / 'TOTK_build')
     if out.suffix != '.app':
         raise BuildError(f'the output must end in .app: {out}')
+    kind = input_kind(game)
+    firmware = args.firmware.expanduser().resolve() if args.firmware else None
+    shared_fonts = args.shared_fonts.expanduser().resolve() if args.shared_fonts else None
+    if firmware and not firmware.is_dir():
+        raise BuildError(f'no firmware directory: {firmware}')
+    if shared_fonts:
+        font_report(shared_fonts)
+    if kind == 'nsp' and not (firmware or shared_fonts or fonts_valid(work / 'totk/extracted/firmware/shared-fonts')):
+        raise BuildError('NSP files do not include system shared fonts. Supply --firmware <unpacked firmware NCA directory> '
+                         'or --shared-fonts <previously extracted font directory>; valid fonts in --work are also reused.')
     py = prerequisites(args)
-    free = shutil.disk_usage(work.parent if work.parent.exists() else xci.parent).free / 2**30
+    free = shutil.disk_usage(work.parent if work.parent.exists() else game.parent).free / 2**30
     say(f'work folder {work} ({free:.0f} GB free on its volume)')
     if free < 25 and not (work / 'totk/extracted/v0/romfs/romfs.bin').exists():
         raise BuildError('needs about 25 GB free for the work folder (the app itself is an APFS clone of it when on the same volume)')
@@ -324,10 +406,10 @@ def main(argv):
     env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
     t0 = time.time()
     tree = prepare_work(work, py, logs)
-    step_code(tree, xci, keys, env, logs)
-    step_data(tree, xci, keys, logs)
+    step_code(tree, game, keys, env, logs)
+    step_data(tree, game, keys, logs, firmware=firmware, shared_fonts=shared_fonts)
     step_shaders(tree, logs)
-    step_binary(tree, xci, keys, env, logs)
+    step_binary(tree, game, keys, env, logs)
     say(f'4/4 app: assembling {out}')
     step_app(tree, out, logs)
     # macOS scans a new app the first time it runs (minutes for 16 GB, with nothing on screen): run it once here, in its
