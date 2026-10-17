@@ -116,7 +116,7 @@ static class SwshXlate
     }
 
 
-    static string Translate(JsonObject job, string outDir)
+    internal static string Translate(JsonObject job, string outDir)   // also called by the --service mode (Service.cs)
     {
         string key = (string)job["key"];
             try
@@ -136,10 +136,10 @@ static class SwshXlate
                     ["uses_frag_coord"] = p.Info.UsesFragCoord, ["frag_out_map"] = p.Info.FragmentOutputMap,
                     ["tex_queried"] = new JsonArray(acc.TexQueried.Select(x => (JsonNode)x).ToArray()), ["img_queried"] = new JsonArray(acc.ImgQueried.Select(x => (JsonNode)x).ToArray()),
                 };
-                foreach (var b in p.Info.CBuffers) res["cbufs"].AsArray().Add(new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot });
-                foreach (var b in p.Info.SBuffers) res["sbufs"].AsArray().Add(new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot, ["cb_slot"] = b.SbCbSlot, ["cb_offset"] = b.SbCbOffset, ["flags"] = (int)b.Flags });
+                foreach (var b in p.Info.CBuffers) res["cbufs"].AsArray().Add((JsonNode)new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot });
+                foreach (var b in p.Info.SBuffers) res["sbufs"].AsArray().Add((JsonNode)new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot, ["cb_slot"] = b.SbCbSlot, ["cb_offset"] = b.SbCbOffset, ["flags"] = (int)b.Flags });
                 foreach (var (list, name) in new[] { (p.Info.Textures, "textures"), (p.Info.Images, "images") })
-                    foreach (var t in list) res[name].AsArray().Add(new JsonObject { ["binding"] = t.Binding, ["type"] = (int)t.Type, ["format"] = t.Format.ToString(), ["cbuf_slot"] = t.CbufSlot, ["handle"] = t.HandleIndex, ["array"] = t.ArrayLength, ["separate"] = t.Separate, ["flags"] = (int)t.Flags });
+                    foreach (var t in list) res[name].AsArray().Add((JsonNode)new JsonObject { ["binding"] = t.Binding, ["type"] = (int)t.Type, ["format"] = t.Format.ToString(), ["cbuf_slot"] = t.CbufSlot, ["handle"] = t.HandleIndex, ["array"] = t.ArrayLength, ["separate"] = t.Separate, ["flags"] = (int)t.Flags });
                 File.WriteAllText(Path.Combine(outDir, key + ".res.json"), res.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
                 return null;
             }
@@ -150,6 +150,8 @@ static class SwshXlate
     // constant-buffer slot / offset of LDC and of cbuf-operand ALU forms, and the address register of global loads.
     static int Disasm(string codePath, string stage)
     {
+        // reads the translator's private decoder state by reflection, which a NativeAOT build does not keep
+        if (!System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported) { Console.Error.WriteLine("--disasm needs the JIT build: tooling/dotnet/dotnet build/totk_xlate/totk_xlate.dll --disasm ..."); return 2; }
         byte[] code = File.ReadAllBytes(codePath);
         var job = new JsonObject { ["key"] = "disasm", ["stage"] = stage, ["c1"] = "", ["debug"] = true, ["reduced"] = true };
         var acc = new Accessor(code, job);
@@ -183,6 +185,7 @@ static class SwshXlate
     static int Main(string[] args)
     {
         if (args.Length >= 2 && args[0] == "--disasm") return Disasm(args[1], args.Length > 2 ? args[2] : "vs");
+        if (args.Length >= 1 && args[0] == "--service") return ShaderService.Run(args);   // the runtime's translation service (Service.cs)
         if (args.Length == 1 && args[0] == "--serve")
         {
             // One request per line: {"job": {...}, "out": "<dir>"}; one reply line "ok <key>" / "fail <key> <message>".

@@ -246,6 +246,16 @@ shader-tools:
 	for p in tools/totk_xlate/patches/*.patch; do patch -d build/ryujinx-src -p1 --forward < "$$p" || exit 1; done
 	tooling/dotnet/dotnet build tools/totk_xlate/totk_xlate.csproj -c Release -o build/totk_xlate -p:RyuSrc=../../build/ryujinx-src
 
+.PHONY: shader-service
+# The runtime shader translation service as one native program (2026-10-17): the patched translator of make shader-tools
+# plus tools/totk_xlate/Service.cs (the port of scripts/shader_service.py), published with NativeAOT. The runtime uses
+# build/shader-service/totk_xlate when it is there (no Python, no .NET runtime; TOTK_SHADER_SERVICE=python for the old
+# path). Check a change: scripts/diag/retranslate_cache.py --service build/shader-service/totk_xlate --compare <cache>.
+shader-service:
+	@test -d build/ryujinx-src || { echo "make shader-tools first (it prepares the patched translator sources)"; exit 1; }
+	tooling/dotnet/dotnet publish tools/totk_xlate/totk_xlate.csproj -c Release -r osx-arm64 -p:PublishAot=true \
+	  -p:InvariantGlobalization=true -p:RyuSrc=../../build/ryujinx-src -o build/shader-service
+
 .PHONY: graphics-tools
 graphics-tools:
 	tooling/dotnet/dotnet build tooling/d2r-mobile/dm/gfx/tools/dmsh_xlate/dmsh_xlate.csproj -c Release -o build/dmsh_xlate

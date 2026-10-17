@@ -1,7 +1,9 @@
 // TOTK: runtime shader translation. A shader is identified by SHA-256(control 0x880 + code area); each
 // translation ("variant") also records the translator answers it depended on (texture slot types, vertex
 // input and colour output component types). A variant is reused only when those answers match the current
-// bound state; otherwise a new one is produced by scripts/shader_service.py and cached on disk.
+// bound state; otherwise a new one is produced by the translation service and cached on disk: the native program
+// build/shader-service/totk_xlate --service when it is there (tools/totk_xlate/Service.cs, NativeAOT: no Python, no .NET
+// runtime; 2026-10-17), else scripts/shader_service.py with the .NET translator. Same requests, replies and cache files.
 #import <Foundation/Foundation.h>
 #include <TargetConditionals.h>
 #include "totk_shader_rt.h"
@@ -14,6 +16,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include <dirent.h>
 #include <stdatomic.h>
 int totk_depth_near_minus_w(void);   // hle_nvn.c: 1 when the game selected NVN_DEPTH_MODE_NEAR_IS_MINUS_W
@@ -59,22 +62,35 @@ static void service_start(void) {
     posix_spawn_file_actions_t fa; posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_adddup2(&fa, to[0], 0); posix_spawn_file_actions_adddup2(&fa, from[1], 1);
     posix_spawn_file_actions_addclose(&fa, to[1]); posix_spawn_file_actions_addclose(&fa, from[0]);
-    NSString *script = [r stringByAppendingString:@"/scripts/shader_service.py"], *dotnet = [r stringByAppendingString:@"/tooling/dotnet/dotnet"];
+    NSString *sc = [r stringByAppendingString:@"/build/spirv-cross/spirv-cross"];
     // TOTK_SHADER_XLATE=<totk_xlate.dll> runs a trial translator build (e.g. build/totk_xlate-opt) without replacing the
-    // shared one; TOTK_SHADER_DEBUGMODE=0|1 reaches the service through the environment (2026-10-16 translator A/B).
-    const char *xe = getenv("TOTK_SHADER_XLATE");
-    NSString *xlate = xe && *xe ? @(xe) : [r stringByAppendingString:@"/build/totk_xlate/totk_xlate.dll"], *sc = [r stringByAppendingString:@"/build/spirv-cross/spirv-cross"];
-    const char *argv[] = {"python3", "-I", script.UTF8String, "--dotnet", dotnet.UTF8String, "--xlate", xlate.UTF8String,
-                          "--spirv-cross", sc.UTF8String, "--out", totk_rt_dir().UTF8String, "--chain", DMSH_CHAIN, NULL};
+    // shared one (through shader_service.py); TOTK_SHADER_DEBUGMODE=0|1 reaches either service through the environment.
+    // TOTK_SHADER_SERVICE=python | native picks the service (default: native when build/shader-service/totk_xlate is there).
+    const char *xe = getenv("TOTK_SHADER_XLATE"), *want = getenv("TOTK_SHADER_SERVICE"), *dm = getenv("TOTK_SHADER_DEBUGMODE");
+    NSString *native = [r stringByAppendingString:@"/build/shader-service/totk_xlate"];
+    int have_native = access(native.fileSystemRepresentation, X_OK) == 0;
+    int use_native = have_native && !(xe && *xe) && !(want && !strcmp(want, "python"));
+    if (want && !strcmp(want, "native") && !use_native) die("TOTK_SHADER_SERVICE=native but %s is not there (make shader-service)", native.UTF8String);
     pid_t pid;
-    if (posix_spawnp(&pid, "python3", &fa, NULL, (char *const *)argv, environ)) die("start shader service");
-    const char *dm = getenv("TOTK_SHADER_DEBUGMODE");
-    if (xe || dm) LOG("[shader] translator %s, DebugMode %s", xlate.UTF8String, dm ? dm : "default");
+    if (use_native) {
+        const char *argv[] = {native.UTF8String, "--service", "--spirv-cross", sc.UTF8String, "--out", totk_rt_dir().UTF8String,
+                              "--chain", DMSH_CHAIN, NULL};
+        if (posix_spawn(&pid, argv[0], &fa, NULL, (char *const *)argv, environ)) die("start shader service %s", argv[0]);
+        if (dm) LOG("[shader] native translator, DebugMode %s", dm);
+    } else {
+        NSString *script = [r stringByAppendingString:@"/scripts/shader_service.py"], *dotnet = [r stringByAppendingString:@"/tooling/dotnet/dotnet"];
+        NSString *xlate = xe && *xe ? @(xe) : [r stringByAppendingString:@"/build/totk_xlate/totk_xlate.dll"];
+        const char *argv[] = {"python3", "-I", script.UTF8String, "--dotnet", dotnet.UTF8String, "--xlate", xlate.UTF8String,
+                              "--spirv-cross", sc.UTF8String, "--out", totk_rt_dir().UTF8String, "--chain", DMSH_CHAIN, NULL};
+        if (posix_spawnp(&pid, "python3", &fa, NULL, (char *const *)argv, environ)) die("start shader service");
+        if (xe || dm) LOG("[shader] translator %s, DebugMode %s", xlate.UTF8String, dm ? dm : "default");
+    }
     posix_spawn_file_actions_destroy(&fa);
     close(to[0]); close(from[1]);
     g_svc_in = fdopen(to[1], "w"); g_svc_out = fdopen(from[0], "r");
     if (!g_svc_in || !g_svc_out) die("shader service streams");
-    LOG("[shader] runtime translation service started (pid %d), cache %s", pid, totk_rt_dir().UTF8String);
+    LOG("[shader] runtime translation service started (pid %d, %s), cache %s", pid,
+        use_native ? "native build/shader-service/totk_xlate" : "python3 scripts/shader_service.py + .NET", totk_rt_dir().UTF8String);
 }
 
 static NSString *hex(const uint8_t *p, size_t n) {

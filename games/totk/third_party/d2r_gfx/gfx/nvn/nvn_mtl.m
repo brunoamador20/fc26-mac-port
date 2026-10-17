@@ -4386,7 +4386,9 @@ static void shmap_load(void) {
     const char *e = getenv("DM_NVN_SHMAP");
     NSString *path = e ? @(e) : exe_rel("shader-map.tsv");
     NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
-    if (!txt) MDIE("读不到着色器映射表 %s（DM_NVN_SHMAP 可指定）", path.UTF8String);
+    /* TOTK (2026-10-17): the table's rows are never looked up (a shader's stage comes from its own control section), only
+       its folder is used to find pso_manifest.tsv / c1_full.tsv next to it; without the file (the packaged app has none) run on. */
+    if (!txt) { MLOG("没有着色器映射表 %s：运行时用不到它的内容（只用它所在的目录找 pso_manifest.tsv），照常运行", path.UTF8String); txt = @"# TOTK control-code-sha256-v1\n"; }
     if (![txt hasPrefix:@"# TOTK control-code-sha256-v1\n"]) MDIE("invalid TOTK shader map schema");
     g_shmap = [NSMutableDictionary dictionary];g_shassets = [NSMutableDictionary dictionary];
     for (NSString *ln in [txt componentsSeparatedByString:@"\n"]) {
@@ -8868,14 +8870,14 @@ static void mfxup_queue_residency(void) {   // the upscaler's own output texture
    blending, full write mask, viewport and scissor over the whole target, no depth / stencil test) and the region starts
    at the origin; anything else keeps the game's own upscale. Perceptual colour processing: the canvas holds display
    values (dd3d1e0e copies it to the swapchain unchanged). Returns 1 when the draw was replaced.
-   Not when the picture on screen is smaller than 1080p (user, 2026-10-17: below 1080p the game's default upscale): the
-   window shows it smaller than the canvas anyway. */
+   Only when the picture on screen is larger than 1080p, i.e. 2K (user, 2026-10-17: "1080p 不用 metalfx 只有2k用"): at
+   1080p and below the game's own upscale. view_h is 0 before the first present, which counts as not 2K. */
 static uint64_t g_mfxup_dock_n, g_mfxup_dock_no[7];
 static int mfxup_dock(__unsafe_unretained NvShader *fs) {
     if (strncmp(fs->key, "a3a570eb159202f1", 16)) return 0;
     const view_t *cv = &R.rt.cview[0]; int hv = R.rt.has_cview[0];
     int why = 0, view_h = atomic_load(&g_view_h);
-    if (view_h > 0 && view_h < 1080) { g_mfxup_dock_no[6]++; return 0; }   // small window: the game's own upscale, nothing to log
+    if (view_h <= 1080) { g_mfxup_dock_no[6]++; return 0; }   // 1080p or smaller on screen: the game's own upscale, nothing to log
     if (R.rt.n < 1 || !R.rt.color[0]) why = 1;
     for (int i = 1; !why && i < R.rt.n; i++) if (R.rt.color[i]) why = 1;
     if (!why && ((S.color.blend_en & 1) || (S.chmask.mask & 0xf) != 0xf || S.ms.a2c || (R.rt.depth && (S.ds.dt || S.ds.st)))) why = 2;
@@ -8932,7 +8934,7 @@ static int mfxup_draw(NvProg *pr) {
     if (!fs) return 0;
     if (mfxup_dock(fs)) {
         static unsigned n; if (++n % 1800 == 1) { char b[200]; mfxup_stats(MFXUP_DOCKED, b, sizeof b);
-            MLOG("[mfx-up] 至帧 %llu：%s；替换游戏放大 %llu 次，保留 %llu 次（建不出或在后台建 %llu、目标不符 %llu、混合/掩码/深度 %llu、尺寸 %llu、视口/剪裁 %llu、常量 %llu、屏幕上小于 1080p %llu）",
+            MLOG("[mfx-up] 至帧 %llu：%s；替换游戏放大 %llu 次，保留 %llu 次（建不出或在后台建 %llu、目标不符 %llu、混合/掩码/深度 %llu、尺寸 %llu、视口/剪裁 %llu、常量 %llu、屏幕上不到 2K %llu）",
                  (unsigned long long)atomic_load(&g_cur_frame), b, (unsigned long long)g_mfxup_dock_n,
                  (unsigned long long)(g_mfxup_dock_no[0] + g_mfxup_dock_no[1] + g_mfxup_dock_no[2] + g_mfxup_dock_no[3] + g_mfxup_dock_no[4] + g_mfxup_dock_no[5] + g_mfxup_dock_no[6]),
                  (unsigned long long)g_mfxup_dock_no[0], (unsigned long long)g_mfxup_dock_no[1], (unsigned long long)g_mfxup_dock_no[2],
@@ -10796,7 +10798,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     double dw = dst.width, dh = dst.height, s = fmin(dw / cw, dh / ch);
     MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
     if (fabs((dw / dh) / ((double)cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
-    atomic_store(&g_view_h, (int)vp.height);   // the picture's height on screen: below 1080 the docked upscale stays the game's own (mfxup_dock)
+    atomic_store(&g_view_h, (int)vp.height);   // the picture's height on screen: up to 1080 the docked upscale stays the game's own (mfxup_dock)
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     id<MTLTexture> up = output_upscale(cb, src, cx, cy, cw, ch, vp, uv_i);   // TOTK 2K output: MetalFX to the viewport, drawn 1:1 below
     id<MTLTexture> pic = up ? up : src;

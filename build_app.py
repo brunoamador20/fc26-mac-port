@@ -11,8 +11,9 @@ Steps (each one checked against games/totk/assets/expected-v1.0.0.json, so a dam
 build at the first wrong file):
   1. code: ExeFS out of the card image, the three code modules rewritten for Apple silicon (games/totk/third_party/d2r)
   2. data: RomFS (17 GB), the system shared fonts (from the card's own system update partition), the RomFS overlays
-  3. shaders: the game's shader table (shader-map.tsv); the shader translator (vendor/ryujinx + patches, .NET) and
-     SPIRV-Cross, both used by the game at run time to translate each shader once and cache it
+  3. shaders: SPIRV-Cross (fetched at a pinned commit, compiled with clang) and the shader translator, which ships
+     ready-made as a native program (games/totk/prebuilt/macos-arm64: vendor/ryujinx + patches + Service.cs, made with
+     games/totk/tools/totk_xlate/publish_native.sh); the game uses both to translate each shader once and cache it
   4. the game binary, the launcher, and the app bundle (the 17 GB RomFS is an APFS clone when on the same volume)
 
 Every intermediate file is in the work folder (default: "<card image folder>/TOTK_build"); a second run reuses
@@ -20,9 +21,9 @@ what is already done and correct. The finished app keeps no writable state: save
 ~/Library/Application Support/MacNativeGames/TOTK and ~/Library/Logs/MacNativeGames.
 
 Needs: macOS 26 or later on Apple silicon, the Xcode command line tools, Homebrew with
-    brew install opus libvpx cmake python@3.14 && brew install --cask dotnet-sdk
+    brew install opus libvpx python@3.14
 """
-import argparse, hashlib, json, os, platform, shutil, subprocess, sys, threading, time
+import argparse, concurrent.futures, hashlib, json, os, platform, shutil, subprocess, sys, threading, time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
@@ -31,9 +32,13 @@ EXPECTED = json.loads((GAME / 'assets/expected-v1.0.0.json').read_text())
 APP_NAME = 'Tears of the Kingdom'
 BUNDLE_ID = 'org.macnativegames.totk'
 # Pinned upstream sources fetched at build time (repository, commit)
-SHADER_LIBRARY = ('https://github.com/KillzXGaming/ShaderLibrary.git', '790dd2e501926e536a9193907d1256d446104162')
 SPIRV_CROSS = ('https://github.com/KhronosGroup/SPIRV-Cross.git', 'aa217aeb6c9f0ace7a0ab233b28807edf45eb165')
-TOOL_PATHS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/local/share/dotnet', os.path.expanduser('~/.dotnet')]
+# The spirv-cross program: the sources and flags of SPIRV-Cross's own CMake Release build of it, so no cmake is needed
+SPIRV_CROSS_SOURCES = ('main.cpp', 'spirv_cfg.cpp', 'spirv_cpp.cpp', 'spirv_cross.cpp', 'spirv_cross_parsed_ir.cpp',
+                       'spirv_cross_util.cpp', 'spirv_glsl.cpp', 'spirv_hlsl.cpp', 'spirv_msl.cpp', 'spirv_parser.cpp',
+                       'spirv_reflect.cpp')
+SPIRV_CROSS_FLAGS = ('-O3', '-DNDEBUG', '-std=c++11', '-arch', 'arm64', '-Wno-deprecated-declarations')
+TOOL_PATHS = ['/opt/homebrew/bin', '/usr/local/bin']
 
 
 class BuildError(Exception):
@@ -82,17 +87,6 @@ def check(what, got, want):
 
 
 # ---- prerequisites ----
-def find_dotnet(given):
-    for p in ([given] if given else []) + [shutil.which('dotnet', path=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '')]))]:
-        if p and Path(p).exists():
-            exe = Path(p).resolve()
-            r = subprocess.run([exe, '--list-sdks'], capture_output=True, text=True)
-            if any(line.startswith('10.') for line in r.stdout.splitlines()):
-                return exe
-            raise BuildError(f'{exe}: no .NET SDK 10 (brew install --cask dotnet-sdk)')
-    raise BuildError('dotnet not found: brew install --cask dotnet-sdk (or pass --dotnet <path to dotnet>)')
-
-
 def prerequisites(args):
     if platform.system() != 'Darwin' or platform.machine() != 'arm64':
         raise BuildError('needs a Mac with Apple silicon')
@@ -105,13 +99,12 @@ def prerequisites(args):
     missing = [p for p in ('opus', 'libvpx') if not (brew / 'opt' / p / 'lib').is_dir()]
     if missing:
         raise BuildError(f'Homebrew packages missing: brew install {" ".join(missing)}')
-    for tool in ('cmake', 'git'):
-        if not shutil.which(tool, path=os.pathsep.join(TOOL_PATHS + ['/usr/bin'])):
-            raise BuildError(f'{tool} not found: brew install {tool}')
+    if not shutil.which('git', path=os.pathsep.join(TOOL_PATHS + ['/usr/bin'])):
+        raise BuildError('git not found: xcode-select --install')
     py = next((p for p in (shutil.which(n, path=os.pathsep.join(TOOL_PATHS)) for n in ('python3.14', 'python3.15')) if p), None)
     if not py:
         raise BuildError('Python 3.14 not found (the build reads zstd with the standard library): brew install python@3.14')
-    return Path(py), find_dotnet(args.dotnet)
+    return Path(py)
 
 
 # ---- work folder ----
@@ -135,20 +128,16 @@ def link(path, target):
     path.symlink_to(target)
 
 
-def prepare_work(work, py, dotnet, logs):
+def prepare_work(work, py, logs):
     """work/totk: the game folder of this repository with the generated files inside it (the build scripts write
     extracted/, rewritten/, build/ and analysis/ next to themselves); its tooling/ points at the fetched sources."""
     tree = work / 'totk'
     tree.mkdir(parents=True, exist_ok=True)
     run(['rsync', '-a', f'{GAME}/', f'{tree}/'], logs / 'sources.log')
     src = work / 'src'
-    say('fetching the pinned ShaderLibrary and SPIRV-Cross sources')
-    git_fetch(*SHADER_LIBRARY, src / 'ShaderLibrary', logs / 'fetch-shader-library.log')
+    say('fetching the pinned SPIRV-Cross sources')
     git_fetch(*SPIRV_CROSS, src / 'SPIRV-Cross', logs / 'fetch-spirv-cross.log')
-    link(tree / 'tooling/shader-library', src / 'ShaderLibrary')
     link(tree / 'tooling/spirv-cross', src / 'SPIRV-Cross')
-    link(tree / 'tooling/d2r-mobile/dm/third_party/ryujinx', REPO / 'vendor/ryujinx')
-    link(tree / 'tooling/dotnet', dotnet.parent)
     venv = work / 'venv'
     if not (venv / 'bin/python').exists():
         say('Python environment for the build tools')
@@ -180,7 +169,7 @@ def step_code(tree, xci, keys, env, logs):
         image, h = out / f'{name}.patched.bin', EXPECTED['rewritten_sha256'][f'{name}.patched.bin']
         if image.exists() and sha256(image) == h:
             continue
-        say(f'1/4 code: rewriting {name} for Apple silicon' + (' (the big one: several minutes)' if name == 'main' else ''))
+        say(f'1/4 code: rewriting {name} for Apple silicon' + (' (the big one: about a minute)' if name == 'main' else ''))
         run([py, 'third_party/d2r/patch_nso.py', exefs / name, out, name], logs / f'rewrite_{name}.log', cwd=tree,
             env=dict(env, DM_RULESET='native', DM_PRIVATE_GATES='0'))
         check(f'rewritten {name}', sha256(image), h)
@@ -199,7 +188,7 @@ def step_data(tree, xci, keys, logs):
     ok = index.exists() and json.loads(index.read_text()).get('romfs_sha256') == EXPECTED['romfs']['sha256'] and \
         (romfs / 'romfs.bin').stat().st_size == EXPECTED['romfs']['size']
     if not ok:
-        say('2/4 data: extracting and verifying the RomFS (17 GB, about 10 minutes)')
+        say('2/4 data: extracting and verifying the RomFS (17 GB, a minute or two)')
         if romfs.exists():
             shutil.rmtree(romfs)
         run([py, 'scripts/extract_romfs.py', '--keys', keys], logs / 'extract_romfs.log', cwd=tree)
@@ -222,22 +211,31 @@ def step_data(tree, xci, keys, logs):
         run([py, 'scripts/make_output_res_overlay.py', '2560x1440'], logs / 'output_res_overlay.log', cwd=tree)
 
 
-def step_shaders(tree, env, logs):
-    py = tree / '.venv/bin/python'
-    if not (tree / 'build/shader-map.tsv').exists():
-        say('3/4 shaders: reading the game\'s shader archives (shader-map.tsv)')
-        run([py, 'scripts/prepare_graphics_assets.py'], logs / 'graphics_assets.log', cwd=tree)
-        run([tree / 'tooling/dotnet/dotnet', 'run', '--project', 'scripts/shader_inventory', '--',
-             'extracted/v0/graphics', 'extracted/v0/shaders-v2'], logs / 'shader_inventory.log', cwd=tree, env=env)
-        run([py, 'scripts/verify_shader_inventory.py'], logs / 'shader_map.log', cwd=tree)
-    if not (tree / 'build/totk_xlate/totk_xlate.dll').exists():
-        say('3/4 shaders: building the shader translator (Ryujinx, .NET)')
-        run(['make', 'shader-tools', f'RYU_PINNED={REPO / "vendor/ryujinx"}'], logs / 'shader_tools.log', cwd=tree, env=env)
+def build_spirv_cross(tree, logs):
+    """The spirv-cross program with clang (the sources and flags of SPIRV-Cross's CMake Release build of it)."""
+    src, out = tree / 'tooling/spirv-cross', tree / 'build/spirv-cross'
+    objs = out / 'obj'
+    objs.mkdir(parents=True, exist_ok=True)
+
+    def compile_one(name):
+        run(['xcrun', 'clang++', *SPIRV_CROSS_FLAGS, '-c', src / name, '-o', objs / (name + '.o')],
+            logs / 'spirv-cross' / (name + '.log'), quiet=False)
+    with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 4) as pool:
+        list(pool.map(compile_one, SPIRV_CROSS_SOURCES))
+    run(['xcrun', 'clang++', '-arch', 'arm64', *[objs / (n + '.o') for n in SPIRV_CROSS_SOURCES], '-o', out / 'spirv-cross'],
+        logs / 'spirv-cross' / 'link.log', quiet=False)
+
+
+def step_shaders(tree, logs):
     if not (tree / 'build/spirv-cross/spirv-cross').exists():
-        say('3/4 shaders: building SPIRV-Cross')
-        run(['cmake', '-S', 'tooling/spirv-cross', '-B', 'build/spirv-cross', '-DCMAKE_BUILD_TYPE=Release',
-             '-DSPIRV_CROSS_ENABLE_TESTS=OFF'], logs / 'spirv_cross_configure.log', cwd=tree, env=env)
-        run(['cmake', '--build', 'build/spirv-cross', '-j', str(os.cpu_count())], logs / 'spirv_cross_build.log', cwd=tree, env=env)
+        say('3/4 shaders: building SPIRV-Cross with clang')
+        build_spirv_cross(tree, logs)
+    # the shader translation service: a native program in this repository (no .NET needed to build or to play)
+    translator = tree / 'prebuilt/macos-arm64/totk_xlate'
+    want = (translator.parent / 'totk_xlate.sha256').read_text().strip()
+    if not translator.is_file() or sha256(translator) != want:
+        raise BuildError(f'{translator}: not the shader translator this repository ships (its SHA-256 differs from '
+                         f'totk_xlate.sha256); check it out again, or rebuild it with games/totk/tools/totk_xlate/publish_native.sh')
 
 
 def step_binary(tree, xci, keys, env, logs):
@@ -266,32 +264,18 @@ def copy_tree(src, dst):
             clone(p, dst / p.relative_to(src))
 
 
-def dotnet_runtime(tree, dst):
-    """Only what runs the translator: the dotnet host, hostfxr and the Microsoft.NETCore.App version it targets."""
-    root = (tree / 'tooling/dotnet').resolve()
-    cfg = json.loads((tree / 'build/totk_xlate/totk_xlate.runtimeconfig.json').read_text())['runtimeOptions']
-    want = cfg.get('framework', cfg.get('frameworks', [{}])[0])['version'].split('.')[0]
-    shared = sorted((root / 'shared/Microsoft.NETCore.App').glob(f'{want}.*'), key=lambda p: [int(x) if x.isdigit() else 0 for x in p.name.split('.')])
-    fxr = sorted((root / 'host/fxr').glob(f'{want}.*'))
-    if not shared or not fxr:
-        raise BuildError(f'no .NET {want} runtime under {root}')
-    clone(root / 'dotnet', dst / 'dotnet')
-    copy_tree(fxr[-1], dst / 'host/fxr' / fxr[-1].name)
-    copy_tree(shared[-1], dst / 'shared/Microsoft.NETCore.App' / shared[-1].name)
-
-
 def step_app(tree, out, logs):
     tmp = out.with_name(out.name + '.partial')
     if tmp.exists():
         shutil.rmtree(tmp)
     res = tmp / 'Contents/Resources/totk'
-    for rel in ('build/totk-native', 'build/pso_manifest.tsv', 'build/shader-map.tsv', 'build/spirv-cross/spirv-cross',
-                'scripts/shader_service.py', 'rewritten/v0/main.patched.bin', 'rewritten/v0/sdk.patched.bin',
+    for rel in ('build/totk-native', 'build/pso_manifest.tsv', 'build/spirv-cross/spirv-cross',
+                'rewritten/v0/main.patched.bin', 'rewritten/v0/sdk.patched.bin',
                 'rewritten/v0/subsdk0.patched.bin', 'extracted/v0/romfs/romfs.bin', 'extracted/v0/romfs/runtime-index.bin'):
         clone(tree / rel, res / rel)
-    for rel in ('build/totk_xlate', 'extracted/v0/romfs-patches', 'extracted/v0/romfs-patches-out', 'extracted/firmware/shared-fonts'):
+    clone(tree / 'prebuilt/macos-arm64/totk_xlate', res / 'build/shader-service/totk_xlate')   # where totk_shader_rt.m looks for it
+    for rel in ('extracted/v0/romfs-patches', 'extracted/v0/romfs-patches-out', 'extracted/firmware/shared-fonts'):
         copy_tree(tree / rel, res / rel)
-    dotnet_runtime(tree, res / 'tooling/dotnet')
     clone(tree / 'build/app-launcher', tmp / 'Contents/MacOS/TOTK')
     info = dict(CFBundleDevelopmentRegion='en', CFBundleExecutable='TOTK', CFBundleIdentifier=BUNDLE_ID, CFBundleName=APP_NAME,
                 CFBundleDisplayName=APP_NAME, CFBundlePackageType='APPL', CFBundleShortVersionString=EXPECTED['display_version'],
@@ -317,7 +301,6 @@ def parse_args(argv):
     ap.add_argument('-k', '--keys', type=Path, required=True, help='your prod.keys')
     ap.add_argument('-o', '--out', type=Path, help=f'the app to write (default: "{APP_NAME}.app" next to the card image)')
     ap.add_argument('--work', type=Path, help='work folder (default: TOTK_build next to the card image)')
-    ap.add_argument('--dotnet', help='the dotnet executable to use (default: from PATH or the usual install folders)')
     return ap.parse_args(argv)
 
 
@@ -332,7 +315,7 @@ def main(argv):
     work = (args.work.expanduser().resolve() if args.work else xci.parent / 'TOTK_build')
     if out.suffix != '.app':
         raise BuildError(f'the output must end in .app: {out}')
-    py, dotnet = prerequisites(args)
+    py = prerequisites(args)
     free = shutil.disk_usage(work.parent if work.parent.exists() else xci.parent).free / 2**30
     say(f'work folder {work} ({free:.0f} GB free on its volume)')
     if free < 25 and not (work / 'totk/extracted/v0/romfs/romfs.bin').exists():
@@ -340,10 +323,10 @@ def main(argv):
     logs = work / 'logs'
     env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
     t0 = time.time()
-    tree = prepare_work(work, py, dotnet, logs)
+    tree = prepare_work(work, py, logs)
     step_code(tree, xci, keys, env, logs)
     step_data(tree, xci, keys, logs)
-    step_shaders(tree, env, logs)
+    step_shaders(tree, logs)
     step_binary(tree, xci, keys, env, logs)
     say(f'4/4 app: assembling {out}')
     step_app(tree, out, logs)

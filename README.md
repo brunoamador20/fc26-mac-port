@@ -18,8 +18,7 @@ It is not an emulator: the game's own ARM64 code runs directly on the Apple chip
 
 ```
 xcode-select --install
-brew install opus libvpx cmake python@3.14
-brew install --cask dotnet-sdk
+brew install opus libvpx python@3.14
 ```
 
 **2. Run the script** with your card image and keys:
@@ -29,7 +28,7 @@ git clone <this repository> MacNativeGames && cd MacNativeGames
 python3 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys
 ```
 
-The app appears next to the card image (`Tears of the Kingdom.app`; `-o` chooses another place). The first build takes about 10 minutes on an M4 Mac mini (slower Macs and disks take longer): rewriting the main code module, decrypting the 17 GB of game data, and letting macOS check the finished app once take most of it. Every intermediate file is in a work folder next to the card image (`TOTK_build`, or `--work`); running the script again reuses what is already done.
+The app appears next to the card image (`Tears of the Kingdom.app`; `-o` chooses another place). The first build takes about 6 minutes on an M4 Mac mini (slower Macs and disks take longer): about a minute each to rewrite the main code module and to decrypt the 17 GB of game data, and two to three minutes for macOS to check the finished app once. Building needs no .NET and no cmake, and the finished game needs no Python: its shader translator is a native program that comes with this repository (`games/totk/prebuilt`). Every intermediate file is in a work folder next to the card image (`TOTK_build`, or `--work`); running the script again reuses what is already done.
 
 Each step is checked against the hashes in `games/totk/assets/expected-v1.0.0.json`: another version or a damaged dump stops the build at the first file that differs. Key values are never printed.
 
@@ -48,7 +47,7 @@ A game controller (DualSense, Xbox, …) works as a Switch Pro Controller, with 
 | F T H G | d-pad left / up / right / down | | Z / C | left / right stick press |
 | Return | + (menu) | | Tab, Esc | − (map) |
 
-Extra keys: **1** MetalFX upscaling on / off, **2** frame interpolation (off → 30+30 → half the refresh rate → unlimited), **3** the game's own 2560×1440 output ↔ 1080p output upscaled by MetalFX. Text entry (naming a horse) uses the Mac keyboard.
+Extra keys: **1** MetalFX upscaling on / off (MetalFX is used only for 2K: when the picture on screen is bigger than 1080p), **2** frame interpolation (off → 30+30 → half the refresh rate → unlimited), **3** the game's own 2560×1440 output ↔ 1080p output upscaled by MetalFX. Text entry (naming a horse) uses the Mac keyboard.
 
 ## Where things are
 
@@ -70,8 +69,8 @@ See [docs/how-it-works.md](docs/how-it-works.md).
 
 - **[d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)** (MIT) developed this way of running Switch games natively (for Diablo II: Resurrected): the NSO rewriter, the Horizon host and the NVN-on-Metal layer here started as its generic parts.
 - **[nxnative](https://github.com/seedds/nxnative)**: the one-script packaging from the user's own game files follows its approach.
-- **Ryujinx** (MIT): its shader translator (`vendor/ryujinx`) turns the game's Maxwell shaders into SPIR-V, and its system-service code is a reference.
-- **[ShaderLibrary](https://github.com/KillzXGaming/ShaderLibrary)** (MIT) reads the game's shader archives; **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)** (Apache-2.0) turns SPIR-V into Metal Shading Language. Both are fetched at a pinned commit during the build.
+- **Ryujinx** (MIT): its shader translator (`vendor/ryujinx`) turns the game's Maxwell shaders into SPIR-V, and its system-service code is a reference. With this project's patches and service it is compiled ahead of time (.NET NativeAOT) into `games/totk/prebuilt/macos-arm64/totk_xlate`; `games/totk/tools/totk_xlate/publish_native.sh` rebuilds it (needs the .NET 10 SDK, only for developers).
+- **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)** (Apache-2.0) turns SPIR-V into Metal Shading Language; it is fetched at a pinned commit and compiled with clang during the build.
 - **deko3d** (zlib): texture layout sizes. **bcdec**: BC texture decoding. **libopus** and **libvpx** (BSD) from Homebrew: audio and the pre-rendered movies.
 
 ## License
@@ -98,8 +97,7 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 
 ```
 xcode-select --install
-brew install opus libvpx cmake python@3.14
-brew install --cask dotnet-sdk
+brew install opus libvpx python@3.14
 ```
 
 **2. 运行脚本**，给出卡带镜像和密钥：
@@ -109,7 +107,7 @@ git clone <本仓库> MacNativeGames && cd MacNativeGames
 python3 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys
 ```
 
-App 出现在卡带镜像旁边（`Tears of the Kingdom.app`；`-o` 指定别处）。第一次打包在 M4 Mac mini 上约 10 分钟（更慢的 Mac 和磁盘会更久），大头是改写主代码模块、解密 17 GB 的游戏数据，以及让 macOS 把做好的 App 检查一遍。所有中间文件都在卡带镜像旁边的工作目录里（`TOTK_build`，或用 `--work` 指定），再运行一次会复用已经做好的部分。
+App 出现在卡带镜像旁边（`Tears of the Kingdom.app`；`-o` 指定别处）。第一次打包在 M4 Mac mini 上约 6 分钟（更慢的 Mac 和磁盘会更久）：改写主代码模块、解密 17 GB 的游戏数据各约 1 分钟，macOS 把做好的 App 检查一遍要 2–3 分钟。打包不需要 .NET 和 cmake，做好的游戏运行时也不需要 Python：着色器翻译器是本仓库自带的原生程序（`games/totk/prebuilt`）。所有中间文件都在卡带镜像旁边的工作目录里（`TOTK_build`，或用 `--work` 指定），再运行一次会复用已经做好的部分。
 
 每一步都和 `games/totk/assets/expected-v1.0.0.json` 里的哈希核对：版本不对或镜像损坏，会在第一个对不上的文件处停下。密钥的值不会被打印。
 
@@ -128,7 +126,7 @@ App 出现在卡带镜像旁边（`Tears of the Kingdom.app`；`-o` 指定别处
 | F T H G | 十字键 左 / 上 / 右 / 下 | | Z / C | 左 / 右摇杆按下 |
 | Return | +（菜单） | | Tab、Esc | −（地图） |
 
-额外按键：**1** 开关 MetalFX 放大，**2** 补帧（关 → 30+30 → 刷新率一半 → 不限帧），**3** 游戏自己输出 2560×1440 ↔ 输出 1080p 再由 MetalFX 放大。文字输入（给马取名）直接用 Mac 键盘。
+额外按键：**1** 开关 MetalFX 放大（MetalFX 只在 2K 用：画面在屏幕上大于 1080p 时），**2** 补帧（关 → 30+30 → 刷新率一半 → 不限帧），**3** 游戏自己输出 2560×1440 ↔ 输出 1080p 再由 MetalFX 放大。文字输入（给马取名）直接用 Mac 键盘。
 
 ## 文件位置
 
@@ -150,8 +148,8 @@ App 出现在卡带镜像旁边（`Tears of the Kingdom.app`；`-o` 指定别处
 
 - **[d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)**（MIT）为《暗黑破坏神 II：狱火重生》开发了这套原生运行 Switch 游戏的方法：这里的 NSO 改写器、Horizon 宿主和 Metal 上的 NVN 层都从它的通用部分起步。
 - **[nxnative](https://github.com/seedds/nxnative)**：“用户自己的游戏文件 + 一个脚本出包”的做法借鉴自它。
-- **Ryujinx**（MIT）：它的着色器翻译器（`vendor/ryujinx`）把游戏的 Maxwell 着色器转成 SPIR-V，它的系统服务代码也是参考。
-- **[ShaderLibrary](https://github.com/KillzXGaming/ShaderLibrary)**（MIT）读游戏的着色器档案；**[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)**（Apache-2.0）把 SPIR-V 转成 Metal 着色语言。两者都在打包时按固定提交取得。
+- **Ryujinx**（MIT）：它的着色器翻译器（`vendor/ryujinx`）把游戏的 Maxwell 着色器转成 SPIR-V，它的系统服务代码也是参考。加上本项目的补丁和着色器服务，用 .NET NativeAOT 预先编成原生程序 `games/totk/prebuilt/macos-arm64/totk_xlate`；改了翻译器用 `games/totk/tools/totk_xlate/publish_native.sh` 重编（要 .NET 10 SDK，只有开发者需要）。
+- **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)**（Apache-2.0）把 SPIR-V 转成 Metal 着色语言；打包时按固定提交取得，用 clang 编。
 - **deko3d**（zlib）：贴图布局尺寸。**bcdec**：BC 贴图解码。**libopus**、**libvpx**（BSD，来自 Homebrew）：音频和预渲染影片。
 
 ## 许可证

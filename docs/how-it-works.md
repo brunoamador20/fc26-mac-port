@@ -31,7 +31,10 @@ host and replays each submitted command buffer on Metal 4: textures and buffers 
 Metal resources (with dirty-page tracking for what the CPU changes), render targets become render passes, and draws
 become Metal draws. Shaders are Maxwell machine code: the first time one is used it is translated by the Ryujinx shader
 translator (to SPIR-V), SPIRV-Cross (to Metal Shading Language) and Metal, and the result is cached
-(`~/Library/Application Support/MacNativeGames/TOTK/shader-cache`). MetalFX upscales the game's 1600x900 scene into its
+(`~/Library/Application Support/MacNativeGames/TOTK/shader-cache`). The translator runs as one native program,
+`totk_xlate --service` (`games/totk/tools/totk_xlate`: the Ryujinx translator with this project's patches and the
+service that turns each request into the MSL and its reflection file), compiled ahead of time with .NET NativeAOT; it
+ships ready-made in `games/totk/prebuilt/macos-arm64`, so neither building nor playing needs .NET or Python. MetalFX upscales the game's 1600x900 scene into its
 1080p or 1440p canvas and can generate in-between frames.
 
 ## The build (build_app.py)
@@ -40,6 +43,6 @@ translator (to SPIR-V), SPIRV-Cross (to Metal Shading Language) and Metal, and t
 2. The RomFS (17 GB) decrypted and verified, the shared fonts taken from the card's system update partition, and the
    RomFS overlays (small data patches: quick-menu capture timing at high frame rates, the game-over retry, the heap
    sizes the 1440p output needs) made from your own files.
-3. The shader table read from the game's shader archives; the shader translator and SPIRV-Cross built.
+3. SPIRV-Cross compiled with clang; the prebuilt shader translator checked against its SHA-256.
 4. The game binary built against your extracted files (it checks their hashes at every start) and everything put into
    an app bundle; the app's launcher points the game at your profile, cache and log folders.
