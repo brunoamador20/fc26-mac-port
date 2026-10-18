@@ -53,12 +53,13 @@ NSString *totk_rt_dir(void) {
         g_dir = e ? @(e) : [root_dir() stringByAppendingFormat:@"/build/shader-cache/rt-%s", DMSH_CHAIN];
 #endif
         [NSFileManager.defaultManager createDirectoryAtPath:g_dir withIntermediateDirectories:YES attributes:nil error:nil];
-#if !TARGET_OS_IPHONE
         const char *seedMode = getenv("TOTK_SHADER_SEED");
         if (!(seedMode && !strcmp(seedMode, "off"))) {
             NSError *error = nil;
             if (runtime_boot_status) runtime_boot_status("检查着色器缓存","校验 App 附带的着色器，并按需导入本机缓存");
-            NSDictionary *seed = totk_seed_import([root_dir() stringByAppendingPathComponent:@"build/shader-seed"], g_dir, &error);
+            const char *seedPath = getenv("TOTK_SHADER_SEED_DIR");
+            NSString *source = seedPath ? @(seedPath) : [root_dir() stringByAppendingPathComponent:@"build/shader-seed"];
+            NSDictionary *seed = totk_seed_import(source, g_dir, &error);
             if (!seed) {   // 2026-10-18: a damaged bundle or a full disk used to end the game here with nothing on screen. The
                            // cache stays usable (totk_seed_import writes shader files before the indexes that name them),
                            // so play on and translate shaders as they first appear, as before the prepared shaders existed.
@@ -76,6 +77,12 @@ NSString *totk_rt_dir(void) {
                     : "本机缓存已存在，无需重新导入；开始预热");
             } else if (runtime_boot_status && ![seed[@"failed"] boolValue]) runtime_boot_status("着色器缓存已就绪","没有内置着色器种子，继续初始化图形");
         }
+#if TARGET_OS_IPHONE
+        // Variants that ios/tools/fill_shaders.py translated on the Mac for this device's earlier misses (shader-requests/).
+        NSDictionary *fill = totk_fill_import(@"shader-fill", g_dir);
+        if ([fill[@"packs"] unsignedIntegerValue]) LOG("[shader-fill] 合并 Mac 补译的着色器包 %lu 个，导入 %lu 个文件",
+            (unsigned long)[fill[@"packs"] unsignedIntegerValue], (unsigned long)[fill[@"imported_files"] unsignedIntegerValue]);
+        for (NSString *why in fill[@"rejected"]) LOG("【红】[shader-fill] 丢弃不完整的着色器包 %s（请在 Mac 上重新运行 fill_shaders.py）", why.UTF8String);
 #endif
     });
     return g_dir;

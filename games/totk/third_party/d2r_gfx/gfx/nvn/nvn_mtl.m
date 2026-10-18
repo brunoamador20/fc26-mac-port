@@ -4639,6 +4639,20 @@ static MTLCompileOptions *totk_precise_opts(void) {
     if (getenv("TOTK_FAST_MATH") && atoi(getenv("TOTK_FAST_MATH"))) { if (@available(macOS 15.0, *)) o.mathMode = MTLMathModeFast; else o.fastMathEnabled = YES; MLOG("【实验】TOTK_FAST_MATH=1：着色器用快速数学"); }
     return o;
 }
+/* Compile translated MSL with the precise options. The system compiler service (MTLCompilerService) can be stopped under
+   memory pressure in the middle of a compile (iPad, 2026-10-18: "Compilation failed due to an interrupted connection:
+   XPC_ERROR_CONNECTION_INTERRUPTED" while the shader warm-up was running); it restarts on the next request, so such a
+   failure is retried instead of being taken as a broken shader. */
+static id<MTLLibrary> totk_msl_library(NSString *src, NSError **err) {
+    NSError *e = nil;
+    for (int attempt = 1;; attempt++) {
+        id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:totk_precise_opts() error:&e];
+        BOOL interrupted = !lib && [e.localizedDescription containsString:@"XPC_ERROR_CONNECTION_INTERRUPTED"];
+        if (lib || !interrupted || attempt == 4) { if (err) *err = e; return lib; }
+        MLOG("【红】着色器编译服务连接中断（第 %d 次），%d ms 后重试", attempt, attempt * 100);
+        usleep((useconds_t)attempt * 100000);
+    }
+}
 /* TOTK (2026-10-15): which words of the NVN driver constant segments c0 / c2 a translated shader reads, scanned from its MSL
    at load (spirv-cross names them <stage>p_c0 / <stage>p_c2: vp_, fp_, cp_). The translation-time scan
    (scripts/shader_service.py drv_reads) matched only fragment shaders (fp_c0) until 2026-10-15, so every vertex and compute
@@ -4720,7 +4734,7 @@ static NvShader *shader_load(NSString *pc, int stage) {
         if ([NSFileManager.defaultManager fileExistsAtPath:rt_lib]) { lib = lib_from_file(rt_lib, &e); if (!lib) MLOG("【红】预编译着色器库加载失败 %s：%s（改为现编）", pc.UTF8String, e.localizedDescription.UTF8String); else g_rt_prebuilt++; }
 #endif
         if (!lib) { NSString *src = [NSString stringWithContentsOfFile:rt_src encoding:NSUTF8StringEncoding error:&e];
-                    if (src) { lib = [g_dev newLibraryWithSource:src options:totk_precise_opts() error:&e]; g_rt_compiled++; } }
+                    if (src) { lib = totk_msl_library(src, &e); g_rt_compiled++; } }
     } else lib = lib_from_file(lp, &e);
     if (rt && (g_rt_prebuilt + g_rt_compiled) % 200 == 1) MLOG("着色器库：预编译加载 %llu 个，现编 %llu 个", (unsigned long long)g_rt_prebuilt, (unsigned long long)g_rt_compiled);
     NSData *jd = [NSData dataWithContentsOfFile:[NSString stringWithFormat:@"%@/%@.json", rt ? totk_rt_dir() : g_msl_dir, pc]];
@@ -5507,7 +5521,7 @@ static id<MTLFunction> vs_fn_for(NvShader *vs, NvShader *fs, int layered) {
             src = [src stringByReplacingCharactersInRange:[src rangeOfString:entry] withString:[entry stringByAppendingFormat:@"constant uint& totk_layer_in [[buffer(%d)]], ", LAY_BUF_INDEX]];
             src = [src stringByReplacingOccurrencesOfString:@"return out;" withString:@"{ out.totk_layer = totk_layer_in; return out; }"];
         }
-        NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:totk_precise_opts() error:&e];
+        NSError *e = nil; id<MTLLibrary> lib = totk_msl_library(src, &e);
         f = lib ? [lib newFunctionWithName:vs->fn.name] : nil;
         if (!f) MDIE("vertex shader %s (variant %s): %s", vs->key, key.UTF8String, e.localizedDescription.UTF8String);
         if (!vs->vpatch) vs->vpatch = [NSMutableDictionary dictionary];
@@ -5540,7 +5554,7 @@ static id<MTLFunction> fs_fn_without_depth(NvShader *fs) {
     static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT; os_unfair_lock_lock(&lock);
     if (!fs->no_depth_fn) {
         NSString *src = fs_src_without_depth(fs);
-        NSError *err = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:totk_precise_opts() error:&err];
+        NSError *err = nil; id<MTLLibrary> lib = totk_msl_library(src, &err);
         fs->no_depth_fn = lib ? [lib newFunctionWithName:fs->fn.name] : nil;
         if (!fs->no_depth_fn) MDIE("fragment shader %s without depth export: %s", fs->key, err.localizedDescription.UTF8String);
         MLOG("[totk] fragment depth export omitted for a color-only pass: %s", fs->key);
@@ -5569,7 +5583,7 @@ static id<MTLFunction> fs_fn_mfx(NvShader *fs, int role, int nodepth) {
         if (e && [src rangeOfString:head].location != NSNotFound && [src rangeOfString:@"[[color(7)]]"].location == NSNotFound) {
             src = [src stringByReplacingCharactersInRange:[src rangeOfString:head] withString:[head stringByAppendingString:@"    float4 totk_mfx_copy [[color(7)]];\n"]];
             src = [src stringByReplacingOccurrencesOfString:@"return out;" withString:[NSString stringWithFormat:@"{ out.totk_mfx_copy = %@; return out; }", e]];
-            NSError *err = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:totk_precise_opts() error:&err];
+            NSError *err = nil; id<MTLLibrary> lib = totk_msl_library(src, &err);
             fs->mfx_fn[idx] = lib ? [lib newFunctionWithName:fs->fn.name] : nil;
             if (!fs->mfx_fn[idx]) MDIE("fragment shader %s, MetalFX copy (role %d): %s", fs->key, role, err.localizedDescription.UTF8String);
         } else MLOG("【红】[mfx] fragment shader %s: colour 0 (%s) cannot be copied to the UI layer; this draw is left out of it", fs->key, type ? type.UTF8String : "none");
@@ -5633,7 +5647,7 @@ static id<MTLFunction> nan_trace_fn(NvShader *fs) {
         [o appendFormat:@"%@\n", l];
     }
     if (in_entry != 3) MDIE("TOTK_NAN_TRACE: could not instrument %s (state %d)", fs->key, in_entry);
-    NSError *err = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:o options:totk_precise_opts() error:&err];
+    NSError *err = nil; id<MTLLibrary> lib = totk_msl_library(o, &err);
     id<MTLFunction> fn = lib ? [lib newFunctionWithName:fs->fn.name] : nil;
     if (!fn) MDIE("TOTK_NAN_TRACE: %s does not compile: %s", fs->key, err.localizedDescription.UTF8String);
     MLOG("TOTK_NAN_TRACE: %s rebuilt with %d checked temporaries, outputs %s", fs->key, instrumented, [outs componentsJoinedByString:@","].UTF8String);
@@ -8322,7 +8336,7 @@ static void clear_quad_core(id<MTL4RenderCommandEncoder> en, const uint32_t cfmt
         NSString *src = [NSString stringWithFormat:@"#include <metal_stdlib>\nusing namespace metal;\nconstant float4 cc [[function_constant(0)]];\n"
             "vertex float4 cq_vs(uint id [[vertex_id]]) { float2 p = float2((id << 1) & 2, id & 2); return float4(p * 2 - 1, 0, 1); }\n"
             "struct O { float4 c [[color(%d)]]; };\nfragment O cq_fs() { O o; o.c = cc; return o; }\n", index];
-        NSError *e = nil; libs[index] = [g_dev newLibraryWithSource:src options:totk_precise_opts() error:&e];
+        NSError *e = nil; libs[index] = totk_msl_library(src, &e);
         if (!libs[index]) MDIE("clear shader: %s", e.localizedDescription.UTF8String);
     }
     NSString *key = [NSString stringWithFormat:@"%d/%x/%u,%u,%u,%u,%u,%u,%u,%u/%u/%u/%u/%a,%a,%a,%a", index, mask, cfmt[0], cfmt[1], cfmt[2], cfmt[3], cfmt[4], cfmt[5], cfmt[6], cfmt[7],
@@ -11874,8 +11888,8 @@ int mtl_probe_depth_output(void) {
     mtl_init();
     NSString *vsrc = @"#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 p [[position]]; };\nvertex V vs(uint id [[vertex_id]]) { float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)}; return {float4(p[id],0.75,1)}; }";
     NSString *fsrc = @"#include <metal_stdlib>\nusing namespace metal;\nstruct main0_out { float4 color [[color(0)]]; float gl_FragDepth [[depth(any)]]; };\nfragment main0_out main0() { main0_out out = {}; out.gl_FragDepth=0.125; out.color=float4(out.gl_FragDepth*2,0.5,0.75,1); return out; }";
-    NSError *err = nil; id<MTLLibrary> vl = [g_dev newLibraryWithSource:vsrc options:totk_precise_opts() error:&err];
-    id<MTLLibrary> fl = [g_dev newLibraryWithSource:fsrc options:totk_precise_opts() error:&err];
+    NSError *err = nil; id<MTLLibrary> vl = totk_msl_library(vsrc, &err);
+    id<MTLLibrary> fl = totk_msl_library(fsrc, &err);
     if (!vl || !fl) MDIE("depth output probe compile: %s", err.localizedDescription.UTF8String);
     NvShader *vs = [NvShader new], *fs = [NvShader new]; vs->fn = [vl newFunctionWithName:@"vs"]; vs->io = @{};
     fs->fn = [fl newFunctionWithName:@"main0"]; fs->src = fsrc; fs->io = @{}; fs->writes_depth = 1; strcpy(fs->key, "probe-depth-output");
@@ -12803,7 +12817,7 @@ int mtl_probe_dispatch_chain(void) {
     NvProg *pr[2]; prog_t pg[2] = {{0}, {0}};
     for (int k = 0; k < 2; k++) {
         NSError *e = nil; NSString *msl = [NSString stringWithFormat:@"%s%s", head, body[k]];
-        id<MTLLibrary> lib = [g_dev newLibraryWithSource:msl options:totk_precise_opts() error:&e];
+        id<MTLLibrary> lib = totk_msl_library(msl, &e);
         if (!lib) MDIE("dispatch-chain probe: kernel %d does not compile: %s", k, e.localizedDescription.UTF8String);
         NvShader *cs = [NvShader new]; cs->fn = [lib newFunctionWithName:@"main0"]; cs->stage = 5; cs->src = msl;
         snprintf(cs->key, sizeof cs->key, "probe-dispatch-chain-%d", k);
@@ -12880,7 +12894,7 @@ int mtl_probe_layer_merge(void) {
         "    out.m_0 = float4(float(k + 1u) / 64.0, 0.25, 0.5, 1.0);\n    if (k >= 64u)\n    {\n        return out;\n    }\n    return out;\n}\n";
     NSString *fsrc = @"#include <metal_stdlib>\nusing namespace metal;\n\nstruct main0_out\n{\n    float4 c [[color(0)]];\n};\n\nstruct main0_in\n{\n    float4 m_0 [[user(locn0)]];\n};\n\n"
         "fragment main0_out main0(main0_in in [[stage_in]])\n{\n    main0_out out = {};\n    out.c = in.m_0;\n    return out;\n}\n";
-    NSError *e = nil; id<MTLLibrary> vl = [g_dev newLibraryWithSource:vsrc options:totk_precise_opts() error:&e], fl = vl ? [g_dev newLibraryWithSource:fsrc options:totk_precise_opts() error:&e] : nil;
+    NSError *e = nil; id<MTLLibrary> vl = totk_msl_library(vsrc, &e), fl = vl ? totk_msl_library(fsrc, &e) : nil;
     if (!vl || !fl) MDIE("layer probe shaders: %s", e.localizedDescription.UTF8String);
     NvShader *vs = [NvShader new], *vs_plain = [NvShader new], *fs = [NvShader new];
     vs->fn = vs_plain->fn = [vl newFunctionWithName:@"main0"]; vs->src = vsrc; strcpy(vs->key, "probe-layer-vs"); strcpy(vs_plain->key, "probe-layer-vs-without-msl");

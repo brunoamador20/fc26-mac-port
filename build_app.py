@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""MacNativeGames: turn your own XCI or NSP into a native Mac app (macOS only).
+"""MacNativeGames: turn your own XCI or NSP into a native Mac app or iPhone/iPad IPA.
 
-    python3 build_app.py <game.xci|game.nsp> -k <prod.keys> [-o "<output>.app"] [--work <folder>]
+    python3 build_app.py <game.xci|game.nsp> -k <prod.keys> [--platform macos|ios] [-o <output>] [--work <folder>]
 
 Supported: TOTK base 1.0.0 (0100F2C0115B6000), XCI or NSP; optional --update with a supported cumulative update.
-NSPs need common tickets (unless rights-free) and a separate shared-font source. No iPhone/iOS builds are supported.
+NSPs need common tickets (unless rights-free) and a separate shared-font source. iOS builds are unsigned IPAs for sideloading and require Xcode 26+, xcodegen, CMake, and network access to build device libraries.
 Nothing from the game is in this repository; everything is made from your files on your Mac. Key values are never printed.
 
 Steps (each one checked against games/totk/assets/expected-v<version>.json, so a damaged dump or another version stops the
@@ -15,14 +15,15 @@ build at the first wrong file):
      ready-made as a native program (games/totk/prebuilt/macos-arm64: vendor/ryujinx + patches + Service.cs, made with
      games/totk/tools/totk_xlate/publish_native.sh); startup shaders are extracted from your selected RomFS and
      translated into a bundled seed, ready for GPU warm-up even with an empty cache on the first launch
-  4. the game binary, the launcher, and the app bundle (the 17 GB RomFS is an APFS clone when on the same volume)
+  4. the game binary and either a macOS app bundle or an unsigned iPhone/iPad IPA (large game data is cloned when possible)
 
 Every intermediate file is in the work folder (default: "<game file folder>/TOTK_build"); a second run reuses
-what is already done and correct. The finished app keeps no writable state: saves, the shader cache and logs go to
-~/Library/Application Support/MacNativeGames/TOTK and ~/Library/Logs/MacNativeGames.
+what is already done and correct. Mac saves, shader cache and logs go to the user's Library folders; iOS keeps saves
+and the writable shader cache in the app's Documents container.
 
-Needs: macOS 26 or later on Apple silicon, the Xcode command line tools, Homebrew with
+Needs for Mac: macOS 26 or later on Apple silicon, the Xcode command line tools, Homebrew with
     brew install opus libvpx python@3.14
+For iPhone/iPad: Xcode 26+ with iOS/Metal toolchains, plus xcodegen, CMake and Ninja.
 """
 import argparse, concurrent.futures, hashlib, json, os, platform, shutil, subprocess, sys, threading, time
 from pathlib import Path
@@ -610,12 +611,13 @@ def step_app(tree, out, logs, *, version="v0"):
 
 
 def parse_args(argv):
-    ap = argparse.ArgumentParser(description='Build one native macOS app from TOTK base 1.0.0 (XCI/NSP), optionally with the separate 1.1.2 or 1.4.3 update.',
+    ap = argparse.ArgumentParser(description='Build a native Mac app or unsigned iPhone/iPad IPA from TOTK base 1.0.0 (XCI/NSP), optionally with the separate 1.1.2 or 1.4.3 update.',
                                  epilog='example: python3 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys')
     ap.add_argument('game', type=Path, help='the game file (.xci or .nsp), base game 1.0.0')
     ap.add_argument('--update', type=Path, help='separate supported cumulative update NSP/NSZ; outputs the same single app')
+    ap.add_argument('--platform', choices=('macos','ios'), default='macos', help='build a macOS app (default) or unsigned iPhone/iPad IPA')
     ap.add_argument('-k', '--keys', type=Path, required=True, help='your prod.keys')
-    ap.add_argument('-o', '--out', type=Path, help=f'the app to write (default: "{APP_NAME}.app" next to the game file)')
+    ap.add_argument('-o', '--out', type=Path, help=f'the app or IPA to write (default depends on --platform; next to the game file)')
     ap.add_argument('--work', type=Path, help='work folder (default: TOTK_build next to the game file)')
     fonts = ap.add_mutually_exclusive_group()
     fonts.add_argument('--firmware', type=Path, help='unpacked firmware NCA directory providing the six expected shared fonts (needed for NSP unless --shared-fonts or valid cached fonts are available)')
@@ -630,10 +632,10 @@ def main(argv):
         raise BuildError(f'no such file: {game}')
     if not keys.is_file():
         raise BuildError(f'no such file: {keys}')
-    out = (args.out.expanduser().resolve() if args.out else game.parent / f'{APP_NAME}.app')
+    out = (args.out.expanduser().resolve() if args.out else game.parent / (f'{APP_NAME}.ipa' if args.platform=='ios' else f'{APP_NAME}.app'))
     work = (args.work.expanduser().resolve() if args.work else game.parent / 'TOTK_build')
-    if out.suffix != '.app':
-        raise BuildError(f'the output must end in .app: {out}')
+    if out.suffix.lower() != ('.ipa' if args.platform=='ios' else '.app'):
+        raise BuildError(f'the {args.platform} output must end in {".ipa" if args.platform=="ios" else ".app"}: {out}')
     kind = input_kind(game)
     if kind not in ('xci', 'nsp'):
         raise BuildError('the base game must be an uncompressed XCI or NSP; NSZ is supported for update packages')
@@ -651,12 +653,31 @@ def main(argv):
         raise BuildError('NSP files do not include system shared fonts. Supply --firmware <unpacked firmware NCA directory> '
                          'or --shared-fonts <previously extracted font directory>; valid fonts in --work are also reused.')
     py = prerequisites(args)
-    free = shutil.disk_usage(work.parent if work.parent.exists() else game.parent).free / 2**30
+    def existing_volume_path(path):
+        path=path.resolve()
+        while not path.exists(): path=path.parent
+        return path
+    work_volume=existing_volume_path(work.parent if work.parent.exists() else game.parent)
+    output_volume=existing_volume_path(out.parent if out.parent.exists() else game.parent)
+    free=shutil.disk_usage(work_volume).free/2**30
+    output_free=shutil.disk_usage(output_volume).free/2**30
+    same_volume=os.stat(work_volume).st_dev==os.stat(output_volume).st_dev
+    base_cached=(work/'totk/extracted/v0/romfs/romfs.bin').exists()
     say(f'work folder {work} ({free:.0f} GB free on its volume)')
-    if update and free < 40 and not (work / 'totk/extracted/v0/romfs/romfs.bin').exists():
-        raise BuildError('needs about 40 GB free for a fresh base + update build (19 GB extra with base data cached)')
-    if free < 25 and not (work / 'totk/extracted/v0/romfs/romfs.bin').exists():
-        raise BuildError('needs about 25 GB free for the work folder (the app itself is an APFS clone of it when on the same volume)')
+    if args.platform=='ios':
+        if same_volume:
+            required=(60 if update else 45) if not base_cached else (40 if update else 18)
+        else:
+            required=(40 if update else 25) if not base_cached else (25 if update else 18)
+        if free<required:
+            raise BuildError(f'iOS build needs about {required} GB free on the work/output volume for the IPA archive')
+        if not same_volume and output_free<18:
+            raise BuildError('the output volume needs about 18 GB free for the iOS IPA')
+    else:
+        if update and free<40 and not base_cached:
+            raise BuildError('needs about 40 GB free for a fresh base + update build (19 GB extra with base data cached)')
+        if free<25 and not base_cached:
+            raise BuildError('needs about 25 GB free for the work folder (the app itself is an APFS clone of it when on the same volume)')
     logs = work / 'logs'
     env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
     t0 = time.time()
@@ -672,22 +693,28 @@ def main(argv):
     step_shaders(tree, logs, version=version)
     step_binary(tree, game, keys, env, logs, version=version)
     say(f'4/4 app: assembling {out}')
-    step_app(tree, out, logs, version=version)
+    if args.platform=='ios':
+        run([py, 'ios/tools/build_ipa.py', '--tree', tree, '--out', out, '--version', version,
+             '--logs', logs, '--app-name', APP_NAME, '--bundle-id', BUNDLE_ID], logs/'build-ipa.log', cwd=tree, env=env)
+    else:
+        step_app(tree, out, logs, version=version)
     # Refresh an existing app's version, executable and signing identity before
     # the next Finder launch; the desktop alias keeps pointing to this bundle.
-    run([LSREGISTER, '-f', out], logs / 'register-app.log')
+    if args.platform=='macos': run([LSREGISTER, '-f', out], logs / 'register-app.log')
     # macOS scans a new app the first time it runs (minutes for 16 GB, with nothing on screen): run it once here, in its
     # check-only mode, so the player's first start is immediate.
-    say('4/4 app: macOS checks the new app once (a few minutes for the 16 GB bundle)')
-    t1 = time.time()
-    r = subprocess.run([out / 'Contents/MacOS/TOTK', '--check'], capture_output=True, text=True, timeout=1800)
-    if r.returncode:
-        raise BuildError(f'the app does not start: {(r.stdout + r.stderr).strip()}')
-    say(f'   checked in {time.time() - t1:.0f} s')
+    if args.platform=='macos':
+        say('4/4 app: macOS checks the new app once (a few minutes for the 16 GB bundle)')
+        t1 = time.time()
+        r = subprocess.run([out / 'Contents/MacOS/TOTK', '--check'], capture_output=True, text=True, timeout=1800)
+        if r.returncode: raise BuildError(f'the app does not start: {(r.stdout + r.stderr).strip()}')
+        say(f'   checked in {time.time() - t1:.0f} s')
     say(f'done in {(time.time() - t0) / 60:.0f} min: {out}')
-    say('Open it from Finder (or move it to /Applications first: moving within one volume keeps the check). The first '
-        'start verifies the game data, discovers the prepared startup shaders and warms them on your GPU. '
-        'Additional scene/binding variants are translated and cached as they appear.')
+    if args.platform=='macos':
+        say('Open it from Finder (or move it to /Applications first: moving within one volume keeps the check). The first '
+            'start verifies the game data, discovers the prepared startup shaders and warms them on your GPU. '
+            'Additional scene/binding variants are translated and cached as they appear.')
+    else: say('Install the unsigned IPA with a sideloading tool. The iOS build needs iOS/iPadOS 26 and a supported game controller; verify gameplay on your device.')
 
 
 if __name__ == '__main__':

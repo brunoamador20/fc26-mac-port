@@ -57,9 +57,10 @@ class ShaderImport(unittest.TestCase):
         source = cls.root/'probe.m'
         source.write_text('''#import "totk_shader_seed.h"
 int main(int argc, const char **argv) { @autoreleasepool {
- if (argc != 3) return 2;
- NSError *error = nil;
- NSDictionary *r = totk_seed_import(@(argv[1]), @(argv[2]), &error);
+ NSError *error = nil; NSDictionary *r = nil;
+ if (argc == 4 && !strcmp(argv[1], "--fill")) r = totk_fill_import(@(argv[2]), @(argv[3]));
+ else if (argc == 3) r = totk_seed_import(@(argv[1]), @(argv[2]), &error);
+ else return 2;
  if (!r) { fprintf(stderr, "%s\\n", error.localizedDescription.UTF8String); return 1; }
  NSData *d = [NSJSONSerialization dataWithJSONObject:r options:0 error:nil];
  puts([[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding].UTF8String); return 0;
@@ -88,8 +89,8 @@ int main(int argc, const char **argv) { @autoreleasepool {
         (source/'seed-manifest.json').write_text(json.dumps(manifest))
         return source, cache, key, variant
 
-    def run_probe(self, source, cache, good=True):
-        r = subprocess.run([str(self.binary), str(source), str(cache)], capture_output=True, text=True)
+    def run_probe(self, source, cache, good=True, fill=False):
+        r = subprocess.run([str(self.binary)]+(['--fill'] if fill else [])+[str(source), str(cache)], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0 if good else 1, r.stderr)
         return json.loads(r.stdout) if good else r.stderr
 
@@ -118,6 +119,40 @@ int main(int argc, const char **argv) { @autoreleasepool {
                 p.write_text(json.dumps(m))
                 self.run_probe(source, cache, good=False)
                 self.assertEqual(list(cache.iterdir()), [])
+
+    def test_fill_packs_merge_without_touching_the_seed_receipt(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source, cache, key, variant = self.fixture(root)
+            self.run_probe(source, cache)
+            receipt = (cache/'seed-installed.json').read_text()
+            fills = root/'fills'; fills.mkdir()
+            pack = fills/'20261018-1'; pack.mkdir()
+            filled = key+'-'+'d'*12
+            files = {filled+'_b.metal': b'// filled', filled+'_b.json': b'{}', filled+'_b.metallib': b'lib',
+                     key+'.variants': json.dumps([dict(variant=filled, deps={'tex': {'1': 'cube'}})]).encode()}
+            for name, data in files.items():
+                (pack/name).write_bytes(data)
+            (pack/'seed-manifest.json').write_text(json.dumps(dict(schema=1, chain=seed.CHAIN, shaders=1,
+                files={n: hashlib.sha256(d).hexdigest() for n, d in files.items()})))
+            r = self.run_probe(fills, cache, fill=True)
+            self.assertEqual((r['packs'], r['rejected']), (1, []))
+            self.assertEqual([v['variant'] for v in json.loads((cache/(key+'.variants')).read_text())], [variant, filled])
+            self.assertEqual((cache/(filled+'_b.metallib')).read_bytes(), b'lib')
+            self.assertEqual((cache/'seed-installed.json').read_text(), receipt)
+            self.assertEqual(list(fills.iterdir()), [])
+
+    def test_incomplete_fill_pack_is_dropped_without_changing_the_cache(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source, cache, key, variant = self.fixture(root)
+            fills = root/'fills'
+            shutil.copytree(source, fills/'partial')
+            (fills/'partial'/(variant+'_b.json')).unlink()   # an interrupted push
+            r = self.run_probe(fills, cache, fill=True)
+            self.assertEqual((r['packs'], len(r['rejected'])), (0, 1))
+            self.assertEqual(list(cache.iterdir()), [])
+            self.assertEqual(list(fills.iterdir()), [])
 
 
 if __name__ == '__main__':
