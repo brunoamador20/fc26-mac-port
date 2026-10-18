@@ -135,7 +135,7 @@ class Updates(unittest.TestCase):
         self.assertFalse(list(self.root.glob('update-merge-*')))
 
     def test_bundle_contains_only_selected_game_version(self):
-        for version, display in (('v112', '1.1.2'), ('v143', '1.4.3')):
+        for version, display in (('v112', '1.1.2'), ('v121', '1.2.1'), ('v143', '1.4.3')):
             with self.subTest(version=version):
                 tree=self.root/version;out=self.root/f'{version}.app'
                 files=[f'build/totk-native-{version}','build/pso_manifest.tsv','build/pso_title.tsv','build/spirv-cross/spirv-cross',

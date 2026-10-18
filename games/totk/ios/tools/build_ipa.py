@@ -30,7 +30,7 @@ def copy_tree(src,dst):
 def main():
     p=argparse.ArgumentParser()
     p.add_argument('--tree',type=Path,required=True);p.add_argument('--out',type=Path,required=True)
-    p.add_argument('--version',choices=['v0','v112','v143'],required=True);p.add_argument('--logs',type=Path,required=True)
+    p.add_argument('--version',choices=['v0','v112','v121','v143'],required=True);p.add_argument('--logs',type=Path,required=True)
     p.add_argument('--app-name',default='Tears of the Kingdom');p.add_argument('--bundle-id',default='org.macnativegames.totk')
     a=p.parse_args(); tree=a.tree.resolve(); ios=tree/'ios';gen=ios/'Gen';logs=a.logs.resolve(); out=a.out.resolve()
     if out.suffix.lower()!='.ipa': raise RuntimeError('iOS output path must end in .ipa')
@@ -39,7 +39,7 @@ def main():
     subprocess.run(['xcodebuild','-version'],env=env,check=True,stdout=subprocess.DEVNULL)
     if not shutil.which('xcodegen'): raise RuntimeError('install xcodegen: brew install xcodegen')
     gen.mkdir(parents=True,exist_ok=True)
-    version_dir=tree/'build'/({'v0':'','v112':'v112','v143':'v143'}[a.version])
+    version_dir=tree/'build'/({'v0':'','v112':'v112','v121':'v121','v143':'v143'}[a.version])
     if a.version=='v0': version_dir=tree/'build'
     for name in ('runtime_tables.h','romfs_config.h'):
         clone(version_dir/name,gen/name)

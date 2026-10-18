@@ -36,8 +36,10 @@ REPO = Path(__file__).resolve().parent
 GAME = REPO / 'games/totk'
 EXPECTED = json.loads((GAME / 'assets/expected-v1.0.0.json').read_text())
 UPDATED = json.loads((GAME / 'assets/expected-v1.1.2.json').read_text())
+UPDATED121 = json.loads((GAME / 'assets/expected-v1.2.1.json').read_text())
 UPDATED143 = json.loads((GAME / 'assets/expected-v1.4.3.json').read_text())
-VERSIONS = {'v0': EXPECTED, 'v112': UPDATED, 'v143': UPDATED143}
+VERSIONS = {'v0': EXPECTED, 'v112': UPDATED, 'v121': UPDATED121, 'v143': UPDATED143}
+UPDATES = ('v112', 'v121', 'v143')
 HACTOOL = ('https://github.com/SciresM/hactool.git', '1d64a83450e025622f3468c28fc4164dad2c5ef6')
 APP_NAME = 'Tears of the Kingdom'
 BUNDLE_ID = 'org.macnativegames.totk'
@@ -223,7 +225,7 @@ def prepare_update_container(tree, game, keys, logs):
 def identify_update(tree, game, keys, logs):
     """Choose the runtime by verified module bytes, never by the package filename."""
     source = prepare_update_container(tree, game, keys, logs)
-    for version in ('v112', 'v143'):
+    for version in UPDATES:
         exefs = tree / f'extracted/{version}/exefs'
         if source_matches(exefs.parent / 'extraction-manifest.json', source) and all(
                 (exefs / name).is_file() and sha256(exefs / name) == digest
@@ -234,10 +236,10 @@ def identify_update(tree, game, keys, logs):
     run([tree / '.venv/bin/python', 'scripts/extract_exefs.py', source, '--keys', keys,
          '--update', '--output', staging / 'exefs'], logs / 'identify-update.log', cwd=tree)
     actual = {path.name: sha256(path) for path in (staging / 'exefs').iterdir()}
-    version = next((version for version in ('v112', 'v143')
+    version = next((version for version in UPDATES
                     if actual == VERSIONS[version]['exefs_sha256']), None)
     if version is None:
-        raise BuildError('unsupported update module hashes; expected 1.1.2 or 1.4.3 (the file name is not used to choose a version)')
+        raise BuildError('unsupported update module hashes; expected 1.1.2, 1.2.1 or 1.4.3 (the file name is not used to choose a version)')
     target = tree / f'extracted/{version}'
     target.mkdir(parents=True, exist_ok=True)
     if (target / 'exefs').exists(): shutil.rmtree(target / 'exefs')
@@ -794,7 +796,7 @@ def step_warm_metal(tree, out, logs):
 
 
 def parse_args(argv):
-    ap = argparse.ArgumentParser(description='Build a native Mac app or unsigned iPhone/iPad IPA from TOTK base 1.0.0 (XCI/NSP), optionally with the separate 1.1.2 or 1.4.3 update.',
+    ap = argparse.ArgumentParser(description='Build a native Mac app or unsigned iPhone/iPad IPA from TOTK base 1.0.0 (XCI/NSP), optionally with the separate 1.1.2, 1.2.1 or 1.4.3 update.',
                                  epilog='example: python3 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys')
     ap.add_argument('game', type=Path, help='the game file (.xci or .nsp), base game 1.0.0')
     ap.add_argument('--update', type=Path, help='separate supported cumulative update NSP/NSZ; outputs the same single app')
