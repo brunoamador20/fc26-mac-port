@@ -146,7 +146,14 @@ int runtime_output_res(unsigned *w,unsigned *h){
     static int decided,on;static unsigned cw,ch;
     if(!decided){
         const char *e=getenv("TOTK_OUTPUT_RES");
-        if(e&&!strcmp(e,"0"))on=0;
+        /* iOS shows 720p only (the user, 2026-10-18): no larger swapchain, heaps or output there, whatever
+           TOTK_OUTPUT_RES says. The iOS export runs these patches on the Mac to make the phone's embedded code
+           (TOTK_EXPORT_IOS), so it follows the same rule: before, auto put the 2560x1440 swapchain into the phone's code,
+           and the phone, which carries the heap overlay in its bundle, reserved 88 MiB more for a picture it never shows. */
+        if(TARGET_OS_IPHONE||getenv("TOTK_EXPORT_IOS")){
+            on=0;
+            if(e&&*e&&strcmp(e,"0")&&strcmp(e,"auto"))fprintf(stderr,"[totk] TOTK_OUTPUT_RES=%s ignored: iOS shows 720p only\n",e);
+        }else if(e&&!strcmp(e,"0"))on=0;
         else if(!e||!*e||!strcmp(e,"auto")){
             const char *dir=getenv("TOTK_ROMFS_PATCHES_OUT");char path[4096];
             snprintf(path,sizeof path,"%s/2560x1440/manifest.tsv",dir?dir:"extracted/v143/romfs-patches-out");

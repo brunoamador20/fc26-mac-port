@@ -92,8 +92,33 @@ def main():
             cases.append(execute(w, h, scale, True))
     negative = execute(2560, 1440, (1.0, 1.0), False)
     assert negative['canvas'] == negative['crop'] == (1920, 1080)
+
+    # Auto (no TOTK_OUTPUT_RES) on the Mac takes 2560x1440 when the heap overlay exists. iOS shows 720p only: the iOS
+    # export (TOTK_EXPORT_IOS) must leave every output word alone, in auto and with an explicit size (2026-10-18).
+    overlay = out / 'auto-overlay'
+    (overlay / '2560x1440').mkdir(parents=True, exist_ok=True)
+    (overlay / '2560x1440/manifest.tsv').write_text('# presence is what auto looks for\n')
+    output_sites = {0xbdb578, 0xbdb584, 0x3dcb28}
+
+    def output_words(extra):
+        image = out / 'main-output-auto.bin'
+        env = {k: v for k, v in os.environ.items() if k != 'TOTK_OUTPUT_RES'}
+        env |= {'TOTK_REALTIME': '1', 'TOTK_FPS60': '1', 'TOTK_ROMFS_PATCHES_OUT': str(overlay)} | extra
+        subprocess.run(['build/v143-output-fixture', 'rewritten/v143/main.patched.bin', str(image),
+                        str(layout['TEXT_END'])], capture_output=True, text=True, check=True, env=env)
+        got = image.read_bytes(); image.unlink()
+        return {p for p in output_sites if raw[p:p+4] != got[p:p+4]}
+
+    export = {'TOTK_EXPORT_IOS': str(out / 'unused-export')}
+    auto_mac = output_words({})
+    auto_export = output_words(export)
+    explicit_export = output_words(export | {'TOTK_OUTPUT_RES': '2560x1440'})
+    assert auto_mac == output_sites, ('auto on the Mac did not take 2560x1440', auto_mac)
+    assert auto_export == set(), ('the iOS export took the 2560x1440 swapchain in auto', auto_export)
+    assert explicit_export == set(), ('the iOS export took an explicit output size', explicit_export)
     report = dict(status='pass', version='v143', cases=cases,
                   negative_control=negative, veneer_offset=hex(stub),
+                  auto={'mac_changed_output_words': len(auto_mac), 'ios_export_auto_changed': len(auto_export), 'ios_export_explicit_changed': len(explicit_export)},
                   changed_original_words=len(changes),
                   scope='production C patch, original scale selection, canvas/crop publication; GPU allocations tested separately')
     (out / 'output-validation.json').write_text(json.dumps(report, indent=2) + '\n')
