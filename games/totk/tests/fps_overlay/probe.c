@@ -73,6 +73,7 @@ static void colours(int w, int h, int *green, int *yellow) {
 
 int main(void) {
     int w, h, green, yellow;
+    setenv("TOTK_UI_LANG", "zh", 1);   /* the Chinese labels below; the English ones are checked after them */
     /* The 5x7 pixel font (lines of ASCII only: the bottom-right load line): glyph pixels against the written patterns. */
     fps_overlay_raster_line("FPS 60  8x9", 0, 1, px, &w, &h);
     CHECK(w == 11 * 6 - 1 + 4 && h == 11, "box size %dx%d (\"FPS 60  8x9\" is 11 characters, one line)", w, h);
@@ -123,6 +124,14 @@ int main(void) {
     CHECK(!strcmp(line, "新着色器 0 / 总计 --"), "shader box text before the cache is counted \"%s\"", line);
     shader_overlay_text(line, sizeof line, 123456, 9999999, 123456);
     CHECK(!strcmp(line, "新着色器 99999 / 总计 999999"), "shader box text clamped \"%s\"", line);
+    /* English labels (TOTK_UI_LANG=en, or a Mac whose language is not Chinese). */
+    setenv("TOTK_UI_LANG", "en", 1);
+    shader_overlay_text(line, sizeof line, 3, 7428, 12);
+    CHECK(!strcmp(line, "New shaders 3 / total 7428"), "English shader box text \"%s\"", line);
+    fps_overlay_raster(&(fps_overlay_info){97, 2560, 1440, 1, 0, 0}, 2, px, &grown, &h);
+    CHECK(grown > base + 40, "English MetalFX on: \"  MetalFX on\" after the size (box %d, without it %d)", grown, base);
+    setenv("TOTK_UI_LANG", "zh", 1);
+    shader_overlay_text(line, sizeof line, 123456, 9999999, 123456);
     CHECK(!fps_overlay_has_glyph('Q'), "negative control: 'Q' has no glyph in the pixel font but was reported");
     for (int s = 1; s <= FPS_OVERLAY_MAX_SCALE; s++) {
         fps_overlay_raster_line(line, s & 1, s, px, &w, &h);

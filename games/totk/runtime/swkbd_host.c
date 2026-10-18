@@ -17,6 +17,7 @@
    TOTK_SWKBD_ANSWER=<text> answers without showing the bar (tests; "<cancel>" cancels, "<initial>" keeps the initial text).
    make probe-swkbd builds the arguments with the guest SDK and calls through main's own PLT stub. */
 #include "runtime.h"
+#include "totk_ui_lang.h"
 #include <TargetConditionals.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -126,7 +127,7 @@ static unsigned show_keyboard(void *out_string, const void *arg_ptr) {
     if (init_len > 0 && work && init_off >= 0 && (uint64_t)init_off + (uint64_t)init_len * 2 <= work_size)
         utf16_to_utf8((const uint16_t *)(uintptr_t)(work + (uint64_t)init_off), (size_t)(init_len > KB_LIMIT ? KB_LIMIT : init_len), initial, sizeof initial);
     char prompt[sizeof header + sizeof guide + 8];
-    snprintf(prompt, sizeof prompt, "%s%s%s", *header ? header : *guide ? guide : *sub ? sub : "输入文字",
+    snprintf(prompt, sizeof prompt, "%s%s%s", *header ? header : *guide ? guide : *sub ? sub : TOTK_UI("输入文字","Enter text"),
              *header && (*guide || *sub) ? " — " : "", *header ? (*guide ? guide : sub) : "");
 
     char text[KB_LIMIT * 4 + 1] = ""; int confirmed = 0;
