@@ -16,22 +16,9 @@ October 17: Added 1.0.0 and 1.1.2 support. First-launch shader prewarming was no
 
 **Stuttering when you first start playing or enter a new scene is expected while new shaders compile—don't be surprised.** Performance typically improves as the cache warms up.
 
-## Improvements in this fork
+## Audio fix
 
-Based on [ly05010419/MacNativeGames](https://github.com/ly05010419/MacNativeGames), with the upstream MIT license and third-party notices preserved.
-
-- Fix streamed music and dialogue lookup for `content://Sound/...` paths. Extra separators at the mount root are normalized; traversal and invalid interior paths remain rejected.
-- Add 27 game-data-free C regression cases, plus real-resource checks in `probe-fs`.
-- Run synthetic container/update tests and native parser sanitizers through GitHub Actions, without game data or keys.
-- Add [audio troubleshooting and validation notes](docs/audio-troubleshooting.md). Opening dialogue and music were verified locally with TOTK 1.0.0; this does not add support for other games or validate every scene/version.
-
-Run the standalone regression with a C compiler and Python 3:
-
-```sh
-python3 -m unittest discover -s tests -p test_romfs_paths.py -v
-```
-
-Rebuild an existing app with your original game inputs to apply this fix. Saves and shader caches remain in the locations documented below.
+Streamed music and dialogue lookup for `content://Sound/...` paths has been fixed. Opening dialogue and music were verified locally on version 1.0.0; other versions and scenes still need validation. Rebuild your app with the original game inputs to apply the fix. See [audio troubleshooting and validation](docs/audio-troubleshooting.md) for details.
 
 ## Local testing
 
@@ -147,7 +134,7 @@ Native 2K changes the game's composition canvas and UI to 2560×1440. The 3D sce
 - Supports base 1.0.0, or base plus the separate 1.1.2 or 1.4.3 update NSP/NSZ. Other versions, DLC, combined packages, compressed base games (NSZ/XCZ) and personalized tickets remain unsupported. Mac only.
 - No online features, no amiibo.
 - New shaders can cause compilation stutters. Cache reuse reduces these, but does not guarantee stutter-free gameplay.
-- The 37 automated tests cover generated container/update fixtures, relocation formats, work-folder isolation, packaging, desktop migration, shader extraction and first-import cache preservation. A complete Mac build also passed with a local XCI-derived NSP fixture and generated common ticket. An independent retail base NSP and gameplay from that input have not yet been tested.
+- The 38 automated tests cover generated container/update fixtures, relocation formats, work-folder isolation, packaging, desktop migration, shader extraction, first-import cache preservation and 27 native RomFS path cases. GitHub Actions is configured to run the source tests and native path-parser sanitizers without game data or keys. A complete Mac build also passed with a local XCI-derived NSP fixture and generated common ticket. An independent retail base NSP and gameplay from that input have not yet been tested.
 
 ## How it works
 
@@ -186,22 +173,9 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 
 **第一次进入游戏或新场景时，新着色器的编译可能造成卡顿，这是预期现象，不必惊讶。** 随着着色器缓存逐步预热，表现通常会改善。
 
-## 本分支的改进
+## 音频修复
 
-基于 [ly05010419/MacNativeGames](https://github.com/ly05010419/MacNativeGames)，保留原项目的 MIT 许可证和第三方声明。
-
-- 修复 `content://Sound/...` 流式音频路径被错误拒绝的问题，恢复对应的背景音乐和对白。仅规范化挂载根目录处的重复斜杠，继续拒绝路径穿越及非法内部路径。
-- 新增 27 个不依赖游戏文件或密钥的 C 回归用例，并在 `probe-fs` 中检查真实音频资源的读取结果。
-- 添加 GitHub Actions，自动运行合成容器/更新测试和解析器内存检查，无需上传游戏数据或密钥。
-- 补充[音频排障与验证说明](docs/audio-troubleshooting.md)。已在 TOTK 1.0.0 开场实测对白和配乐；不代表已验证所有场景、其他版本或其他游戏。
-
-安装 C 编译器并使用 Python 3，即可运行独立回归测试：
-
-```sh
-python3 -m unittest discover -s tests -p test_romfs_paths.py -v
-```
-
-使用原有游戏输入重新构建 App 即可应用修复，存档和着色器缓存仍使用下文说明的位置。
+已修复 `content://Sound/...` 路径导致的流式音乐和对白读取失败。已在 1.0.0 开场实测对白和配乐，其他版本和场景仍需验证。使用原有游戏输入重新构建 App 即可应用修复，详见[音频排障与验证说明](docs/audio-troubleshooting.md)。
 
 ## 本机测试
 
@@ -317,7 +291,7 @@ macOS 能识别的手柄（如 DualSense、Xbox 手柄）会映射为 Switch Pro
 - 支持本体 1.0.0，或本体加单独的 1.1.2 / 1.4.3 更新（NSP/NSZ）。其他版本、DLC、合并包、压缩本体（NSZ/XCZ）和个性化票据仍不支持。平台仅限 Mac。
 - 没有联网功能，没有 amiibo。
 - 首次遇到新着色器可能出现编译卡顿，缓存能减少重复编译，但不保证完全没有卡顿。
-- 37 项自动测试覆盖生成的容器 / 更新样本、重定位格式、工作目录隔离、打包、桌面入口迁移、着色器提取和首次导入的缓存保留；另使用本地 XCI 构造、附带生成通用票据的 NSP 测试副本完成完整 Mac 打包。尚未验证独立的零售本体 NSP，也未测试从该类输入构建后的实际游玩。
+- 38 项自动测试覆盖生成的容器 / 更新样本、重定位格式、工作目录隔离、打包、桌面入口迁移、着色器提取、首次导入的缓存保留及 27 个原生 RomFS 路径用例。GitHub Actions 已配置为运行源码测试和路径解析器内存检查，不需要游戏数据或密钥；另使用本地 XCI 构造、附带生成通用票据的 NSP 测试副本完成完整 Mac 打包。尚未验证独立的零售本体 NSP，也未测试从该类输入构建后的实际游玩。
 
 ## 工作原理
 
