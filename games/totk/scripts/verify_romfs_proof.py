@@ -26,11 +26,15 @@ def main():
 #define ROMFS_IMAGE_SIZE {len(payload)}u
 void runtime_fail(const char *message);
 void runtime_boot_progress(const char *stage, uint64_t done, uint64_t total);
+void runtime_boot_status(const char *stage, const char *detail);
 '''
     harness = r'''
 void runtime_fail(const char *message) { fprintf(stderr,"FAIL: %s\n",message); exit(7); }
 void runtime_boot_progress(const char *stage,uint64_t done,uint64_t total) {
  (void)stage;(void)done;(void)total;
+}
+void runtime_boot_status(const char *stage,const char *detail) {
+ (void)stage;(void)detail;
 }
 int main(int argc,char **argv) {
  if(argc!=3)return 2;

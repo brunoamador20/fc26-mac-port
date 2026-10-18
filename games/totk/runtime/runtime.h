@@ -83,6 +83,7 @@ void runtime_trace_guest(uint64_t fp,uint64_t lr);
 
 void runtime_front_run(void(*callback)(void));
 void runtime_boot_progress(const char *stage,uint64_t done,uint64_t total);
+void runtime_boot_status(const char *stage,const char *detail);
 /* True 2K (runtime/game_patches.c, Mac): TOTK_OUTPUT_RES=<w>x<h> sets the game's own output size. runtime_output_res gives it
    (0 when unset); runtime_output_res_extra_bytes is what the HeapDef overlay (scripts/make_output_res_overlay.py, same formula)
    adds to the texture heap and to Graphics, and so to the application pool (runtime/services.c). */

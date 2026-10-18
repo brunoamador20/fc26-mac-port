@@ -185,7 +185,7 @@ void runtime_fs_init(void) {
   if(mapped!=MAP_FAILED){image_map=mapped;fprintf(stderr,"[totk] RomFS mmap read path enabled\n");}
   else fprintf(stderr,"[totk] RomFS mmap failed (%s); using pread\n",strerror(errno));
  }
- runtime_boot_progress("初始化游戏与图形",0,0);
+ runtime_boot_status("准备游戏资源","检查分辨率补丁并挂载只读游戏资源");
  overlay_init();
  fprintf(stderr,"[totk] native read-only RomFS ready: %llu files\n",(unsigned long long)file_count);
 }

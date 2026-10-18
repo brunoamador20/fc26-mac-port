@@ -43,6 +43,16 @@ void runtime_boot_progress(const char *stage,uint64_t done,uint64_t total){
   else {bootDetail.stringValue=@"正在处理，请稍候";bootProgress.indeterminate=YES;[bootProgress startAnimation:nil];}
  });
 }
+void runtime_boot_status(const char *stage,const char *detail){
+ if(bootStartNS)fprintf(stderr,"[totk-boot] %.3f %s — %s\n",(runtime_now_ns()-bootStartNS)/1e9,stage?stage:"正在启动",detail?detail:"");
+ NSString *s=[NSString stringWithUTF8String:stage?stage:"正在启动"];
+ NSString *d=[NSString stringWithUTF8String:detail?detail:"正在处理，请稍候"];
+ dispatch_async(dispatch_get_main_queue(), ^{
+  if(!bootOverlay||bootOverlay.hidden)return;
+  bootStage.stringValue=s;bootDetail.stringValue=d;
+  bootProgress.indeterminate=YES;[bootProgress startAnimation:nil];
+ });
+}
 void runtime_warm_progress(uint64_t done,uint64_t total,uint64_t shaders,uint64_t shader_total,uint64_t pipelines,uint64_t pipeline_total){
  atomic_store(&warmPending,1);
  dispatch_async(dispatch_get_main_queue(), ^{

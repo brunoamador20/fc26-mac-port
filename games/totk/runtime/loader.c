@@ -418,7 +418,7 @@ uint64_t runtime_image_bytes(void) { uint64_t total=0;for(unsigned i=0;i<NM;i++)
 static void loader_ready(void) { fprintf(stderr,"[totk] rtld callback: modules linked\n"); }
 static void module_inits(void) {
  fprintf(stderr,"[totk] SDK startup returned; running module constructors\n");
- for(unsigned i=0;i<NM;i++){fprintf(stderr,"[totk] ENTER %s DT_INIT\n",modules[i].name);((void(*)(void))(modules[i].base+modules[i].init))();uint32_t state;memcpy(&state,modules[i].base+modules[i].ctor_flag,4);need(state==2,"DT_INIT deferred or skipped constructors");
+ for(unsigned i=0;i<NM;i++){char detail[128];snprintf(detail,sizeof detail,"运行 %s 游戏模块初始化代码（%u/%u）",modules[i].name,i+1,(unsigned)NM);runtime_boot_status("初始化游戏模块",detail);fprintf(stderr,"[totk] ENTER %s DT_INIT\n",modules[i].name);((void(*)(void))(modules[i].base+modules[i].init))();uint32_t state;memcpy(&state,modules[i].base+modules[i].ctor_flag,4);need(state==2,"DT_INIT deferred or skipped constructors");
  fprintf(stderr,"[totk] RETURN %s DT_INIT state=%u init_array_count=%llu\n",modules[i].name,state,(unsigned long long)(modules[i].init_size/8));}
 }
 void runtime_startup_checkpoint(uintptr_t caller) {
@@ -430,6 +430,7 @@ void runtime_startup_checkpoint(uintptr_t caller) {
 static void module_finis(void) { runtime_fail("guest exited: module finalizers not yet implemented"); }
 static void boot(void) {
  fprintf(stderr,"[totk] game version %s\n", TOTK_GAME_VERSION);
+ runtime_boot_status("启动游戏运行环境","连接游戏代码与 macOS 系统服务");
  runtime_thread_init();uint32_t main_handle=svc_thread_main_init();
  fprintf(stderr,"[totk] ENTER original nn::init::Start sdk+0xfa060\n");
  ((void(*)(uint64_t,uint64_t,void(*)(void),void(*)(void),void(*)(void)))required("_ZN2nn4init5StartEmmPFvvES2_S2_"))(main_handle,0,loader_ready,module_inits,module_finis);
