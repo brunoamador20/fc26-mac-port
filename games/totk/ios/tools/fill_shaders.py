@@ -9,6 +9,7 @@ checks and merges the pack on its next start (totk_fill_import) and warms the ne
 usage: fill_shaders.py --tree <work tree> --device <id> [--bundle-id <id>] [--requests <dir>] [--no-push]"""
 import argparse, concurrent.futures, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
+from xcode_dir import developer_dir
 
 TOTK = Path(__file__).resolve().parents[2]
 VARIANT = re.compile(r'^([0-9a-f]{64})-[0-9a-f]{12}$')
@@ -23,12 +24,7 @@ def chain():
 
 
 def xcode_env():
-    env = dict(os.environ)
-    if not env.get('DEVELOPER_DIR'):
-        candidates = ['/Applications/Xcode.app/Contents/Developer', '/Volumes/mac-APFS/Tears of the Kingdom /Xcode.app/Contents/Developer']
-        found = next((x for x in candidates if Path(x).is_dir()), None)
-        if found: env['DEVELOPER_DIR'] = found
-    return env
+    return dict(os.environ, DEVELOPER_DIR=developer_dir())
 
 
 def devicectl(env, args, direction, src, dst):

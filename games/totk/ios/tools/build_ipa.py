@@ -2,6 +2,7 @@
 """Build an unsigned, sideloadable iPhone/iPad IPA from a prepared TOTK work tree."""
 import argparse, json, os, shutil, subprocess, sys
 from pathlib import Path
+from xcode_dir import developer_dir
 
 def run(args, cwd, log, env):
     log.parent.mkdir(parents=True,exist_ok=True)
@@ -32,12 +33,7 @@ def main():
     p.add_argument('--app-name',default='Tears of the Kingdom');p.add_argument('--bundle-id',default='org.macnativegames.totk')
     a=p.parse_args(); tree=a.tree.resolve(); ios=tree/'ios';gen=ios/'Gen';logs=a.logs.resolve(); out=a.out.resolve()
     if out.suffix.lower()!='.ipa': raise RuntimeError('iOS output path must end in .ipa')
-    developer=os.environ.get('DEVELOPER_DIR')
-    if not developer:
-        candidates=['/Applications/Xcode.app/Contents/Developer','/Volumes/mac-APFS/Tears of the Kingdom /Xcode.app/Contents/Developer']
-        developer=next((x for x in candidates if Path(x).is_dir()),None)
-    env=dict(os.environ)
-    if developer: env['DEVELOPER_DIR']=developer
+    env=dict(os.environ,DEVELOPER_DIR=developer_dir())
     sdk=subprocess.check_output(['xcrun','--sdk','iphoneos','--show-sdk-path'],env=env,text=True).strip()
     subprocess.run(['xcodebuild','-version'],env=env,check=True,stdout=subprocess.DEVNULL)
     if not shutil.which('xcodegen'): raise RuntimeError('install xcodegen: brew install xcodegen')
