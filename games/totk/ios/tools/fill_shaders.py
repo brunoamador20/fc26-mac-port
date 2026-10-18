@@ -6,10 +6,11 @@ iOS has no shader translator. On a miss the game skips the draws that need the v
 pulls those requests, translates them with the Mac's runtime service (build/shader-service/totk_xlate) into the Mac
 cache, compiles device metallibs, and pushes one pack in the startup-seed format to Documents/shader-fill/. The game
 checks and merges the pack on its next start (totk_fill_import) and warms the new variants in the background.
-usage: fill_shaders.py --tree <work tree> --device <id> [--bundle-id <id>] [--requests <dir>] [--no-push]"""
+usage: fill_shaders.py --tree <work tree> --device <id> [--bundle-id <id>] [--requests <dir>] [--with-done] [--no-push]"""
 import argparse, concurrent.futures, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
 from xcode_dir import developer_dir
+from compile_seed import METAL_FLAGS
 
 TOTK = Path(__file__).resolve().parents[2]
 VARIANT = re.compile(r'^([0-9a-f]{64})-[0-9a-f]{12}$')
@@ -85,7 +86,7 @@ def record(out, variant):
 def compile_metallib(pack, name, env):
     src = pack/f'{name}.metal'; air = pack/f'{name}.air'
     try:
-        subprocess.run(['xcrun', '-sdk', 'iphoneos', 'metal', '-c', str(src), '-o', str(air)], check=True, capture_output=True, env=env)
+        subprocess.run(['xcrun', '-sdk', 'iphoneos', 'metal', *METAL_FLAGS, '-c', str(src), '-o', str(air)], check=True, capture_output=True, env=env)
         subprocess.run(['xcrun', '-sdk', 'iphoneos', 'metallib', str(air), '-o', str(pack/f'{name}.metallib')], check=True, capture_output=True, env=env)
         return None
     except subprocess.CalledProcessError as e:   # the device then compiles the MSL source itself
@@ -117,6 +118,8 @@ def main():
     ap.add_argument('--bundle-id', default=os.environ.get('TOTK_BUNDLE_ID', 'org.macnativegames.totk'))
     ap.add_argument('--requests', type=Path, help='use requests already copied from the device instead of pulling them')
     ap.add_argument('--no-push', action='store_true', help='translate and build the pack, but do not send it')
+    ap.add_argument('--with-done', action='store_true', help='also rebuild the variants filled before (shader-requests/done),'
+                    ' e.g. after a change of the compile options; the game replaces their libraries')
     args = ap.parse_args()
     if not args.requests and not args.device: raise RuntimeError('give --device (or TOTK_IOS_DEVICE), or --requests')
     if not args.no_push and not args.device: raise RuntimeError('pushing needs --device (or TOTK_IOS_DEVICE); use --no-push')
@@ -130,6 +133,13 @@ def main():
             r = devicectl(env, args, 'from', 'Documents/shader-requests', folder)
             if r.returncode: print(f"pull was incomplete, using what arrived: {r.stderr.strip().splitlines()[-1:] }")
         rqs = load_requests(folder)
+        if args.with_done:
+            done = folder/'done'
+            if not args.requests and not done.is_dir():
+                r = devicectl(env, args, 'from', 'Documents/shader-requests/done', done)
+                if r.returncode: print(f"pull of done requests was incomplete: {r.stderr.strip().splitlines()[-1:] }")
+            seen = {rq['variant'] for rq in rqs}
+            rqs += [rq for rq in load_requests(done) if rq['variant'] not in seen]
         if not rqs: print('no shader requests from the device'); return
         failed = translate(rqs, tree, out, ch)
         variants = sorted({rq['variant'] for rq in rqs} - failed)

@@ -84,7 +84,11 @@ static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NS
                 if (!changed) continue;
                 data = [NSJSONSerialization dataWithJSONObject:merged options:NSJSONWritingSortedKeys error:error];
                 if (!data) return nil;
-            } else if ([fm fileExistsAtPath:target]) continue; // preserve shaders collected on this Mac
+            } else if ([fm fileExistsAtPath:target]) {
+                // Preserve shaders collected on this Mac. A device library (iOS) is only ever made from its source on the
+                // Mac, so a different one is a rebuild, e.g. with safe math instead of Metal's default fast math.
+                if (![name hasSuffix:@".metallib"] || [[NSData dataWithContentsOfFile:target] isEqualToData:data]) continue;
+            }
             if (![data writeToFile:target options:NSDataWritingAtomic error:error]) return nil;
             imported++;
         }

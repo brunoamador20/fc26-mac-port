@@ -2,6 +2,7 @@
 """Build an unsigned, sideloadable iPhone/iPad IPA from a prepared TOTK work tree."""
 import argparse, json, os, shutil, subprocess, sys
 from pathlib import Path
+from compile_seed import METAL_FLAGS
 from xcode_dir import developer_dir
 
 def run(args, cwd, log, env):
@@ -72,6 +73,7 @@ def main():
         cached=json.loads(cached_manifest.read_text())
         reuse_seed=(cached.get('ios_source_manifest_sha256')==source_manifest_hash and
                     cached.get('ios_metallibs')==expected_metallibs and
+                    cached.get('ios_metal_flags')==' '.join(METAL_FLAGS) and   # e.g. not the old fast-math libraries
                     all((seed/(name.removesuffix('.metal')+'.metallib')).is_file()
                         for name in json.loads((seed_src/'seed-manifest.json').read_text())['files'] if name.endswith('_b.metal')))
     if not reuse_seed:

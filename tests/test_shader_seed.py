@@ -165,6 +165,20 @@ int main(int argc, const char **argv) { @autoreleasepool {
             self.assertEqual((cache/'seed-installed.json').read_text(), receipt)
             self.assertEqual(list(fills.iterdir()), [])
 
+    def test_a_rebuilt_metallib_replaces_the_cached_one(self):
+        # iOS metallibs once compiled with Metal's default fast math must be replaced by the safe-math rebuild; the
+        # sources next to them are still kept as they are.
+        with tempfile.TemporaryDirectory() as folder:
+            source, cache, key, variant = self.fixture(Path(folder))
+            lib = variant+'_b.metallib'
+            (cache/lib).write_bytes(b'fast-math lib'); (cache/(variant+'_b.metal')).write_bytes(b'// collected here')
+            (source/lib).write_bytes(b'safe-math lib')
+            p = source/'seed-manifest.json'; m = json.loads(p.read_text())
+            m['files'][lib] = hashlib.sha256(b'safe-math lib').hexdigest(); p.write_text(json.dumps(m))
+            self.run_probe(source, cache)
+            self.assertEqual((cache/lib).read_bytes(), b'safe-math lib')
+            self.assertEqual((cache/(variant+'_b.metal')).read_bytes(), b'// collected here')
+
     def test_incomplete_fill_pack_is_dropped_without_changing_the_cache(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
