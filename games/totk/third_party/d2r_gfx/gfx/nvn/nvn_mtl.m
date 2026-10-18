@@ -4707,7 +4707,25 @@ static int drv_scan(NvShader *o, NSString *src) {   // src: the full MSL (iOS do
     if (nbad) MLOG("【红】着色器 %s（阶段 %d）读驱动段的这些位置回放层不填，读到 0：%s", o->key, o->stage, bad);
     return nunfill;
 }
-static uint64_t g_rt_prebuilt, g_rt_compiled;   // TOTK: translated variants loaded precompiled (iOS) / compiled from MSL here
+static uint64_t g_rt_prebuilt, g_rt_compiled;   // TOTK: translated variants loaded precompiled / compiled from MSL here
+#if !TARGET_OS_IPHONE
+/* TOTK: the startup shaders compiled when the app was built (build_app.py step_shader_libs), named by the SHA-256 of their
+   MSL, so only an exact match is used. Metal's own cache of libraries compiled here starts over when the app is moved or
+   rebuilt (measured: a full 4.5-minute warm-up again); these files move with the app. */
+static NSString *shader_lib_prebuilt_path(NSData *src) {
+    static NSString *dir; static dispatch_once_t once; dispatch_once(&once, ^{ dir = exe_rel("shader-libs"); });
+    unsigned char md[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(src.bytes, (CC_LONG)src.length, md);
+    char hex[2 * sizeof md + 1]; for (size_t i = 0; i < sizeof md; i++) snprintf(hex + 2 * i, 3, "%02x", md[i]);
+    NSString *path = [NSString stringWithFormat:@"%@/%s.metallib", dir, hex];
+    return dir && [NSFileManager.defaultManager fileExistsAtPath:path] ? path : nil;
+}
+static id<MTLLibrary> shader_lib_prebuilt(NSData *src) {
+    NSString *path = shader_lib_prebuilt_path(src); if (!path) return nil;
+    NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e);
+    if (!lib) MLOG("【红】预编译着色器库加载失败 %s：%s（改为现编）", path.lastPathComponent.UTF8String, e.localizedDescription.UTF8String);
+    return lib;
+}
+#endif
 static NvShader *shader_load(NSString *pc, int stage) {
     NSError *e = nil;
     // TOTK: runtime translations are MSL source compiled here (macOS allows runtime compilation); the OS caches compiled code.
@@ -4721,7 +4739,11 @@ static NvShader *shader_load(NSString *pc, int stage) {
         NSString *rt_lib = [NSString stringWithFormat:@"%@/%@.metallib", totk_rt_dir(), pc];
         if ([NSFileManager.defaultManager fileExistsAtPath:rt_lib]) { lib = lib_from_file(rt_lib, &e); if (!lib) MLOG("【红】预编译着色器库加载失败 %s：%s（改为现编）", pc.UTF8String, e.localizedDescription.UTF8String); else g_rt_prebuilt++; }
 #endif
-        if (!lib) { NSString *src = [NSString stringWithContentsOfFile:rt_src encoding:NSUTF8StringEncoding error:&e];
+        if (!lib) { NSData *raw = [NSData dataWithContentsOfFile:rt_src options:0 error:&e];
+#if !TARGET_OS_IPHONE
+                    if (raw && (lib = shader_lib_prebuilt(raw))) g_rt_prebuilt++;
+#endif
+                    NSString *src = raw && !lib ? [[NSString alloc] initWithData:raw encoding:NSUTF8StringEncoding] : nil;
                     if (src) { lib = [g_dev newLibraryWithSource:src options:totk_precise_opts() error:&e]; g_rt_compiled++; } }
     } else lib = lib_from_file(lp, &e);
     if (rt && (g_rt_prebuilt + g_rt_compiled) % 200 == 1) MLOG("着色器库：预编译加载 %llu 个，现编 %llu 个", (unsigned long long)g_rt_prebuilt, (unsigned long long)g_rt_compiled);
