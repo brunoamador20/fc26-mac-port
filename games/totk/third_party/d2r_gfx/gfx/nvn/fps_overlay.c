@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "include/totk_ui_lang.h"
 
 enum { GLYPH_W = 5, GLYPH_H = 7, ADVANCE = 6, PAD = 2, BOX_ROWS = GLYPH_H + 2 * PAD, MAX_CHARS = 80 };
 static const uint8_t TEXT_BGRA[4] = {120, 255, 80, 255}, BOX_BGRA[4] = {12, 12, 12, 255}, HIGHLIGHT_BGRA[4] = {40, 230, 255, 255};   // green / dark / yellow
@@ -119,13 +120,15 @@ static void raster_line_ct(const char *text, int highlight, int scale, uint8_t *
     CGColorRelease(color); CGColorSpaceRelease(cs); CFRelease(str);
 }
 
-static int has_non_ascii(const char *s) {
-    for (; *s; s++) if ((unsigned char)*s >= 0x80) return 1;
-    return 0;
+/* The 5x7 font has only the letters the original labels use: any other character (Chinese, or English words such as
+   "New shaders ... / total ...") sends the whole line to the system font instead of drawing blanks. */
+int fps_overlay_line_pixel_font(const char *s) {
+    for (; *s; s++) if (!fps_overlay_has_glyph(*s)) return 0;
+    return 1;
 }
 
 void fps_overlay_raster_line_tex(const char *text, int highlight, int scale, uint8_t *out, int tex_w, int tex_h, int *box_w, int *box_h) {
-    if (has_non_ascii(text)) { raster_line_ct(text, highlight, scale, out, tex_w, tex_h, box_w, box_h); return; }
+    if (!fps_overlay_line_pixel_font(text)) { raster_line_ct(text, highlight, scale, out, tex_w, tex_h, box_w, box_h); return; }
     int n = (int)strnlen(text, MAX_CHARS);
     if (scale < 1) scale = 1;
     if (scale > FPS_OVERLAY_MAX_SCALE) scale = FPS_OVERLAY_MAX_SCALE;
@@ -150,7 +153,7 @@ void fps_overlay_raster(const fps_overlay_info *info, int scale, uint8_t *out, i
     if (info->gen > 0 && info->fps >= 0) snprintf(gen, sizeof gen, "+%d", info->gen > 999 ? 999 : info->gen);   // interpolated frames a second (key 2)
     // MetalFX did the upscale in the last frames (key 3 selects the manual MetalFX mode); 2K: true 2K output.
     // The whole line in the system font, so switching MetalFX does not switch the font.
-    snprintf(text, sizeof text, "FPS %s%s  %s%s%s", fps, gen, ss, info->mfx ? "  MetalFX已开启" : "", info->big ? "  2K" : "");
+    snprintf(text, sizeof text, "FPS %s%s  %s%s%s", fps, gen, ss, info->mfx ? TOTK_UI("  MetalFX已开启", "  MetalFX on") : "", info->big ? "  2K" : "");
     raster_line_ct(text, 0, scale, out, FPS_OVERLAY_TEX_W, FPS_OVERLAY_TEX_H, box_w, box_h);
 }
 
@@ -169,7 +172,7 @@ void shader_overlay_text(char *out, size_t n, uint64_t fresh, int64_t total, uin
     char t[16];
     (void)pipelines;   // user 2026-10-17: the pipeline count is not shown
     if (total < 0) snprintf(t, sizeof t, "--"); else snprintf(t, sizeof t, "%lld", (long long)(total > 999999 ? 999999 : total));
-    snprintf(out, n, "新着色器 %llu / 总计 %s", (unsigned long long)(fresh > 99999 ? 99999 : fresh), t);
+    snprintf(out, n, TOTK_UI("新着色器 %llu / 总计 %s", "New shaders %llu / total %s"), (unsigned long long)(fresh > 99999 ? 99999 : fresh), t);
 }
 
 /* A count's rate, re-measured every half second (game presents; interpolated frames shown). stale_s > 0: a gap longer
