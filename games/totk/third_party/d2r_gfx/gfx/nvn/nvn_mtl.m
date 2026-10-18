@@ -4625,6 +4625,15 @@ static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
         if (k == 1 || k % 100 == 0 || dt >= 300000) MLOG("着色器现编：第 %d 个 %.0f ms，累计 %.1f 秒", k, dt / 1e3, tot / 1e6);
         return l; }
 #endif
+#if TARGET_OS_IPHONE
+    // iOS：映射也占一个 vnode，而整机 vnode 表只有 11400 项（iPad A16，2026-10-18）；全量预热留着约 8800 个库时表满，系统按 vnode-limit 杀掉游戏。
+    // 这里复制进内存后立刻解除映射（全部库约 110 MB）。
+    // iOS: a mapping also holds a vnode, and the whole device has 11,400 (iPad A16, 2026-10-18); with the full warm-up keeping about
+    // 8,800 libraries the table filled and the system killed the game (jetsam reason vnode-limit). Copy and unmap at once (about 110 MB for all).
+    void *copy = malloc(len);
+    if (copy) { memcpy(copy, m, len); munmap(m, len);
+                return [g_dev newLibraryWithData:dispatch_data_create(copy, len, NULL, DISPATCH_DATA_DESTRUCTOR_FREE) error:err]; }
+#endif
     dispatch_data_t d = dispatch_data_create(m, len, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ munmap(m, len); });
     return [g_dev newLibraryWithData:d error:err];
 }

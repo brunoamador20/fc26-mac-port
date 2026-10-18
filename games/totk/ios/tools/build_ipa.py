@@ -113,6 +113,11 @@ def main():
                     (tree/f'extracted/{a.version}/romfs-patches-out',res/'romfs-patches-out'),
                     (tree/'extracted/firmware/shared-fonts',res/'shared-fonts')]: copy_tree(src,dst)
     copy_tree(seed,res/'shader-seed')
+    # The first frame waits only for the title screen's shaders (pso_title.tsv); the runtime looks for the list next to
+    # DM_NVN_SHMAP, which is in shader-seed on iOS. Without it the first frame waits for the whole warm-up.
+    title=next((p for p in (tree/'build/pso_title.tsv',tree/'assets/pso_title.tsv') if p.is_file()),None)
+    if not title: raise RuntimeError('missing pso_title.tsv (games/totk/assets)')
+    clone(title,res/'shader-seed/pso_title.tsv')
     # Keep the player's first install self-contained; the app stores saves and writable shader cache in Documents.
     payload=tree/'build/ios-payload';shutil.rmtree(payload,ignore_errors=True);(payload/'Payload').mkdir(parents=True)
     copy_tree(app,payload/'Payload/TOTK.app')
