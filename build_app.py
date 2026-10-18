@@ -559,7 +559,7 @@ def step_app(tree, out, logs, *, version="v0"):
         shutil.rmtree(tmp)
     res = tmp / 'Contents/Resources/totk'
     clone(tree / ('build/totk-native' if version == 'v0' else f'build/totk-native-{version}'), res/'build/totk-native')
-    for rel in ('build/pso_manifest.tsv', 'build/spirv-cross/spirv-cross',
+    for rel in ('build/pso_manifest.tsv', 'build/pso_title.tsv', 'build/spirv-cross/spirv-cross',
                 f'rewritten/{version}/main.patched.bin', f'rewritten/{version}/sdk.patched.bin',
                 f'rewritten/{version}/subsdk0.patched.bin', f'extracted/{version}/romfs/romfs.bin', f'extracted/{version}/romfs/runtime-index.bin'):
         clone(tree / rel, res / rel)

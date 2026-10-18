@@ -59,7 +59,14 @@ NSString *totk_rt_dir(void) {
             NSError *error = nil;
             if (runtime_boot_status) runtime_boot_status("检查着色器缓存","校验 App 附带的着色器，并按需导入本机缓存");
             NSDictionary *seed = totk_seed_import([root_dir() stringByAppendingPathComponent:@"build/shader-seed"], g_dir, &error);
-            if (!seed) die("startup shader preparation: %s", error.localizedDescription.UTF8String);
+            if (!seed) {   // 2026-10-18: a damaged bundle or a full disk used to end the game here with nothing on screen. The
+                           // cache stays usable (totk_seed_import writes shader files before the indexes that name them),
+                           // so play on and translate shaders as they first appear, as before the prepared shaders existed.
+                LOG("[shader-seed] 【红】导入 App 附带的着色器失败：%s；改为边玩边翻译",
+                    error ? error.localizedDescription.UTF8String : "unknown error");
+                if (runtime_boot_status) runtime_boot_status("着色器缓存未就绪","App 附带的着色器导入失败，改为边玩边翻译");
+                seed = @{@"available": @NO, @"failed": @YES};
+            }
             if ([seed[@"available"] boolValue]) {
                 unsigned long long imported=[seed[@"imported_files"] unsignedLongLongValue];
                 LOG("[shader-seed] 发现随 App 准备的着色器 %llu 个，导入 %llu 个文件；首次启动即可预热",
@@ -67,7 +74,7 @@ NSString *totk_rt_dir(void) {
                 if (runtime_boot_status) runtime_boot_status("着色器缓存已就绪",imported
                     ? [NSString stringWithFormat:@"已导入 %llu 个预置文件，开始预热",imported].UTF8String
                     : "本机缓存已存在，无需重新导入；开始预热");
-            } else if (runtime_boot_status) runtime_boot_status("着色器缓存已就绪","没有内置着色器种子，继续初始化图形");
+            } else if (runtime_boot_status && ![seed[@"failed"] boolValue]) runtime_boot_status("着色器缓存已就绪","没有内置着色器种子，继续初始化图形");
         }
 #endif
     });

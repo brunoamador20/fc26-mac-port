@@ -74,8 +74,12 @@ build/totk-native: Makefile runtime/loader.c runtime/runtime.h runtime/game_patc
 build/pso_manifest.tsv: assets/pso_manifest.tsv
 	@mkdir -p build
 	cp "$<" "$@"
+# What the title screen, its menu and the save list use: the only list the first frame waits for (nvn_mtl.m warm_start).
+build/pso_title.tsv: assets/pso_title.tsv
+	@mkdir -p build
+	cp "$<" "$@"
 
-runtime: build/totk-native build/pso_manifest.tsv
+runtime: build/totk-native build/pso_manifest.tsv build/pso_title.tsv
 
 probe-loader: runtime
 	"$(PY)" scripts/verify_loader.py
@@ -336,7 +340,7 @@ build/v112/romfs_config.h: scripts/prepare_romfs_backend.py extracted/v112/romfs
 	"$(PY)" scripts/prepare_romfs_backend.py --version v112
 build/totk-native-v112: $(wildcard runtime/*.[ch] runtime/*.m runtime/*.S) build/v112/runtime_tables.h build/v112/romfs_config.h build/shared_fonts_config.h $(GFX_OBJECTS) Makefile
 	xcrun clang -std=c11 $(NATIVE_OPT) -g -Wall -Wextra -Werror -Wno-deprecated-declarations -Ithird_party/d2r_gfx/gfx/nvn/include -DTOTK_GAME_V112=1 -Ibuild/v112 -Ibuild -I/opt/homebrew/opt/opus/include/opus -I/opt/homebrew/opt/libvpx/include runtime/loader.c runtime/game_patches.c runtime/world_survey.c runtime/game_slot.c runtime/services.c runtime/romfs.c runtime/threads.c runtime/gate.S runtime/hle_stack.S runtime/hle_stack.c runtime/thread_enter.S runtime/gfx_bridge.c runtime/frontend.m runtime/account.c runtime/input.c runtime/hid_feedback.c runtime/motion_fusion.c runtime/autoload.c runtime/gamepad.m runtime/gamepad_feedback.m runtime/gfx_probe.c runtime/vpool_probe.m runtime/gpu_path_probe.m runtime/memory_probe.c runtime/shared_font.c runtime/ipc.c runtime/audio_renderer.c runtime/audio_mixer.c runtime/audio_reverb.c runtime/fs_host.c runtime/opus_codec.c runtime/movie_host.c runtime/time_host.c runtime/applet_host.c runtime/swkbd_host.c $(GFX_OBJECTS) /opt/homebrew/opt/opus/lib/libopus.a /opt/homebrew/opt/libvpx/lib/libvpx.a -framework Metal -framework MetalFX -framework Foundation -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework CoreText -framework UniformTypeIdentifiers -fobjc-arc -framework Cocoa -framework CoreVideo -framework CoreFoundation -framework AudioToolbox -framework GameController -framework CoreHaptics -framework IOKit -o "$@"
-runtime-v112: build/totk-native-v112 build/pso_manifest.tsv
+runtime-v112: build/totk-native-v112 build/pso_manifest.tsv build/pso_title.tsv
 
 # Isolated 1.4.3 build; never replace the validated v0 executable or generated headers.
 .PHONY: runtime-v143
@@ -346,4 +350,4 @@ build/v143/romfs_config.h: scripts/prepare_romfs_backend.py extracted/v143/romfs
 	"$(PY)" scripts/prepare_romfs_backend.py --version v143
 build/totk-native-v143: $(wildcard runtime/*.[ch] runtime/*.m runtime/*.S) build/v143/runtime_tables.h build/v143/romfs_config.h build/shared_fonts_config.h $(GFX_OBJECTS) Makefile
 	xcrun clang -std=c11 $(NATIVE_OPT) -g -Wall -Wextra -Werror -Wno-deprecated-declarations -Ithird_party/d2r_gfx/gfx/nvn/include -DTOTK_GAME_V143=1 -Ibuild/v143 -Ibuild -I/opt/homebrew/opt/opus/include/opus -I/opt/homebrew/opt/libvpx/include runtime/loader.c runtime/game_patches_v143.c runtime/world_survey.c runtime/game_slot.c runtime/services.c runtime/romfs.c runtime/threads.c runtime/gate.S runtime/hle_stack.S runtime/hle_stack.c runtime/thread_enter.S runtime/gfx_bridge.c runtime/frontend.m runtime/account.c runtime/input.c runtime/hid_feedback.c runtime/motion_fusion.c runtime/autoload.c runtime/gamepad.m runtime/gamepad_feedback.m runtime/gfx_probe.c runtime/vpool_probe.m runtime/gpu_path_probe.m runtime/memory_probe.c runtime/shared_font.c runtime/ipc.c runtime/audio_renderer.c runtime/audio_mixer.c runtime/audio_reverb.c runtime/fs_host.c runtime/opus_codec.c runtime/movie_host.c runtime/time_host.c runtime/applet_host.c runtime/swkbd_host.c $(GFX_OBJECTS) /opt/homebrew/opt/opus/lib/libopus.a /opt/homebrew/opt/libvpx/lib/libvpx.a -framework Metal -framework MetalFX -framework Foundation -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework CoreText -framework UniformTypeIdentifiers -fobjc-arc -framework Cocoa -framework CoreVideo -framework CoreFoundation -framework AudioToolbox -framework GameController -framework CoreHaptics -framework IOKit -o "$@"
-runtime-v143: build/totk-native-v143 build/pso_manifest.tsv
+runtime-v143: build/totk-native-v143 build/pso_manifest.tsv build/pso_title.tsv

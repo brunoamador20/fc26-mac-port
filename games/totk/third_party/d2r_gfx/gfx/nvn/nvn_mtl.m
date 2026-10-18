@@ -6132,18 +6132,27 @@ static void warm_start(void) {
     if (e && *e) {
         paths = @[@(e)];
     } else {
-        NSString *seed = [g_shmap_path.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_manifest.tsv"];
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSString *dir = g_shmap_path.stringByDeletingLastPathComponent;
+        NSString *title = [dir stringByAppendingPathComponent:@"pso_title.tsv"];
+        NSString *seed = [dir stringByAppendingPathComponent:@"pso_manifest.tsv"];
         NSMutableArray<NSString *> *all = [NSMutableArray array];
-        // This selected-version seed has real MSL/reflection, including on a
-        // fresh install. Warm it before the title; identifiers alone cannot warm.
-        const char *seedMode = getenv("TOTK_SHADER_SEED");
-        NSString *prepared = [g_shmap_path.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"shader-seed/pso_manifest.tsv"];
-        if (!(seedMode && !strcmp(seedMode, "off")) && [NSFileManager.defaultManager fileExistsAtPath:prepared]) [all addObject:prepared];
-        if ([NSFileManager.defaultManager fileExistsAtPath:seed]) [all addObject:seed];
+        // The first list is the one the first frame waits for (g_warm_priority_done below): only what the title screen,
+        // its menu and the save list use (pso_title.tsv, recorded 2026-10-18 on 1.4.3, 1.1.2 and 1.0.0; rows of another
+        // version are not in this cache and are skipped like any missing row). With the
+        // 8,290 prepared shaders first the title came after 7-8 s even with warm caches and after about 10 minutes on a
+        // Mac whose Metal cache has never seen them. Without the title list the game's manifest goes first, as before.
+        if ([fm fileExistsAtPath:title]) [all addObject:title];
+        if ([fm fileExistsAtPath:seed]) [all addObject:seed];
         NSString *user = pso_user_path();
-        if (user && [NSFileManager.defaultManager fileExistsAtPath:user]) [all addObject:user];
+        if (user && [fm fileExistsAtPath:user]) [all addObject:user];
         NSString *shared = pso_shared_path();   // what every session collected (pso_user_record)
-        if ([NSFileManager.defaultManager fileExistsAtPath:shared]) [all addObject:shared];
+        if ([fm fileExistsAtPath:shared]) [all addObject:shared];
+        // The selected version's prepared shaders (real MSL, also on a fresh install) come last: they are shader libraries
+        // only, while the lists above also build the pipelines the first scenes need.
+        const char *seedMode = getenv("TOTK_SHADER_SEED");
+        NSString *prepared = [dir stringByAppendingPathComponent:@"shader-seed/pso_manifest.tsv"];
+        if (!(seedMode && !strcmp(seedMode, "off")) && [fm fileExistsAtPath:prepared]) [all addObject:prepared];
         paths = all;
         NSMutableString *desc = [NSMutableString string];
         for (NSString *p in paths) { NSString *t = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
@@ -6162,8 +6171,8 @@ static void warm_start(void) {
     dispatch_queue_t q = dispatch_queue_create("dm.nvn.pso-warm", attr);
     atomic_store(&g_warm_running, 1);
     dispatch_async(q, ^{ warm_worker(paths,files,eligible,planned_keys,total,shader_total,pipeline_total); });
-    // The title's seed manifest must be ready before its first frame. The
-    // profile-specific list and remaining translated variants finish behind
+    // The title's list must be ready before its first frame. The other lists,
+    // the prepared shaders and the remaining translated variants finish behind
     // the menu, then mtl_warm_wait at save-load waits before entering play.
     uint64_t wait_start = bp_now();
     while (!atomic_load(&g_warm_priority_done)) usleep(2000);

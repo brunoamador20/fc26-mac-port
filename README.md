@@ -10,7 +10,7 @@ Play your own copy of **The Legend of Zelda: Tears of the Kingdom** natively on 
 
 Update history:
 
-October 18: Added 1.4.3 support and shader prewarming before the first play session (about 10 minutes).
+October 18: Added 1.4.3 support and shader prewarming. The title screen waits only for its own shaders (about 2 seconds); the rest warm in the background.
 October 17: Added 1.0.0 and 1.1.2 support. First-launch shader prewarming was not available yet, so new scenes could stutter.
 
 
@@ -28,7 +28,7 @@ Those are earlier local observations, not a stable frame-rate promise for every 
 
 Shaders are automatically collected, compiled and cached as you play. Returning to previously visited scenes typically brings noticeable improvements in frame rates and smoothness because cached shaders can be reused. **8,582 is the number collected so far in local testing, not the game's total shader count or a collection limit**; the cache continues to grow as you explore.
 
-**Shader prewarming on the first launch:** Building the app automatically prepares at least 8,000 shaders from your selected game data and includes them in the app. Even with an empty user cache, the first launch discovers and warms these shaders before the first frame; compatible entries in the pipeline manifest are also warmed. No preliminary play session or manual cache copy is needed. The current 1.4.3 build prepares 8,290 shaders. The first GPU warm-up can take several minutes; see [preparation and test details](docs/first-launch-shaders.md). This is the extractable game shader set, not every binding-dependent variant encountered while playing; new scenes can still compile additional shaders. Playing adds newly encountered shaders and pipelines to your local `pso_collected.tsv`, which is reused on later launches. To share your collected list, send `~/Library/Application Support/MacNativeGames/TOTK/shader-cache/rt-totk-native-v4-unverified/pso_collected.tsv`. It contains shader and pipeline identifiers, not game saves or compiled shader binaries. Lists are tied to the matching translation-chain version.
+**Shader prewarming on the first launch:** Building the app automatically prepares at least 8,000 shaders from your selected game data and includes them in the app. Even with an empty user cache, the first launch imports these shaders. Only what the title screen itself uses is warmed before the first frame (about 2 seconds once macOS has compiled them before); the rest, together with compatible entries in the pipeline manifest, warms in the background behind the title, and the first trip into the world waits up to 15 seconds for it. No preliminary play session or manual cache copy is needed. The current 1.4.3 build prepares 8,290 shaders. When the Mac's Metal cache has not seen them yet (the first launch, after moving the app, or after macOS clears its caches), the background warm-up takes several minutes and new scenes can stutter until it finishes; see [preparation and test details](docs/first-launch-shaders.md). This is the extractable game shader set, not every binding-dependent variant encountered while playing; new scenes can still compile additional shaders. Playing adds newly encountered shaders and pipelines to your local `pso_collected.tsv`, which is reused on later launches. To share your collected list, send `~/Library/Application Support/MacNativeGames/TOTK/shader-cache/rt-totk-native-v4-unverified/pso_collected.tsv`. It contains shader and pipeline identifiers, not game saves or compiled shader binaries. Lists are tied to the matching translation-chain version.
 
 
 **iPhone and iPad support is coming soon. iPhone 16 or newer models are recommended for the upcoming iPhone version.**
@@ -134,7 +134,7 @@ Native 2K changes the game's composition canvas and UI to 2560×1440. The 3D sce
 - Supports base 1.0.0, or base plus the separate 1.1.2 or 1.4.3 update NSP/NSZ. Other versions, DLC, combined packages, compressed base games (NSZ/XCZ) and personalized tickets remain unsupported. Mac only.
 - No online features, no amiibo.
 - New shaders can cause compilation stutters. Cache reuse reduces these, but does not guarantee stutter-free gameplay.
-- The 38 automated tests cover generated container/update fixtures, relocation formats, work-folder isolation, packaging, desktop migration, shader extraction, first-import cache preservation and 27 native RomFS path cases. GitHub Actions is configured to run the source tests and native path-parser sanitizers without game data or keys. A complete Mac build also passed with a local XCI-derived NSP fixture and generated common ticket. An independent retail base NSP and gameplay from that input have not yet been tested.
+- The 38 automated tests cover generated container/update fixtures, relocation formats, work-folder isolation, packaging, desktop migration, shader extraction, first-import cache preservation and 27 native RomFS path cases. GitHub Actions is configured to run the source tests and the native path parser under the undefined-behavior sanitizer, without game data or keys. A complete Mac build also passed with a local XCI-derived NSP fixture and generated common ticket. An independent retail base NSP and gameplay from that input have not yet been tested.
 
 ## How it works
 
@@ -168,7 +168,7 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 
 更新历史：
 
-10 月 18 日：支持 1.4.3，并加入首次游玩前的着色器预热（约 10 分钟）。
+10 月 18 日：支持 1.4.3，并加入着色器预热。标题画面只等它自己用到的着色器（约 2 秒），其余在后台预热。
 10 月 17 日：支持 1.0.0 和 1.1.2；当时尚未加入首次启动着色器预热，进入新场景可能卡顿。
 
 **第一次进入游戏或新场景时，新着色器的编译可能造成卡顿，这是预期现象，不必惊讶。** 随着着色器缓存逐步预热，表现通常会改善。
@@ -185,7 +185,7 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 
 着色器会在游玩过程中自动收集、编译并缓存。再次进入已经去过的场景时，可以复用已有缓存，帧数和流畅度通常会明显改善。**8,582 只是本机测试目前收集到的数量，不是游戏的着色器总数，也不是收集上限**；随着探索更多场景，缓存还会继续增加。
 
-**首次启动的着色器预热：** 构建时自动从你提供的所选版本游戏数据准备至少 8,000 个着色器，并装进 App。即使用户缓存为空，第一次打开也会发现并预热这批着色器，准备好后才显示第一帧；兼容的管线清单也会参与预热，不需要先玩一遍或手动复制缓存。当前 1.4.3 准备 8,290 个；首次 GPU 预热可能需要数分钟，详见[准备过程与实测记录](docs/first-launch-shaders.md)。这是从游戏资源提取的集合，并非游玩中所有绑定状态的动态变体，进入新场景仍可能现编。游玩时新遇到的着色器和管线会写入本机的 `pso_collected.tsv`，下次启动时继续预热。如需分享自己收集的清单，请提供 `~/Library/Application Support/MacNativeGames/TOTK/shader-cache/rt-totk-native-v4-unverified/pso_collected.tsv`。它只包含着色器和管线标识，不含游戏存档或编译后的着色器文件。清单与对应的着色器转换链版本绑定。
+**首次启动的着色器预热：** 构建时自动从你提供的所选版本游戏数据准备至少 8,000 个着色器，并装进 App。即使用户缓存为空，第一次打开也会导入这批着色器。第一帧前只预热标题画面自己用到的那部分（macOS 编过之后约 2 秒）；其余连同兼容的管线清单，在标题画面后面继续预热，第一次进入世界时最多再等 15 秒。不需要先玩一遍或手动复制缓存。当前 1.4.3 准备 8,290 个。本机的 Metal 缓存还没见过这些着色器时（第一次打开、移动了 App、或 macOS 清理了缓存），后台预热需要几分钟，做完之前进入新场景可能卡顿，详见[准备过程与实测记录](docs/first-launch-shaders.md)。这是从游戏资源提取的集合，并非游玩中所有绑定状态的动态变体，进入新场景仍可能现编。游玩时新遇到的着色器和管线会写入本机的 `pso_collected.tsv`，下次启动时继续预热。如需分享自己收集的清单，请提供 `~/Library/Application Support/MacNativeGames/TOTK/shader-cache/rt-totk-native-v4-unverified/pso_collected.tsv`。它只包含着色器和管线标识，不含游戏存档或编译后的着色器文件。清单与对应的着色器转换链版本绑定。
 
 
 **即将支持 iPhone 和 iPad。未来的 iPhone 版本推荐使用 iPhone 16 及更新机型。**
@@ -291,7 +291,7 @@ macOS 能识别的手柄（如 DualSense、Xbox 手柄）会映射为 Switch Pro
 - 支持本体 1.0.0，或本体加单独的 1.1.2 / 1.4.3 更新（NSP/NSZ）。其他版本、DLC、合并包、压缩本体（NSZ/XCZ）和个性化票据仍不支持。平台仅限 Mac。
 - 没有联网功能，没有 amiibo。
 - 首次遇到新着色器可能出现编译卡顿，缓存能减少重复编译，但不保证完全没有卡顿。
-- 38 项自动测试覆盖生成的容器 / 更新样本、重定位格式、工作目录隔离、打包、桌面入口迁移、着色器提取、首次导入的缓存保留及 27 个原生 RomFS 路径用例。GitHub Actions 已配置为运行源码测试和路径解析器内存检查，不需要游戏数据或密钥；另使用本地 XCI 构造、附带生成通用票据的 NSP 测试副本完成完整 Mac 打包。尚未验证独立的零售本体 NSP，也未测试从该类输入构建后的实际游玩。
+- 38 项自动测试覆盖生成的容器 / 更新样本、重定位格式、工作目录隔离、打包、桌面入口迁移、着色器提取、首次导入的缓存保留及 27 个原生 RomFS 路径用例。GitHub Actions 已配置为运行源码测试，并在未定义行为检查（UBSan）下运行原生路径解析器，不需要游戏数据或密钥；另使用本地 XCI 构造、附带生成通用票据的 NSP 测试副本完成完整 Mac 打包。尚未验证独立的零售本体 NSP，也未测试从该类输入构建后的实际游玩。
 
 ## 工作原理
 
