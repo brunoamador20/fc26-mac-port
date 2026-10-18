@@ -624,22 +624,51 @@ def last_json(log):
     return None
 
 
+def metal_cache_users():
+    """Programs that have the Metal library cache of programs without an app bundle open, as 'name (pid)'. Whatever a
+    program compiles there while another program that opened it first is running is lost when that other program quits
+    (2026-10-18: 20 new libraries found while it ran, 2 after it quit; a packaging run with a short-lived probe running at
+    its start kept 1 of 64)."""
+    try:
+        cache = subprocess.run(['getconf', 'DARWIN_USER_CACHE_DIR'], capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    files = sorted(str(f) for f in Path(cache, 'com.apple.metal').glob('*/libraries.*'))
+    if not files:
+        return []
+    try:
+        listed = subprocess.run(['lsof', '-F', 'pc', '--', *files], capture_output=True, text=True).stdout
+    except OSError:
+        return []
+    users, pid = set(), None
+    for line in listed.splitlines():
+        if line.startswith('p'):
+            pid = line[1:]
+        elif line.startswith('c') and pid:
+            users.add(f'{line[1:]} ({pid})')
+    return sorted(users)
+
+
 def step_warm_metal(tree, out, logs):
     """Compile the app's startup shaders once into this Mac's Metal cache (2026-10-18). The game compiles each of them from
-    source when it first meets it, and Metal keeps the result keyed by the source text, the compile options and the folder
-    of the program that compiled it; on a Mac that has never compiled them (a new Mac, after the system purged its cache,
-    or after the app moved) the game's background warm-up spends about 3 minutes (M4, 8 threads) compiling them, and the
-    world stutters if the player goes in before it is done. The tool (games/totk/tools/warm_metal_cache.m) compiles the
-    same files with the same options from the game binary's own folder, and is removed again afterwards (the app's
-    signature seals that folder). It runs only while no game is running, and the result is checked in a new process.
-    Nothing here can make the build fail: without it the game compiles the shaders itself, as before."""
+    source when it first meets it, and Metal keeps the result keyed by the source text, the compile options and the length
+    of the path of the compiling program's folder (only its length: another folder with a path as long finds them too);
+    on a Mac that has never compiled them (a new Mac, after the system purged its cache, or after the app moved) the game's
+    background warm-up spends about 3 minutes (M4, 8 threads) compiling them, and the world stutters if the player goes
+    in before it is done. The tool (games/totk/tools/warm_metal_cache.m) compiles the same files with the same options from
+    the game binary's own folder, and is removed again afterwards (the app's signature seals that folder). It runs only
+    while no other program has Metal's cache open (what it compiled would be lost when that program quits), and the
+    result is checked in a new process. Nothing here can make the build fail: without it the game compiles the shaders
+    itself, as before."""
     build = out / 'Contents/Resources/totk/build'
     seed = build / 'shader-seed'
-    tool = build / 'warm-metal-cache'   # next to the game binary: Metal keys its cache by the program's folder
+    tool = build / 'warm-metal-cache'   # next to the game binary: Metal matches the length of the program's folder path
     tool.unlink(missing_ok=True)        # left by an interrupted build
-    if subprocess.run(['pgrep', '-q', 'totk-native']).returncode == 0:
-        say('4/4 app: a game is running, so the startup shaders are compiled on the first start instead '
-            '(Metal does not reliably keep what a second program compiles while a game is using it)')
+    users = metal_cache_users()
+    if users or subprocess.run(['pgrep', '-q', 'totk-native']).returncode == 0:
+        who = ', '.join(users) if users else 'a game'
+        say(f"4/4 app: {who} has Metal's shader cache open, so the startup shaders are compiled on the first start instead "
+            '(what this build compiled now would be lost when that program quits)')
         return
     say("4/4 app: compiling the startup shaders for this Mac's GPU once (about 2 minutes on an M4; minutes saved on the first start)")
     t0 = time.time()
@@ -661,10 +690,13 @@ def step_warm_metal(tree, out, logs):
     if sample['sampled'] and sample['hits'] * 10 >= sample['sampled'] * 9:
         say(f"   {done['compiled']} shaders compiled in {time.time() - t0:.0f} s; a new program finds them in Metal's cache "
             f"({sample['hits']} of {sample['sampled']} sampled, median {sample['median_ms']:.1f} ms). Moving the app makes them "
-            f"cold again: Metal keeps them per folder.")
+            f"cold again.")
     else:
+        users = metal_cache_users()
+        why = (f"{', '.join(users)} has Metal's cache open now" if users else
+               'another program probably used Metal\'s cache meanwhile; build again with no other program running to retry')
         say(f"   compiled, but Metal did not keep them ({sample['hits']} of {sample['sampled']} sampled found, median "
-            f"{sample['median_ms']:.0f} ms); the first start compiles them instead")
+            f"{sample['median_ms']:.0f} ms; {why}); the first start compiles them instead")
 
 
 def parse_args(argv):

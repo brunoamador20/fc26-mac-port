@@ -28,9 +28,11 @@ class StepWarmMetalTests(unittest.TestCase):
     def tearDown(self):
         self.folder.cleanup()
 
-    def step(self, game_running=False, reports=None, fail=False):
-        """Run the step with pgrep and the tool replaced; reports: {log name: JSON object} the tool would print."""
+    def step(self, game_running=False, reports=None, fail=False, users=(), users_after=()):
+        """Run the step with pgrep, lsof and the tool replaced; reports: {log name: JSON object} the tool would print;
+        users / users_after: the programs that have Metal's cache open before compiling / when the check failed."""
         calls = []
+        cache_users = iter([list(users), list(users_after)])
 
         def run(cmd, log, **_kwargs):
             calls.append([str(c) for c in cmd])
@@ -46,13 +48,19 @@ class StepWarmMetalTests(unittest.TestCase):
 
         with mock.patch.object(build_app.subprocess, 'run', side_effect=system), mock.patch.object(build_app, 'run', side_effect=run), \
              mock.patch.object(build_app, 'clone', side_effect=lambda src, dst: shutil.copyfile(src, dst)), \
-             mock.patch.object(build_app, 'say', side_effect=self.said.append):
+             mock.patch.object(build_app, 'say', side_effect=self.said.append), \
+             mock.patch.object(build_app, 'metal_cache_users', side_effect=lambda: next(cache_users)):
             build_app.step_warm_metal(self.tree, self.out, self.logs)
         return calls
 
     def test_skipped_while_a_game_is_running(self):
         self.assertEqual(self.step(game_running=True), [])
-        self.assertIn('a game is running', self.said[-1])
+        self.assertIn("a game has Metal's shader cache open", self.said[-1])
+
+    def test_skipped_while_another_program_has_the_cache_open(self):
+        self.assertEqual(self.step(users=['llama-server (4242)']), [])
+        self.assertIn("llama-server (4242) has Metal's shader cache open", self.said[-1])
+        self.assertFalse(self.app_tool.exists())
 
     def test_runs_from_the_game_binarys_folder_and_leaves_nothing_there(self):
         calls = self.step(reports={
@@ -68,6 +76,14 @@ class StepWarmMetalTests(unittest.TestCase):
             'warm-metal-cache.log': {'files': 8290, 'compiled': 8290, 'skipped': 0, 'failed': 0},
             'warm-metal-cache-verify.log': {'sampled': 64, 'hits': 3, 'median_ms': 61.0, 'max_ms': 95.0}})
         self.assertIn('Metal did not keep them (3 of 64', self.said[-1])
+        self.assertIn('another program probably used', self.said[-1])
+
+    def test_names_a_program_that_opened_the_cache_meanwhile(self):
+        self.step(reports={
+            'warm-metal-cache.log': {'files': 8290, 'compiled': 8290, 'skipped': 0, 'failed': 0},
+            'warm-metal-cache-verify.log': {'sampled': 64, 'hits': 1, 'median_ms': 48.0, 'max_ms': 250.0}},
+            users_after=['tool (777)'])
+        self.assertIn("tool (777) has Metal's cache open now", self.said[-1])
 
     def test_a_failing_tool_does_not_fail_the_build_and_is_removed(self):
         self.step(fail=True)
@@ -86,6 +102,50 @@ class StepWarmMetalTests(unittest.TestCase):
         log.write_text('nothing\n')
         self.assertIsNone(build_app.last_json(log))
 
+
+
+class MetalCacheUsersTests(unittest.TestCase):
+    """metal_cache_users: lsof on the shared store's files, parsed into 'name (pid)'."""
+
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.cache = Path(self.folder.name)
+        self.commands = []
+
+    def tearDown(self):
+        self.folder.cleanup()
+
+    def users(self, lsof_output=''):
+        def run(cmd, **_kwargs):
+            self.commands.append(cmd)
+            if cmd[0] == 'getconf':
+                return mock.Mock(returncode=0, stdout=str(self.cache) + '/\n')
+            if cmd[0] == 'lsof':
+                return mock.Mock(returncode=0 if lsof_output else 1, stdout=lsof_output)
+            raise AssertionError(f'unexpected command {cmd}')
+        with mock.patch.object(build_app.subprocess, 'run', side_effect=run):
+            return build_app.metal_cache_users()
+
+    def test_no_store_no_lsof(self):
+        self.assertEqual(self.users(), [])
+        self.assertEqual([c[0] for c in self.commands], ['getconf'])
+
+    def test_parses_the_programs_holding_it(self):
+        store = self.cache / 'com.apple.metal/32024'
+        store.mkdir(parents=True)
+        for name in ('libraries.data', 'libraries.list'):
+            (store / name).write_bytes(b'')
+        found = self.users('p96998\ncmetal-cache-hold\nf4\nf5\nftxt\np100\nctotk-native\nf9\n')
+        self.assertEqual(found, ['metal-cache-hold (96998)', 'totk-native (100)'])
+        lsof = self.commands[-1]
+        self.assertEqual(lsof[:4], ['lsof', '-F', 'pc', '--'])
+        self.assertEqual(sorted(Path(f).name for f in lsof[4:]), ['libraries.data', 'libraries.list'])
+
+    def test_nobody_holding_it(self):
+        store = self.cache / 'com.apple.metal/32024'
+        store.mkdir(parents=True)
+        (store / 'libraries.data').write_bytes(b'')
+        self.assertEqual(self.users(''), [])
 
 @unittest.skipUnless(shutil.which('xcrun'), 'needs the Xcode command line tools')
 class WarmMetalToolTests(unittest.TestCase):

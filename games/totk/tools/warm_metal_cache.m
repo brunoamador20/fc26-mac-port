@@ -3,14 +3,17 @@
 // thread took 14 minutes).
 //
 // Metal keeps the compiled libraries of programs without an app bundle (the game binary is one: the launcher starts it)
-// in one store, keyed by the shader source text, the compile options and the folder the program runs from: a copy of a
-// program in another folder finds nothing, while another program in the same folder -- other name, other code-signing
-// identifier -- finds everything (2026-10-18; the working directory does not matter). So build_app.py copies this tool
-// next to the game binary (Contents/Resources/totk/build), runs it there and removes it again. The game compiles each
-// <variant>_b.metal of its shader cache with exactly these options (nvn_mtl.m totk_precise_opts / totk_msl_library), and
-// the startup seed is copied into that cache byte for byte (totk_shader_seed.h), so compiling the seed's files here gives
-// the game cache hits (0.03-0.5 ms instead of 50-130 ms). The store is shared by all such programs and evicts heavily
-// when one of them compiles many new libraries, so this runs last, with no game running, and is checked with --verify
+// in one store, keyed by the shader source text, the compile options and the length of the path of the folder the
+// program runs from -- only its length (2026-10-18): a program in a folder whose path is one character longer finds
+// nothing, while any program in a folder with a path as long (same folder, other name or code-signing identifier,
+// another volume, another depth) finds everything; the working directory and the way the program was started do not
+// matter. So build_app.py copies this tool next to the game binary (Contents/Resources/totk/build), runs it there and
+// removes it again. The game compiles each <variant>_b.metal of its shader cache with exactly these options
+// (nvn_mtl.m totk_precise_opts / totk_msl_library), and the startup seed is copied into that cache byte for byte
+// (totk_shader_seed.h), so compiling the seed's files here gives the game cache hits (0.03-0.5 ms instead of 50-130 ms).
+// The store is shared by all such programs, evicts heavily when one of them compiles many new libraries, and loses what
+// a program compiled while another program that opened it first was running as soon as that program quits. So this runs
+// last, only while no other program has the store open (build_app.py metal_cache_users), and is checked with --verify
 // in a new process.
 //
 // usage: warm_metal_cache <folder with *_b.metal> [threads]   compile them all; prints one JSON line
