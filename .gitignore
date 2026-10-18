@@ -6,6 +6,10 @@ __pycache__/
 *.xci
 *.nsp
 *.nca
+*.nsz
+*.xcz
+*.bfttf
+*.sav
 # build output (the work folder normally lives next to the card image)
 TOTK_build/
 *.app/

@@ -11,6 +11,23 @@ Play your own copy of **The Legend of Zelda: Tears of the Kingdom** natively on 
 
 **Stuttering when you first start playing or enter a new scene is expected while new shaders compile—don't be surprised.** Performance typically improves as the cache warms up.
 
+## Improvements in this fork
+
+Based on [ly05010419/MacNativeGames](https://github.com/ly05010419/MacNativeGames), with the upstream MIT license and third-party notices preserved.
+
+- Fix streamed music and dialogue lookup for `content://Sound/...` paths. Extra separators at the mount root are normalized; traversal and invalid interior paths remain rejected.
+- Add 27 game-data-free C regression cases, plus real-resource checks in `probe-fs`.
+- Run synthetic container/update tests and native parser sanitizers through GitHub Actions, without game data or keys.
+- Add [audio troubleshooting and validation notes](docs/audio-troubleshooting.md). Opening dialogue and music were verified locally with TOTK 1.0.0; this does not add support for other games or validate every scene/version.
+
+Run the standalone regression with a C compiler and Python 3:
+
+```sh
+python3 -m unittest discover -s tests -p test_romfs_paths.py -v
+```
+
+Rebuild an existing app with your original game inputs to apply this fix. Saves and shader caches remain in the locations documented below.
+
 ## Local testing
 
 Tested on **MacBook Air M4 and Mac mini M4**. Local testing has collected **8,582 shaders**, with performance at approximately **90 FPS after shader warm-up, reaching 120 FPS in menus**.
@@ -137,6 +154,23 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 
 
 **第一次进入游戏或新场景时，新着色器的编译可能造成卡顿，这是预期现象，不必惊讶。** 随着着色器缓存逐步预热，表现通常会改善。
+
+## 本分支的改进
+
+基于 [ly05010419/MacNativeGames](https://github.com/ly05010419/MacNativeGames)，保留原项目的 MIT 许可证和第三方声明。
+
+- 修复 `content://Sound/...` 流式音频路径被错误拒绝的问题，恢复对应的背景音乐和对白。仅规范化挂载根目录处的重复斜杠，继续拒绝路径穿越及非法内部路径。
+- 新增 27 个不依赖游戏文件或密钥的 C 回归用例，并在 `probe-fs` 中检查真实音频资源的读取结果。
+- 添加 GitHub Actions，自动运行合成容器/更新测试和解析器内存检查，无需上传游戏数据或密钥。
+- 补充[音频排障与验证说明](docs/audio-troubleshooting.md)。已在 TOTK 1.0.0 开场实测对白和配乐；不代表已验证所有场景、其他版本或其他游戏。
+
+安装 C 编译器并使用 Python 3，即可运行独立回归测试：
+
+```sh
+python3 -m unittest discover -s tests -p test_romfs_paths.py -v
+```
+
+使用原有游戏输入重新构建 App 即可应用修复，存档和着色器缓存仍使用下文说明的位置。
 
 ## 本机测试
 
