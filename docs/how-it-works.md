@@ -37,6 +37,16 @@ service that turns each request into the MSL and its reflection file), compiled 
 ships ready-made in `games/totk/prebuilt/macos-arm64`, so neither building nor playing needs .NET, and playing needs no Python. Building still requires Python 3.14. The build also prepares a selected-version startup shader seed from the local RomFS: MSL, reflection and dependency indexes, not GPU-specific compiled binaries. The first launch imports it into the user cache and warms it before releasing the first frame. A pipeline identifier list alone cannot do this when its shaders are absent. New binding-dependent variants still use runtime translation. MetalFX upscales the game's 1600x900 scene into its
 1080p or 1440p canvas and can generate in-between frames.
 
+## Texture storage layout
+
+Automatic block height follows NVN's integer rounding: truncate `height_in_blocks * 1.5 / 8` before choosing the GOB power of two. The deko3d heuristic rounds that division up, which differs at several dimension boundaries. For the shrine warp pad's 160×160 BC3-sRGB texture, the wrong H3 layout reads padding as black texels; NVN uses H2. The allocation size is 57,344 bytes in both cases, so a size check alone cannot catch this error. Explicit packaged layouts continue to override the automatic choice.
+
+The correction was compared against the original SDK's CPU metadata functions for 40 uncompressed/BC3 boundary cases, including every mip's offset and block height: 16 mismatches before, none after. The asset's base mip and the running 1.1.2 shrine scene also confirmed the correction. These scoped checks do not establish whole-game rendering correctness. Run the game-data-free regression with `make -C games/totk probe-texture-auto-layout`; its expected sizes and block heights are independent SDK query results.
+
+The same regression was reproduced and corrected in TOTK 1.4.3 on Apple M4 Pro against upstream `41e1e0c`: the baseline leaves half of the blue warp pad black, while the patched layout restores its complete pattern. Both runtimes used the same original save copy and camera input, upstream picture settings, and the same minimal host address-layout compatibility fix (not included in this rendering change). Startup prewarming was disabled equally for this pixel comparison; it is not a performance benchmark. Capture times and weather animation differ.
+
+Historical TOTK 1.1.2 shrine captures and the fresh 1.4.3 pair are hosted as [separate evidence attachments](https://github.com/huahuahuahuahuahuahuahua/MacNativeGames/releases/tag/rendering-evidence-20261018), with visual comparisons in [PR #3](https://github.com/ly05010419/MacNativeGames/pull/3). Screenshot files are excluded from the code commits. This targeted comparison does not imply whole-game rendering coverage.
+
 ## The build (build_app.py)
 
 1. Detect XCI (HFS0 secure partition) or NSP (PFS0) by its header. Read the base Program NCA in place, extract ExeFS,
