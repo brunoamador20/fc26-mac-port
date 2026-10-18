@@ -120,13 +120,15 @@ static void raster_line_ct(const char *text, int highlight, int scale, uint8_t *
     CGColorRelease(color); CGColorSpaceRelease(cs); CFRelease(str);
 }
 
-static int has_non_ascii(const char *s) {
-    for (; *s; s++) if ((unsigned char)*s >= 0x80) return 1;
-    return 0;
+/* The 5x7 font has only the letters the original labels use: any other character (Chinese, or English words such as
+   "New shaders ... / total ...") sends the whole line to the system font instead of drawing blanks. */
+int fps_overlay_line_pixel_font(const char *s) {
+    for (; *s; s++) if (!fps_overlay_has_glyph(*s)) return 0;
+    return 1;
 }
 
 void fps_overlay_raster_line_tex(const char *text, int highlight, int scale, uint8_t *out, int tex_w, int tex_h, int *box_w, int *box_h) {
-    if (has_non_ascii(text)) { raster_line_ct(text, highlight, scale, out, tex_w, tex_h, box_w, box_h); return; }
+    if (!fps_overlay_line_pixel_font(text)) { raster_line_ct(text, highlight, scale, out, tex_w, tex_h, box_w, box_h); return; }
     int n = (int)strnlen(text, MAX_CHARS);
     if (scale < 1) scale = 1;
     if (scale > FPS_OVERLAY_MAX_SCALE) scale = FPS_OVERLAY_MAX_SCALE;

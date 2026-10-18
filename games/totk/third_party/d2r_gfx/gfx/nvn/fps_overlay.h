@@ -28,6 +28,7 @@ void fps_overlay_raster_line_tex(const char *text, int highlight, int scale, uin
 /* The bottom-right load line (totk_sysload.c) is wider than the other two: its texture. */
 enum { LOAD_OVERLAY_TEX_W = 2048 };   // the widest line (every value 100%) at scale 4 (1440p)
 int fps_overlay_has_glyph(char c);
+int fps_overlay_line_pixel_font(const char *text);   // 0: the line has a character the pixel font lacks (drawn with CoreText)
 /* TOTK automatic shader collection, bottom-left box (2026-10-16 night): "SHADER +<new>/<in the cache> PSO +<new pipelines>",
    yellow for 3 s after something new was collected. TOTK_SHADER_OVERLAY=0 hides it (default on on the Mac, off on iOS). */
 int shader_overlay_enabled(void);
