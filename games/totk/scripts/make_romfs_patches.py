@@ -18,6 +18,8 @@ real-time step (about 0.35 of a frame at 85 fps, 0.5 with the 60 FPS patch alone
 freezes it after the first, and the menu never goes away (2026-10-17: 100 % of deaths at the default settings, never
 with TOTK_FPS60=0 TOTK_REALTIME=0). Event14 now ends the branch itself: the 2-byte "next event" index of Event14 goes
 from Event25 to none. Checked with fall deaths at the default settings: the retry reloads the save.
+Only 1.0.0 needs it: 1.1.2 and 1.4.3 read DmF_SY_GameOver.110.bfevfl.zs instead, whose wait (EventWaitUpdate) the pause
+does not freeze. Their RomFS still holds the 1.0.0 file, so its overlay is made and verified there too, but never read.
 
 Input: the IVFC-verified local RomFS image (extracted/v0/romfs). Output: extracted/v0/romfs-patches/<path> and
 manifest.tsv (path, size, SHA-256 of the overlay, SHA-256 of the original). Game content stays in the ignored folder.

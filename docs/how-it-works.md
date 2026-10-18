@@ -47,7 +47,9 @@ ships ready-made in `games/totk/prebuilt/macos-arm64`, so neither building nor p
    system update partition, `--firmware` (an unpacked firmware NCA directory), or `--shared-fonts` (six extracted
    BFTTF files). Actual font bytes and the complete manifest are verified before reuse. Then the
    RomFS overlays (small data patches: quick-menu capture timing at high frame rates, the game-over retry, the heap
-   sizes the 1440p output needs) are made from your own files.
+   sizes the 1440p output needs) are made from your own files. The game-over retry patch only matters on 1.0.0:
+   1.1.2 and 1.4.3 read Nintendo's own fixed flow (`DmF_SY_GameOver.110`), so there the patch of the old file is made
+   and checked but never read.
 3. SPIRV-Cross compiled with clang; the prebuilt shader translator checked against its SHA-256. `prepare_shader_seed.py`
    reads dictionary-compressed startup packages from the selected, verified RomFS, parses supported NVN BNSH programs
    and translates default-binding variants. The version, translation chain, translator/preparer hashes and every
