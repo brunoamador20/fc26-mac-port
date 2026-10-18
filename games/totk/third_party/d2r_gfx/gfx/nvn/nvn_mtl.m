@@ -5928,14 +5928,14 @@ static NvShader *warm_shader(NSMutableDictionary<NSString *, NvShader *> *dict, 
     return sh;
 }
 /* TOTK (2026-10-18): the warm-up compiles the shader libraries of each block of rows on several threads, then builds the
-   pipelines of those rows one after another in list order, as before. A cold library takes about 48 ms, almost all of it in
-   the system Metal compiler (one thread: 9,268 libraries 444.6 s, 3,457 pipelines 0.44 s), and the compiler service runs
-   requests side by side (8 threads: 16.6 ms a library on average, measured with a small probe). That matters on a Mac
-   whose Metal cache has never seen the prepared shaders: a new Mac, or after the system purged the cache. (The cache is
-   shared by all programs and keyed by the source: moving the app, or rebuilding it with the same shaders, keeps it.) Once the player is in the
-   world (mtl_warm_wait returned) at
-   most 2 threads go on, so the rest of the warm-up does not take the game's cores. TOTK_WARM_THREADS=<n> (1 = one thread as
-   before); default 8 on the Mac (at most the core count minus 2), 1 on iOS (prebuilt libraries, nothing to compile). */
+   pipelines of those rows one after another in list order, as before. A cold library takes about 48-92 ms, almost all of it
+   in the system Metal compiler (one thread: 9,268 libraries 856 s, 3,459 pipelines under 1 s), and the compiler service runs
+   requests side by side (8 threads: 188 s). That matters on a Mac whose Metal cache has never seen the prepared shaders: a
+   new Mac, or after the system purged the cache. (The cache is shared by every program without an app bundle -- the game
+   binary is one -- and keyed by the source: moving the app, or rebuilding it with the same shaders, keeps it; only one
+   program writes it at a time.) Once the player is in the world (mtl_warm_wait returned) at most 2 threads go on, so the
+   rest of the warm-up does not take the game's cores. TOTK_WARM_THREADS=<n> (1 = one thread as before); default 8 on the
+   Mac (at most the core count minus 2), 1 on iOS (prebuilt libraries, nothing to compile). */
 enum { WARM_BLOCK = 512 };   // rows per block: the shaders of a block load in parallel, then its rows run in order
 static _Atomic int g_warm_in_play;
 static int warm_threads(void) {
