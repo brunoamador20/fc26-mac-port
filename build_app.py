@@ -15,7 +15,9 @@ build at the first wrong file):
      ready-made as a native program (games/totk/prebuilt/macos-arm64: vendor/ryujinx + patches + Service.cs, made with
      games/totk/tools/totk_xlate/publish_native.sh); startup shaders are extracted from your selected RomFS and
      translated into a bundled seed, ready for GPU warm-up even with an empty cache on the first launch
-  4. the game binary and either a macOS app bundle or an unsigned iPhone/iPad IPA (large game data is cloned when possible)
+  4. the game binary and either a macOS app bundle or an unsigned iPhone/iPad IPA (large game data is cloned when possible);
+     for the Mac the startup shaders are then compiled once into this Mac's Metal cache (about 2 minutes on an M4), so the
+     first start does not compile them in the background (games/totk/tools/warm_metal_cache.m)
 
 Every intermediate file is in the work folder (default: "<game file folder>/TOTK_build"); a second run reuses
 what is already done and correct. Mac saves, shader cache and logs go to the user's Library folders; iOS keeps saves
@@ -525,6 +527,9 @@ def step_binary(tree, game, keys, env, logs, *, version="v0"):
     run(['make', 'runtime' if version == 'v0' else f'runtime-{version}'], logs / 'runtime.log', cwd=tree, env=env)
     run(['xcrun', 'clang', '-fobjc-arc', '-O2', '-Wall', '-Ithird_party/d2r_gfx/gfx/nvn', '-Iruntime', *([] if version == 'v0' else [f'-DTOTK_GAME_{version.upper()}=1']), 'app/launcher.m', '-framework', 'AppKit',
          '-o', 'build/app-launcher'], logs / 'launcher.log', cwd=tree, env=env)
+    # used only while packaging (step_warm_metal); not part of the app
+    run(['xcrun', 'clang', '-fobjc-arc', '-O2', '-Wall', '-Wextra', 'tools/warm_metal_cache.m', '-framework', 'Metal',
+         '-framework', 'Foundation', '-o', 'build/warm-metal-cache'], logs / 'warm-metal-cache-build.log', cwd=tree, env=env)
     if not (tree / 'build/AppIcon.icns').exists():   # the game's own icon from its control data; optional
         try:
             run([tree / '.venv/bin/python', 'scripts/extract_app_icon.py', game, '--keys', keys, '--output', 'build/AppIcon.icns'],
@@ -608,6 +613,58 @@ def step_app(tree, out, logs, *, version="v0"):
     if out.exists():
         shutil.rmtree(out)
     tmp.rename(out)
+
+
+def last_json(log):
+    """The tool's report: its last line that is a JSON object."""
+    for line in reversed(log.read_text(errors='replace').splitlines()):
+        if line.startswith('{'):
+            try: return json.loads(line)
+            except ValueError: pass
+    return None
+
+
+def step_warm_metal(tree, out, logs):
+    """Compile the app's startup shaders once into this Mac's Metal cache (2026-10-18). The game compiles each of them from
+    source when it first meets it, and Metal keeps the result keyed by the source text, the compile options and the folder
+    of the program that compiled it; on a Mac that has never compiled them (a new Mac, after the system purged its cache,
+    or after the app moved) the game's background warm-up spends about 3 minutes (M4, 8 threads) compiling them, and the
+    world stutters if the player goes in before it is done. The tool (games/totk/tools/warm_metal_cache.m) compiles the
+    same files with the same options from the game binary's own folder, and is removed again afterwards (the app's
+    signature seals that folder). It runs only while no game is running, and the result is checked in a new process.
+    Nothing here can make the build fail: without it the game compiles the shaders itself, as before."""
+    build = out / 'Contents/Resources/totk/build'
+    seed = build / 'shader-seed'
+    tool = build / 'warm-metal-cache'   # next to the game binary: Metal keys its cache by the program's folder
+    tool.unlink(missing_ok=True)        # left by an interrupted build
+    if subprocess.run(['pgrep', '-q', 'totk-native']).returncode == 0:
+        say('4/4 app: a game is running, so the startup shaders are compiled on the first start instead '
+            '(Metal does not reliably keep what a second program compiles while a game is using it)')
+        return
+    say("4/4 app: compiling the startup shaders for this Mac's GPU once (about 2 minutes on an M4; minutes saved on the first start)")
+    t0 = time.time()
+    try:
+        clone(tree / 'build/warm-metal-cache', tool)
+        run([tool, seed], logs / 'warm-metal-cache.log')
+        run([tool, seed, '--verify', '64'], logs / 'warm-metal-cache-verify.log', quiet=False)
+    except (BuildError, OSError) as e:
+        say(f'   not done, the first start compiles them instead: {str(e).splitlines()[0]}')
+        return
+    finally:
+        tool.unlink(missing_ok=True)
+    done, sample = last_json(logs / 'warm-metal-cache.log'), last_json(logs / 'warm-metal-cache-verify.log')
+    if not done or not sample:
+        say(f'   no report from the tool, the first start compiles them instead (see {logs / "warm-metal-cache.log"})')
+        return
+    if done.get('failed'):
+        say(f"   {done['failed']} shaders do not compile on this Mac (the game reports them in its log too); see {logs / 'warm-metal-cache.log'}")
+    if sample['sampled'] and sample['hits'] * 10 >= sample['sampled'] * 9:
+        say(f"   {done['compiled']} shaders compiled in {time.time() - t0:.0f} s; a new program finds them in Metal's cache "
+            f"({sample['hits']} of {sample['sampled']} sampled, median {sample['median_ms']:.1f} ms). Moving the app makes them "
+            f"cold again: Metal keeps them per folder.")
+    else:
+        say(f"   compiled, but Metal did not keep them ({sample['hits']} of {sample['sampled']} sampled found, median "
+            f"{sample['median_ms']:.0f} ms); the first start compiles them instead")
 
 
 def parse_args(argv):
@@ -709,11 +766,13 @@ def main(argv):
         r = subprocess.run([out / 'Contents/MacOS/TOTK', '--check'], capture_output=True, text=True, timeout=1800)
         if r.returncode: raise BuildError(f'the app does not start: {(r.stdout + r.stderr).strip()}')
         say(f'   checked in {time.time() - t1:.0f} s')
+        step_warm_metal(tree, out, logs)
     say(f'done in {(time.time() - t0) / 60:.0f} min: {out}')
     if args.platform=='macos':
-        say('Open it from Finder (or move it to /Applications first: moving within one volume keeps the check). The first '
-            'start verifies the game data, discovers the prepared startup shaders and warms them on your GPU. '
-            'Additional scene/binding variants are translated and cached as they appear.')
+        say('Open it from Finder. Moving it afterwards (also to /Applications) keeps the macOS check when it stays on the same '
+            'volume, but Metal then compiles the startup shaders again in the background on the next start (a few minutes): '
+            'pass -o with the final location instead. The first start verifies the game data and loads the prepared startup '
+            'shaders. Additional scene/binding variants are translated and cached as they appear.')
     else: say('Install the unsigned IPA with a sideloading tool. The iOS build needs iOS/iPadOS 26 and a supported game controller; verify gameplay on your device.')
 
 

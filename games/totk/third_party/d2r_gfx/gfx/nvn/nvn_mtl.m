@@ -5933,9 +5933,11 @@ static NvShader *warm_shader(NSMutableDictionary<NSString *, NvShader *> *dict, 
    pipelines of those rows one after another in list order, as before. A cold library takes about 48-92 ms, almost all of it
    in the system Metal compiler (one thread: 9,268 libraries 856 s, 3,459 pipelines under 1 s), and the compiler service runs
    requests side by side (8 threads: 188 s). That matters on a Mac whose Metal cache has never seen the prepared shaders: a
-   new Mac, or after the system purged the cache. (The cache is shared by every program without an app bundle -- the game
-   binary is one -- and keyed by the source: moving the app, or rebuilding it with the same shaders, keeps it; only one
-   program writes it at a time.) Once the player is in the world (mtl_warm_wait returned) at most 2 threads go on, so the
+   new Mac, after the system purged the cache, or after the app moved. (Programs without an app bundle -- the game binary is
+   one -- share one store, keyed by the source, the options and the folder the program runs from: rebuilding the app in
+   the same place keeps it, moving it does not. The store evicts heavily when any such program compiles many new
+   libraries. build_app.py compiles the seed once at packaging time from the game binary's folder:
+   tools/warm_metal_cache.m.) Once the player is in the world (mtl_warm_wait returned) at most 2 threads go on, so the
    rest of the warm-up does not take the game's cores. TOTK_WARM_THREADS=<n> (1 = one thread as before); default 8 on the
    Mac (at most the core count minus 2), 1 on iOS (prebuilt libraries, nothing to compile). */
 enum { WARM_BLOCK = 512 };   // rows per block: the shaders of a block load in parallel, then its rows run in order
