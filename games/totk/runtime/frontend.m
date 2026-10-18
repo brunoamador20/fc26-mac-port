@@ -166,7 +166,10 @@ void runtime_front_run(void(*callback)(void)){
   bootProgress.minValue=0;bootProgress.maxValue=100;bootProgress.indeterminate=YES;bootProgress.autoresizingMask=NSViewMinXMargin|NSViewMaxXMargin|NSViewMinYMargin|NSViewMaxYMargin;
   [bootOverlay addSubview:bootStage];[bootOverlay addSubview:bootDetail];[bootOverlay addSubview:bootProgress];
   [window.contentView addSubview:bootOverlay];[bootProgress startAnimation:nil];
-  shortcutHelp=[[TOTKShortcutHelp alloc] initWithFrame:NSZeroRect];shortcutHelp.autoresizingMask=NSViewMinXMargin|NSViewMaxXMargin|NSViewMinYMargin|NSViewMaxYMargin;[window.contentView addSubview:shortcutHelp];
+  shortcutHelp=[[TOTKShortcutHelp alloc] initWithFrame:NSZeroRect];shortcutHelp.autoresizingMask=NSViewMinXMargin|NSViewMaxXMargin|NSViewMinYMargin|NSViewMaxYMargin;
+  /* Keep discovery/warm-up visible; the help appears after the opaque boot
+     overlay is hidden. Key 1 still controls its requested visibility. */
+  [window.contentView addSubview:shortcutHelp positioned:NSWindowBelow relativeTo:bootOverlay];
   [(TOTKShortcutHelp *)shortcutHelp position];
   /* The FPS counter is drawn into the game picture's top-right corner (with the on-screen size) by the present encoder (gfx/nvn/fps_overlay.c). */
   [window makeFirstResponder:window.contentView];[window center];front_sync_drawable();

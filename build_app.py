@@ -13,7 +13,8 @@ build at the first wrong file):
   2. data: RomFS (17 GB), the system shared fonts (from XCI firmware or an explicit font source), the RomFS overlays
   3. shaders: SPIRV-Cross (fetched at a pinned commit, compiled with clang) and the shader translator, which ships
      ready-made as a native program (games/totk/prebuilt/macos-arm64: vendor/ryujinx + patches + Service.cs, made with
-     games/totk/tools/totk_xlate/publish_native.sh); the game uses both to translate each shader once and cache it
+     games/totk/tools/totk_xlate/publish_native.sh); startup shaders are extracted from your selected RomFS and
+     translated into a bundled seed, ready for GPU warm-up even with an empty cache on the first launch
   4. the game binary, the launcher, and the app bundle (the 17 GB RomFS is an APFS clone when on the same volume)
 
 Every intermediate file is in the work folder (default: "<game file folder>/TOTK_build"); a second run reuses
@@ -501,7 +502,7 @@ def build_spirv_cross(tree, logs):
         logs / 'spirv-cross' / 'link.log', quiet=False)
 
 
-def step_shaders(tree, logs):
+def step_shaders(tree, logs, *, version='v0'):
     if not (tree / 'build/spirv-cross/spirv-cross').exists():
         say('3/4 shaders: building SPIRV-Cross with clang')
         build_spirv_cross(tree, logs)
@@ -511,6 +512,11 @@ def step_shaders(tree, logs):
     if not translator.is_file() or sha256(translator) != want:
         raise BuildError(f'{translator}: not the shader translator this repository ships (its SHA-256 differs from '
                          f'totk_xlate.sha256); check it out again, or rebuild it with games/totk/tools/totk_xlate/publish_native.sh')
+    say('3/4 shaders: discovering and translating startup shaders from your game data')
+    run([tree/'.venv/bin/python', 'scripts/prepare_shader_seed.py',
+         '--romfs', tree/f'extracted/{version}/romfs', '--output', tree/f'build/shader-seed/{version}',
+         '--translator', translator, '--spirv-cross', tree/'build/spirv-cross/spirv-cross',
+         '--version', version], logs/'prepare-shader-seed.log', cwd=tree)
 
 
 def step_binary(tree, game, keys, env, logs, *, version="v0"):
@@ -560,6 +566,18 @@ def step_app(tree, out, logs, *, version="v0"):
     clone(tree / 'prebuilt/macos-arm64/totk_xlate', res / 'build/shader-service/totk_xlate')   # where totk_shader_rt.m looks for it
     for rel in (f'extracted/{version}/romfs-patches', f'extracted/{version}/romfs-patches-out', 'extracted/firmware/shared-fonts'):
         copy_tree(tree / rel, res / rel)
+    seed = tree/f'build/shader-seed/{version}'
+    if not (seed/'seed-manifest.json').is_file():
+        raise BuildError('startup shader seed was not prepared; refusing an app without first-launch warm-up data')
+    try:
+        report = json.loads((seed/'seed-manifest.json').read_text())
+        if (report['version'] != version or report['chain'] != 'totk-native-v4-unverified' or
+                report['shaders'] < 8000 or not report['files'] or any(
+                    Path(name).name != name or sha256(seed/name) != digest for name, digest in report['files'].items())):
+            raise ValueError('version, translation chain or file hash differs')
+    except (ValueError, KeyError, OSError, TypeError) as error:
+        raise BuildError(f'invalid prepared startup shader seed: {error}') from None
+    copy_tree(seed, res/'build/shader-seed')
     clone(tree / 'build/app-launcher', tmp / 'Contents/MacOS/TOTK')
     info = dict(CFBundleDevelopmentRegion='en', CFBundleExecutable='TOTK', CFBundleIdentifier=BUNDLE_ID, CFBundleName=APP_NAME,
                 CFBundleDisplayName=APP_NAME, CFBundlePackageType='APPL', CFBundleShortVersionString=expected['display_version'],
@@ -574,6 +592,18 @@ def step_app(tree, out, logs, *, version="v0"):
     (tmp / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
     (tmp / 'Contents/PkgInfo').write_bytes(b'APPL????')
     sign_app(tmp, logs)  # A failed seal must not remove the previous working app.
+    old_binary = out/'Contents/Resources/totk/build/totk-native'
+    notified = 0
+    while old_binary.is_file():
+        # Preparing/signing a replacement is safe while playing; replacing the
+        # resources of an active game is not. Wait without closing the player.
+        processes = subprocess.run(['ps', '-axo', 'comm='], capture_output=True, text=True, check=True).stdout.splitlines()
+        if str(old_binary.resolve()) not in (p.strip() for p in processes):
+            break
+        if time.monotonic()-notified >= 60:
+            say('4/4 app: replacement is ready; waiting for the running game to close before updating it')
+            notified = time.monotonic()
+        time.sleep(2)
     if out.exists():
         shutil.rmtree(out)
     tmp.rename(out)
@@ -639,7 +669,7 @@ def main(argv):
     step_data(tree, game, keys, logs, firmware=firmware, shared_fonts=shared_fonts)
     if update:
         step_update_data(tree, game, update, keys, logs, version=version)
-    step_shaders(tree, logs)
+    step_shaders(tree, logs, version=version)
     step_binary(tree, game, keys, env, logs, version=version)
     say(f'4/4 app: assembling {out}')
     step_app(tree, out, logs, version=version)
@@ -656,8 +686,8 @@ def main(argv):
     say(f'   checked in {time.time() - t1:.0f} s')
     say(f'done in {(time.time() - t0) / 60:.0f} min: {out}')
     say('Open it from Finder (or move it to /Applications first: moving within one volume keeps the check). The first '
-        'start verifies the 17 GB of game data once and translates shaders as they appear (short stutters the first '
-        'time a scene is seen).')
+        'start verifies the game data, discovers the prepared startup shaders and warms them on your GPU. '
+        'Additional scene/binding variants are translated and cached as they appear.')
 
 
 if __name__ == '__main__':

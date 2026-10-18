@@ -5840,6 +5840,20 @@ static NSString *warm_key(const char *s, size_t n) {
     return [[NSString alloc] initWithBytes:s length:z encoding:NSUTF8StringEncoding];
 }
 static uint64_t g_warm_missing;   // shaders named in the warm lists that are not in the translation cache (yet)
+static int warm_available(NSString *key) {
+    if (!key.length) return 1;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *rt = totk_rt_dir();
+    int have = [fm fileExistsAtPath:[rt stringByAppendingFormat:@"/%@.metal", key]] ||
+               [fm fileExistsAtPath:[rt stringByAppendingFormat:@"/%@.metallib", key]] ||
+               [fm fileExistsAtPath:[g_msl_dir stringByAppendingFormat:@"/%@.metallib", key]];
+    if (!have) {
+        static NSMutableSet *missing; static dispatch_once_t once;
+        dispatch_once(&once, ^{ missing = [NSMutableSet set]; });
+        @synchronized (missing) { if (![missing containsObject:key]) { [missing addObject:key]; g_warm_missing++; } }
+    }
+    return have;
+}
 static NvShader *warm_shader(NSMutableDictionary<NSString *, NvShader *> *dict, NSString *key, int stage) {
     NvShader *sh = dict[key];
     if (!sh) {
@@ -5874,6 +5888,7 @@ static void warm_enqueue(WarmItem *item) {
    displaying a determinate bar. Shader/PSO counts are separate: one pipeline
    row may load two shaders, and a failed row still advances the task bar. */
 static void warm_plan(NSArray<NSString *> *paths, NSArray<NSString *> *files, NSMutableSet<NSString *> *keys,
+                      NSMutableSet<NSString *> *eligible,
                       uint64_t *tasks, uint64_t *shaders, uint64_t *pipelines) {
     NSMutableSet<NSString *> *rows = [NSMutableSet set];
     *tasks = *shaders = *pipelines = 0;
@@ -5881,17 +5896,24 @@ static void warm_plan(NSArray<NSString *> *paths, NSArray<NSString *> *files, NS
         NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
         for (NSString *line in [txt componentsSeparatedByString:@"\n"]) {
             if (!line.length || [line hasPrefix:@"#"] || [rows containsObject:line]) continue;
-            [rows addObject:line]; ++*tasks;
+            [rows addObject:line];
             NSArray<NSString *> *c = [line componentsSeparatedByString:@"\t"];
-            if ([c[0] isEqualToString:@"S"] && c.count >= 3 && [c[1] length]) [keys addObject:c[1]];
-            else if ([c[0] isEqualToString:@"R"] && c.count >= 2) {
-                pso_skey sk; if (!pso_skey_parse(c[1].UTF8String, &sk)) {
-                    NSString *vs = warm_key(sk.vs, sizeof sk.vs), *fs = warm_key(sk.fs, sizeof sk.fs);
-                    if (vs.length) [keys addObject:vs]; if (fs.length) [keys addObject:fs]; ++*pipelines;
-                }
-            } else if ([c[0] isEqualToString:@"C"] && c.count >= 2 && [c[1] length]) {
-                [keys addObject:c[1]]; ++*pipelines;
+            if ([c[0] isEqualToString:@"S"] && c.count >= 3 && [c[1] length]) {
+                if (!warm_available(c[1])) continue;
+                [keys addObject:c[1]];
             }
+            else if ([c[0] isEqualToString:@"R"] && c.count >= 2) {
+                pso_skey sk; if (pso_skey_parse(c[1].UTF8String, &sk)) continue;
+                NSString *vs = warm_key(sk.vs, sizeof sk.vs), *fs = warm_key(sk.fs, sizeof sk.fs);
+                // Evaluate both so the missing-shader count remains deduplicated.
+                int av = warm_available(vs), af = warm_available(fs);
+                if (!av || !af) continue;
+                if (vs.length) [keys addObject:vs]; if (fs.length) [keys addObject:fs]; ++*pipelines;
+            } else if ([c[0] isEqualToString:@"C"] && c.count >= 2 && [c[1] length]) {
+                if (!warm_available(c[1])) continue;
+                [keys addObject:c[1]]; ++*pipelines;
+            } else continue;
+            [eligible addObject:line]; ++*tasks;
         }
     }
     for (NSString *file in files) if ([file hasSuffix:@"_b.metal"]) {
@@ -5910,6 +5932,7 @@ static void warm_task_done(uint64_t *done,uint64_t total,uint64_t shader_total,u
         runtime_warm_progress(*done,total,dict.count,shader_total,g_warm_rps+g_warm_cps,pipeline_total);
 }
 static void warm_worker(NSArray<NSString *> *paths, NSArray<NSString *> *files,
+                        NSSet<NSString *> *eligible,
                         NSMutableSet<NSString *> *planned_keys,uint64_t total,uint64_t shader_total,uint64_t pipeline_total) {
     @autoreleasepool {
         NSMutableDictionary<NSString *, NvShader *> *dict = [NSMutableDictionary dictionary];
@@ -5921,7 +5944,7 @@ static void warm_worker(NSArray<NSString *> *paths, NSArray<NSString *> *files,
             if (!txt) { MLOG("【红】预热清单读取失败：%s", path.UTF8String);
                 if (path_index++ == 0) atomic_store(&g_warm_priority_done, 1); continue; }
             for (NSString *line in [txt componentsSeparatedByString:@"\n"]) {
-                if (!line.length || [line hasPrefix:@"#"] || [seen containsObject:line]) continue;
+                if (![eligible containsObject:line] || [seen containsObject:line]) continue;
                 [seen addObject:line];
                 NSArray<NSString *> *c = [line componentsSeparatedByString:@"\t"];
                 if (!c.count) { warm_task_done(&done,total,shader_total,pipeline_total,dict); continue; }
@@ -5972,6 +5995,10 @@ static void warm_worker(NSArray<NSString *> *paths, NSArray<NSString *> *files,
         NSMutableSet<NSString *> *known_files = [NSMutableSet setWithArray:files];
         NSArray<NSString *> *latest = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:rt error:nil] sortedArrayUsingSelector:@selector(compare:)];
         for (NSString *file in latest) if ([file hasSuffix:@"_b.metal"] && ![known_files containsObject:file]) {
+            // The native service publishes reflection last. A newly written
+            // MSL with no reflection yet is still in flight, not a failed shader.
+            NSString *json = [[file stringByDeletingPathExtension] stringByAppendingPathExtension:@"json"];
+            if (![NSFileManager.defaultManager fileExistsAtPath:[rt stringByAppendingPathComponent:json]]) continue;
             [known_files addObject:file]; [cache_files addObject:file]; ++total;
             NSString *key = [file stringByDeletingPathExtension];
             if (![planned_keys containsObject:key]) { [planned_keys addObject:key]; ++shader_total; }
@@ -6104,6 +6131,11 @@ static void warm_start(void) {
     } else {
         NSString *seed = [g_shmap_path.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_manifest.tsv"];
         NSMutableArray<NSString *> *all = [NSMutableArray array];
+        // This selected-version seed has real MSL/reflection, including on a
+        // fresh install. Warm it before the title; identifiers alone cannot warm.
+        const char *seedMode = getenv("TOTK_SHADER_SEED");
+        NSString *prepared = [g_shmap_path.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"shader-seed/pso_manifest.tsv"];
+        if (!(seedMode && !strcmp(seedMode, "off")) && [NSFileManager.defaultManager fileExistsAtPath:prepared]) [all addObject:prepared];
         if ([NSFileManager.defaultManager fileExistsAtPath:seed]) [all addObject:seed];
         NSString *user = pso_user_path();
         if (user && [NSFileManager.defaultManager fileExistsAtPath:user]) [all addObject:user];
@@ -6119,13 +6151,14 @@ static void warm_start(void) {
     NSArray<NSString *> *files = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:totk_rt_dir() error:nil] sortedArrayUsingSelector:@selector(compare:)] ?: @[];
     uint64_t total = 0, shader_total = 0, pipeline_total = 0;
     NSMutableSet<NSString *> *planned_keys = [NSMutableSet set];
-    warm_plan(paths,files,planned_keys,&total,&shader_total,&pipeline_total);
+    NSMutableSet<NSString *> *eligible = [NSMutableSet set];
+    warm_plan(paths,files,planned_keys,eligible,&total,&shader_total,&pipeline_total);
     if (runtime_warm_progress) runtime_warm_progress(0,total,0,shader_total,0,pipeline_total);
     g_warm_t0 = bp_now();
     dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);   // 不是可有可无的后台活：它决定玩家进局前管线是否就绪 | Not optional background work: it decides whether the pipelines are ready before the player enters a run
     dispatch_queue_t q = dispatch_queue_create("dm.nvn.pso-warm", attr);
     atomic_store(&g_warm_running, 1);
-    dispatch_async(q, ^{ warm_worker(paths,files,planned_keys,total,shader_total,pipeline_total); });
+    dispatch_async(q, ^{ warm_worker(paths,files,eligible,planned_keys,total,shader_total,pipeline_total); });
     // The title's seed manifest must be ready before its first frame. The
     // profile-specific list and remaining translated variants finish behind
     // the menu, then mtl_warm_wait at save-load waits before entering play.

@@ -140,9 +140,15 @@ class Updates(unittest.TestCase):
                 tree=self.root/version;out=self.root/f'{version}.app'
                 files=[f'build/totk-native-{version}','build/pso_manifest.tsv','build/spirv-cross/spirv-cross',
                        'prebuilt/macos-arm64/totk_xlate','build/app-launcher',f'extracted/{version}/romfs/romfs.bin',
-                       f'extracted/{version}/romfs/runtime-index.bin']+[f'rewritten/{version}/{n}.patched.bin' for n in ('main','sdk','subsdk0')]
+                       f'extracted/{version}/romfs/runtime-index.bin',
+                       f'build/shader-seed/{version}/seed-manifest.json',
+                       f'build/shader-seed/{version}/pso_manifest.tsv']+[f'rewritten/{version}/{n}.patched.bin' for n in ('main','sdk','subsdk0')]
                 for rel in files:
                     p=tree/rel;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(b'test')
+                import hashlib
+                (tree/f'build/shader-seed/{version}/seed-manifest.json').write_text(json.dumps(dict(
+                    version=version, chain='totk-native-v4-unverified', shaders=8000,
+                    files={'pso_manifest.tsv':hashlib.sha256(b'test').hexdigest()})))
                 with patch.object(build_app, 'sign_app') as signing:
                     build_app.step_app(tree,out,self.root/'logs',version=version)
                 signing.assert_called_once_with(out.with_name(out.name+'.partial'),self.root/'logs')
@@ -152,11 +158,18 @@ class Updates(unittest.TestCase):
                 self.assertFalse((res/'build'/f'totk-native-{version}').exists())
                 self.assertTrue((res/'build/totk-native').exists())
                 self.assertTrue((res/f'rewritten/{version}/main.patched.bin').exists())
+                self.assertTrue((res/'build/shader-seed/seed-manifest.json').exists())
                 self.assertEqual([p.name for p in (res/'rewritten').iterdir()], [version])
 
     def test_failed_bundle_seal_preserves_previous_app(self):
         tree=self.root/'tree';out=self.root/'existing.app';out.mkdir()
         (out/'keep.txt').write_text('previous working app')
+        (tree/'build/shader-seed/v143').mkdir(parents=True)
+        import hashlib
+        (tree/'build/shader-seed/v143/pso_manifest.tsv').write_bytes(b'test')
+        (tree/'build/shader-seed/v143/seed-manifest.json').write_text(json.dumps(dict(
+            version='v143',chain='totk-native-v4-unverified',shaders=8000,
+            files={'pso_manifest.tsv':hashlib.sha256(b'test').hexdigest()})))
         def fake_clone(_source, target):
             target.parent.mkdir(parents=True,exist_ok=True)
             target.write_bytes(b'synthetic payload')
@@ -165,6 +178,41 @@ class Updates(unittest.TestCase):
             with self.assertRaisesRegex(build_app.BuildError,'seal rejected'):
                 build_app.step_app(tree,out,self.root/'logs',version='v143')
         self.assertEqual((out/'keep.txt').read_text(),'previous working app')
+
+    def test_wrong_shader_seed_version_does_not_replace_existing_app(self):
+        tree=self.root/'tree';out=self.root/'existing.app';out.mkdir()
+        (out/'keep.txt').write_text('previous working app')
+        seed=tree/'build/shader-seed/v143';seed.mkdir(parents=True)
+        (seed/'seed-manifest.json').write_text(json.dumps(dict(version='v112',chain='totk-native-v4-unverified',shaders=1,files={'x':'0'*64})))
+        def fake_clone(_source, target):
+            target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(b'synthetic payload')
+        with patch.object(build_app,'clone',side_effect=fake_clone),patch.object(build_app,'sign_app') as signing:
+            with self.assertRaisesRegex(build_app.BuildError,'invalid prepared startup shader seed'):
+                build_app.step_app(tree,out,self.root/'logs',version='v143')
+            signing.assert_not_called()
+        self.assertEqual((out/'keep.txt').read_text(),'previous working app')
+
+    def test_running_app_is_preserved_until_its_process_exits(self):
+        import hashlib
+        from types import SimpleNamespace
+        tree=self.root/'tree';out=self.root/'existing.app'
+        old=out/'Contents/Resources/totk/build/totk-native';old.parent.mkdir(parents=True);old.write_bytes(b'old running app')
+        seed=tree/'build/shader-seed/v143';seed.mkdir(parents=True)
+        (seed/'pso_manifest.tsv').write_bytes(b'test')
+        (seed/'seed-manifest.json').write_text(json.dumps(dict(version='v143',chain='totk-native-v4-unverified',shaders=8000,
+            files={'pso_manifest.tsv':hashlib.sha256(b'test').hexdigest()})))
+        def fake_clone(_source, target):
+            target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(b'new app')
+        checks=[]
+        def processes(*_args,**_kwargs):
+            self.assertEqual(old.read_bytes(),b'old running app')
+            checks.append(True)
+            return SimpleNamespace(stdout=str(old.resolve())+'\n' if len(checks)==1 else '')
+        with patch.object(build_app,'clone',side_effect=fake_clone),patch.object(build_app,'sign_app'), \
+             patch.object(build_app.subprocess,'run',side_effect=processes),patch.object(build_app.time,'sleep') as pause:
+            build_app.step_app(tree,out,self.root/'logs',version='v143')
+        self.assertEqual(len(checks),2);pause.assert_called_once_with(2)
+        self.assertEqual(old.read_bytes(),b'new app')
 
 
 

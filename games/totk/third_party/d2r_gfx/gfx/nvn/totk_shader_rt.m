@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <stdatomic.h>
+#include "totk_shader_seed.h"
 int totk_depth_near_minus_w(void);   // hle_nvn.c: 1 when the game selected NVN_DEPTH_MODE_NEAR_IS_MINUS_W
 uint64_t dm_nvn_frame_count(void);
 
@@ -42,7 +43,8 @@ static NSString *root_dir(void) {   // native-port/ (the executable lives in nat
     return g_root;
 }
 NSString *totk_rt_dir(void) {
-    if (!g_dir) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
         const char *e = getenv("TOTK_SHADER_CACHE");
 #if TARGET_OS_IPHONE
         g_dir = e ? @(e) : [NSString stringWithFormat:@"shader-cache/rt-%s", DMSH_CHAIN];   // in Documents (the app's working directory)
@@ -50,7 +52,17 @@ NSString *totk_rt_dir(void) {
         g_dir = e ? @(e) : [root_dir() stringByAppendingFormat:@"/build/shader-cache/rt-%s", DMSH_CHAIN];
 #endif
         [NSFileManager.defaultManager createDirectoryAtPath:g_dir withIntermediateDirectories:YES attributes:nil error:nil];
-    }
+#if !TARGET_OS_IPHONE
+        const char *seedMode = getenv("TOTK_SHADER_SEED");
+        if (!(seedMode && !strcmp(seedMode, "off"))) {
+            NSError *error = nil;
+            NSDictionary *seed = totk_seed_import([root_dir() stringByAppendingPathComponent:@"build/shader-seed"], g_dir, &error);
+            if (!seed) die("startup shader preparation: %s", error.localizedDescription.UTF8String);
+            if ([seed[@"available"] boolValue]) LOG("[shader-seed] 发现随 App 准备的着色器 %llu 个，导入 %llu 个文件；首次启动即可预热",
+                [seed[@"shaders"] unsignedLongLongValue], [seed[@"imported_files"] unsignedLongLongValue]);
+        }
+#endif
+    });
     return g_dir;
 }
 

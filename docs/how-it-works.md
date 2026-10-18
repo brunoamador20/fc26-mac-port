@@ -34,7 +34,7 @@ translator (to SPIR-V), SPIRV-Cross (to Metal Shading Language) and Metal, and t
 (`~/Library/Application Support/MacNativeGames/TOTK/shader-cache`). The translator runs as one native program,
 `totk_xlate --service` (`games/totk/tools/totk_xlate`: the Ryujinx translator with this project's patches and the
 service that turns each request into the MSL and its reflection file), compiled ahead of time with .NET NativeAOT; it
-ships ready-made in `games/totk/prebuilt/macos-arm64`, so neither building nor playing needs .NET, and playing needs no Python. Building still requires Python 3.14. MetalFX upscales the game's 1600x900 scene into its
+ships ready-made in `games/totk/prebuilt/macos-arm64`, so neither building nor playing needs .NET, and playing needs no Python. Building still requires Python 3.14. The build also prepares a selected-version startup shader seed from the local RomFS: MSL, reflection and dependency indexes, not GPU-specific compiled binaries. The first launch imports it into the user cache and warms it before releasing the first frame. A pipeline identifier list alone cannot do this when its shaders are absent. New binding-dependent variants still use runtime translation. MetalFX upscales the game's 1600x900 scene into its
 1080p or 1440p canvas and can generate in-between frames.
 
 ## The build (build_app.py)
@@ -48,7 +48,10 @@ ships ready-made in `games/totk/prebuilt/macos-arm64`, so neither building nor p
    BFTTF files). Actual font bytes and the complete manifest are verified before reuse. Then the
    RomFS overlays (small data patches: quick-menu capture timing at high frame rates, the game-over retry, the heap
    sizes the 1440p output needs) are made from your own files.
-3. SPIRV-Cross compiled with clang; the prebuilt shader translator checked against its SHA-256.
+3. SPIRV-Cross compiled with clang; the prebuilt shader translator checked against its SHA-256. `prepare_shader_seed.py`
+   reads dictionary-compressed startup packages from the selected, verified RomFS, parses supported NVN BNSH programs
+   and translates default-binding variants. The version, translation chain, translator/preparer hashes and every
+   output file are checked before cache reuse and packaging. No prior user shader cache is read.
 4. The game binary built against your extracted files (it checks their hashes at every start) and everything put into
    an app bundle; the app's launcher points the game at your profile, cache and log folders. The builder seals and
    strictly verifies the complete bundle before replacing the previous app, then refreshes its LaunchServices record.
