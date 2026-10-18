@@ -539,14 +539,14 @@ METAL_FLAGS = ['-fmetal-math-mode=safe']
 
 
 def step_shader_libs(tree, logs, *, version='v0'):
-    """Compile the startup shaders ahead of time. Metal's own cache of shaders compiled at launch starts over when the
-    app is moved or rebuilt; these files go inside the app. Each is named by the SHA-256 of its source, so the game
-    loads only an exact match, and a rebuild reuses every shader that did not change."""
+    """Compile the startup shaders ahead of time. Metal's own cache of shaders compiled at launch does not follow the
+    app to a folder whose path has another length (step_warm_metal); these files go inside the app. Each is named by the
+    SHA-256 of its source, so the game loads only an exact match, and a rebuild reuses every shader that did not change."""
     sources = sorted((tree/f'build/shader-seed/{version}').glob('*.metal'))
     found = metal_compiler()
     if not found:
-        say('3/4 shaders: no Metal toolchain (xcodebuild -downloadComponent MetalToolchain), so the startup shaders are '
-            'compiled on the first launch, and again after the app is moved or rebuilt')
+        say('3/4 shaders: no Metal toolchain (xcodebuild -downloadComponent MetalToolchain), so the startup shaders go '
+            "into Metal's cache for the app's location at the end of the build instead; moving the app makes them cold again")
         return
     metal, compiler = found
     libs = tree/'build/shader-libs'

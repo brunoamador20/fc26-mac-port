@@ -4739,8 +4739,8 @@ static int drv_scan(NvShader *o, NSString *src) {   // src: the full MSL (iOS do
 static _Atomic uint64_t g_rt_prebuilt, g_rt_compiled;   // TOTK: translated variants loaded precompiled (iOS) / compiled from MSL here (atomic: the warm-up loads on several threads)
 #if !TARGET_OS_IPHONE
 /* TOTK: the startup shaders compiled when the app was built (build_app.py step_shader_libs), named by the SHA-256 of their
-   MSL, so only an exact match is used. Metal's own cache of libraries compiled here starts over when the app is moved or
-   rebuilt (measured: a full 4.5-minute warm-up again); these files move with the app. */
+   MSL, so only an exact match is used. Metal's own cache of libraries compiled here does not follow the app to a folder
+   whose path has another length (measured: a full 4.5-minute warm-up again); these files move with the app. */
 static NSString *shader_lib_prebuilt_path(NSData *src) {
     if (getenv("TOTK_FAST_MATH") && atoi(getenv("TOTK_FAST_MATH"))) return nil;   // built with safe math (totk_precise_opts)
     static NSString *dir; static dispatch_once_t once; dispatch_once(&once, ^{ dir = exe_rel("shader-libs"); });
