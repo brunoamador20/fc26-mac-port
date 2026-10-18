@@ -41,13 +41,21 @@ def main():
     (out / 'output-fixture.log').write_text(run.stdout + run.stderr)
     patched = target.read_bytes()
     data = (len(raw) + 0x3fff) & ~0x3fff
-    stub = ((len(raw) + 15) & ~15) + 32
+    # Same placement as game_patches_v143.c: both veneers sit in the zero
+    # padding after the text segment, the frame-step one (4 words) first and
+    # this one (7 words) right after it. They must end before read-only data.
+    frame_step = (layout['TEXT_END'] + 15) & ~15
+    stub = frame_step + 16
+    assert stub + 28 <= layout['RO_OFF'], 'output veneer would overlap read-only data'
+    assert raw[frame_step:stub + 28] == bytes(stub + 28 - frame_step), \
+        'veneer padding not empty in the rewritten image'
     changes = {p for p in range(0, len(raw), 4) if raw[p:p+4] != patched[p:p+4]}
-    assert changes == {
+    want = {
         0xbdb578, 0xbdb584, 0x3dcb28,
         0x2db204, 0x2db208, 0x2db22c, 0x2db360, 0x2db36c, 0x2db340, 0x2db34c,
         0x3e5658, 0x2daa54, 0x2daa58, 0x2daa6c, 0x2daa70, 0x2daa74, 0x2daa78,
-    }, changes
+    } | {frame_step + 4 * i for i in range(4)} | {stub + 4 * i for i in range(7)}
+    assert changes == want, [hex(p) for p in sorted(changes ^ want)]
 
     def execute(w, h, scale, apply):
         mu = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
