@@ -13,7 +13,17 @@ static NSString *totk_seed_hash(NSData *data) {
     return s;
 }
 
-// marker: a receipt in the cache that skips re-importing the same manifest; nil imports every time (fill packs).
+// What the cache receipt names: the translation chain, the shader count and the file table (name -> SHA-256) the cache got.
+// The preparation's own fields (how long it took, the preparing script's hash) change with every packaging; a hash of the
+// raw manifest made a repackaged app with the same shaders check all 24,871 files again on its first start (10-18 s, 2026-10-18).
+static NSString *totk_seed_fingerprint(NSDictionary *m, NSArray<NSString *> *names) {
+    NSDictionary *files = m[@"files"];
+    NSMutableString *s = [NSMutableString stringWithFormat:@"chain %@\nschema %@\nshaders %@\n", m[@"chain"], m[@"schema"], m[@"shaders"]];
+    for (NSString *name in names) [s appendFormat:@"%@ %@\n", name, files[name]];
+    return totk_seed_hash([s dataUsingEncoding:NSUTF8StringEncoding]);
+}
+
+// marker: a receipt in the cache that skips re-importing the same files; nil imports every time (fill packs).
 static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NSString *marker, NSError **error) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *manifestPath = [source stringByAppendingPathComponent:@"seed-manifest.json"];
@@ -26,14 +36,14 @@ static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NS
         ![m[@"files"] isKindOfClass:NSDictionary.class] || ![m[@"files"] count]) problem = @"Startup shader seed identity is invalid";
     if (problem) goto fail;
     {
-        NSString *fingerprint = totk_seed_hash(raw);
-        NSData *oldData = marker ? [NSData dataWithContentsOfFile:marker] : nil;
-        NSDictionary *old = oldData ? [NSJSONSerialization JSONObjectWithData:oldData options:0 error:nil] : nil;
         NSDictionary *files = m[@"files"];
         NSArray<NSString *> *names = [files.allKeys sortedArrayUsingSelector:@selector(compare:)];
+        NSString *fingerprint = totk_seed_fingerprint(m, names);
+        NSData *oldData = marker ? [NSData dataWithContentsOfFile:marker] : nil;
+        NSDictionary *old = oldData ? [NSJSONSerialization JSONObjectWithData:oldData options:0 error:nil] : nil;
         NSRegularExpression *safe = [NSRegularExpression regularExpressionWithPattern:
             @"^(?:[0-9a-f]{64}\\.variants|[0-9a-f]{64}-[0-9a-f]{12}_b\\.(?:metal|json|metallib)|pso_manifest\\.tsv)$" options:0 error:nil];
-        BOOL installed = [old isKindOfClass:NSDictionary.class] && [old[@"manifest_sha256"] isEqual:fingerprint];
+        BOOL installed = [old isKindOfClass:NSDictionary.class] && [old[@"files_sha256"] isEqual:fingerprint];   // receipts from before 2026-10-18 (manifest_sha256) are checked once more
         for (id name in names) {
             if (![name isKindOfClass:NSString.class] || ![safe numberOfMatchesInString:name options:0 range:NSMakeRange(0, [name length])]) {
                 problem = @"Unsafe startup shader seed filename"; goto fail;
@@ -78,7 +88,7 @@ static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NS
             if (![data writeToFile:target options:NSDataWritingAtomic error:error]) return nil;
             imported++;
         }
-        NSData *receipt = [NSJSONSerialization dataWithJSONObject:@{@"manifest_sha256": fingerprint} options:0 error:error];
+        NSData *receipt = [NSJSONSerialization dataWithJSONObject:@{@"files_sha256": fingerprint} options:0 error:error];
         if (marker && (!receipt || ![receipt writeToFile:marker options:NSDataWritingAtomic error:error])) return nil;
         return @{@"available": @YES, @"shaders": m[@"shaders"], @"imported_files": @(imported)};
     }

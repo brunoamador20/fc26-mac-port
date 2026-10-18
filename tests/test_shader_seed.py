@@ -108,6 +108,29 @@ int main(int argc, const char **argv) { @autoreleasepool {
             self.assertGreater(self.run_probe(source, cache)['imported_files'], 0)
             self.assertEqual((cache/'unrelated.txt').read_text(), 'keep')
 
+    def test_reprepared_seed_with_the_same_files_is_not_checked_again(self):
+        # Packaging again writes a new preparation time and script hash into the manifest; the files stay the same.
+        with tempfile.TemporaryDirectory() as folder:
+            source, cache, key, variant = self.fixture(Path(folder))
+            self.run_probe(source, cache)
+            p = source/'seed-manifest.json'; m = json.loads(p.read_text())
+            m['seconds'] = 12.5; m['preparation_sha256'] = 'f'*64
+            p.write_text(json.dumps(m))
+            (source/(variant+'_b.metal')).write_text('corrupt')   # only a check of the sources would notice
+            self.assertEqual(self.run_probe(source, cache)['imported_files'], 0)
+
+    def test_a_changed_file_table_is_checked_again(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source, cache, key, variant = self.fixture(Path(folder))
+            self.run_probe(source, cache)
+            p = source/'seed-manifest.json'; m = json.loads(p.read_text())
+            extra = key+'-'+'e'*12+'_b.metal'
+            (source/extra).write_bytes(b'// new shader')
+            m['files'][extra] = hashlib.sha256(b'// new shader').hexdigest(); m['shaders'] = 2
+            p.write_text(json.dumps(m))
+            (source/(variant+'_b.metal')).write_text('corrupt')   # caught because every source is checked again
+            self.run_probe(source, cache, good=False)
+
     def test_wrong_chain_corruption_and_path_traversal_are_rejected(self):
         for mutation in ['chain', 'hash', 'path']:
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as folder:
