@@ -50,6 +50,8 @@ xcode-select --install
 brew install opus libvpx python@3.14
 ```
 
+Optional: with Xcode's Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`), the build compiles the startup shaders into the app. Without it, they are compiled on the first launch, and again after the app is moved or rebuilt.
+
 **2. Download or clone this repository**, then open Terminal in its `MacNativeGames` folder and run the script with your game file and keys:
 
 ```sh
@@ -208,6 +210,8 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 xcode-select --install
 brew install opus libvpx python@3.14
 ```
+
+可选：装有 Xcode 的 Metal 工具链（`xcodebuild -downloadComponent MetalToolchain`）时，构建会把启动着色器预先编译进 App。没有它时，首次启动会编译这些着色器，移动或重新构建 App 后也会再编译一次。
 
 **2. 下载或克隆本仓库**，在终端中进入 `MacNativeGames` 目录，再运行脚本，给出游戏文件和密钥：
 
