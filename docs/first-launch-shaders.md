@@ -64,4 +64,4 @@ games/totk/.venv/bin/python games/totk/scripts/verify_first_launch_shaders.py \
 
 此次全流程验证把独立构建工作区放在 `analysis/v143-port/full-build-work`，导致分析目录约 36 GiB；其中该工作区约 33 GiB，主要为本体与 1.4.3 两套解包数据。`analysis/v112-port` 约 70 MiB，几乎全部是 `runtime-layout.json`。1.4.3 其余占用还包括多轮场景测试的 profile 副本、日志和二进制诊断样本；这不是版本适配代码或着色器种子本身的体积。`du` 对 APFS 克隆统计的块可能共享，不能直接推算独占物理空间。
 
-完整构建工作区应放在游戏镜像旁的 `TOTK_build` 或源码树外通过 `--work` 指定的位置；分析目录仅保存必要的复现步骤、摘要和验证证据。本次体积调查只读，未删除或移动任何构建数据、测试证据或存档；明细保存在 `shader-first-launch-8k/disk-usage-comparison.json`。所有这些生成目录均被 Git 忽略，提交只含源码、测试和文档。
+完整构建工作区应放在游戏镜像旁的 `TOTK_build` 或源码树外通过 `--work` 指定的位置；分析目录仅保存必要的复现步骤、摘要和验证证据。最初只读调查明细保存在 `shader-first-launch-8k/disk-usage-comparison.json`。用户随后要求清理不属于项目的残留：已删除重复的 `full-build-work`、旧根目录 `TOTK_build`、多轮测试的 profile 副本、可重新生成的二进制诊断样本和工具临时构建缓存；按清理前 `du` 统计合计约 35 GiB，不能等同于 APFS 新释放的独占空间。`v143-port` 从约 36 GiB 降至约 753 MiB。保留复现步骤、报告、日志、截图、运行时布局、主开发目录的解包/构建产物、当前 App 及着色器缓存；正式 profile 与升级前备份前后哈希一致，未删除任何跟踪文件。Finder 可能即时重建 `.DS_Store`，不反复清理。精确删除清单及校验在 `analysis/v143-port/cleanup-2026-10-18.json`。所有这些生成目录均被 Git 忽略，提交只含源码、测试和文档。
