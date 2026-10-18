@@ -905,6 +905,8 @@ static void zskip_clear(void);
 static int tbdr_on(void);
 static id g_cb;
 static id<MTL4ComputeCommandEncoder> g_blit;
+static int g_blit_alias; // shared encoder may have accessed aliased buffer storage
+static int g_copy_probe_no_alias; // probe-gpu-copy-alias negative control only: copies without alias visibility
 static NSMutableArray<dispatch_block_t> *g_commit_blocks;
 static uint64_t g_alloc_fence[ALLOC_MAX]; static uint64_t g_alloc_waits, g_alloc_grown;
 int mtl_wait(uint64_t fence, uint64_t timeout_ns);
@@ -1024,7 +1026,12 @@ static void ser_gate(void) {
 static int bar_end_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("TOTK_BARRIER_END"); v = !(e && !strcmp(e, "0")); if (!v) fprintf(stderr, "[dm] [nvn-mtl] 【实验】TOTK_BARRIER_END=0：编码器结束处不设生产者屏障\n"); } return v; }
 static int bar_start_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("TOTK_BARRIER_START"); v = !(e && !strcmp(e, "0")); if (!v) fprintf(stderr, "[dm] [nvn-mtl] 【实验】TOTK_BARRIER_START=0：回放编码器开头不设消费者屏障（有数据竞争，只供测量）\n"); } return v; }
 static MTL4VisibilityOptions bar_vis(void) { static int v = -1; if (v < 0) { const char *e = getenv("TOTK_BARRIER_VIS"); v = !(e && !strcmp(e, "0")); if (!v) fprintf(stderr, "[dm] [nvn-mtl] 【实验】TOTK_BARRIER_VIS=0：回放编码器开头屏障不带缓存可见性\n"); } return v ? MTL4VisibilityOptionDevice : MTL4VisibilityOptionNone; }
+static MTL4VisibilityOptions blit_vis(void) { return bar_vis() | (g_blit_alias ? MTL4VisibilityOptionResourceAlias : 0); }
 static inline void m4_end(id e) {
+    if (e == g_blit && g_blit_alias) {
+        [g_blit barrierAfterStages:MTLStageAll beforeQueueStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionResourceAlias];
+        g_blit_alias = 0;
+    }
     if (bar_end_on() && [e conformsToProtocol:@protocol(MTL4CommandEncoder)]) [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageAll beforeQueueStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
     [e endEncoding];
 }
@@ -1220,10 +1227,20 @@ static uint64_t g_blit_opens, g_blit_splits, g_upd_n, g_upd_split, g_copy_n, g_c
    test read a stale value 1 time in 3). The barrier when the encoder opens only orders it against earlier encoders. On
    Metal 4 the copy encoder is a compute encoder, so both blit and dispatch stages are ordered. TOTK_BLIT_BAR=0: off. */
 static int blit_bar_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("TOTK_BLIT_BAR"); v = !e || atoi(e); } return v; }
-static id<MTL4ComputeCommandEncoder> blit(void) { blit_note(); if (!g_blit) { g_blit_opens++; g_blit_splits += g_enc != nil; } rp_end();
-    if (!g_blit) { rs_sync(); ser_gate(); pt_mark(g_cb, 'B', nil); g_blit = enc_b_begin(g_cb); [g_blit barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:bar_vis()]; }
-    else if (blit_bar_on()) [g_blit barrierAfterEncoderStages:MTLStageBlit | MTLStageDispatch beforeEncoderStages:MTLStageBlit | MTLStageDispatch visibilityOptions:bar_vis()];
+static id<MTL4ComputeCommandEncoder> blit_kind(int buffer_alias) { blit_note(); if (!g_blit) { g_blit_opens++; g_blit_splits += g_enc != nil; } rp_end();
+    if (buffer_alias && !g_copy_probe_no_alias) g_blit_alias = 1; // rp_end may itself open and close a copy encoder
+    if (!g_blit) { rs_sync(); ser_gate(); pt_mark(g_cb, 'B', nil); g_blit = enc_b_begin(g_cb); [g_blit barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:blit_vis()]; }
+    else if (blit_bar_on()) [g_blit barrierAfterEncoderStages:MTLStageBlit | MTLStageDispatch beforeEncoderStages:MTLStageBlit | MTLStageDispatch visibilityOptions:blit_vis()];
     return g_blit; }
+static id<MTL4ComputeCommandEncoder> blit(void) { return blit_kind(0); }
+/* Buffer copies (mtl_sub_copy, the copy fallback of inline uniform updates). The same memory can be reached through two Metal
+   buffers, each with its own GPU virtual address: a virtual pool's remapped view of a physical pool, or two pools over the same
+   CPU memory. Device visibility alone does not make a write through one visible to a read through the other: a chain of copies
+   through two no-copy buffers over one allocation read stale bytes on every run (probe-gpu-copy-alias). So every buffer-copy
+   segment carries alias visibility in the barriers it keeps and at the encoder end (original port d309e62, Codex). The ranges
+   are unused here; the original port's copy-batch experiment (off by default) takes the same call. */
+static id<MTL4ComputeCommandEncoder> blit_buffer(id<MTLBuffer> src, NSUInteger so, id<MTLBuffer> dst, NSUInteger d, NSUInteger n) {
+    (void)src; (void)so; (void)dst; (void)d; (void)n; return blit_kind(1); }
 
 /* TOTK: collect and copy the uniform ranges a submission binds (see usnap_t). */
 static size_t arena_alloc(size_t n, id<MTLBuffer> *buf);
@@ -1472,7 +1489,7 @@ void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
     void *sb, *db; uint64_t so, dof;
     if (!mtl_addr(src, n, &sb, &so) || !mtl_addr(dst, n, &db, &dof))
         MDIE("缓冲拷贝地址不在任何内存池内 src=%#llx dst=%#llx n=%#llx", (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n);
-    enc_b_copy_buffer(blit(), (__bridge id<MTLBuffer>)sb, so, (__bridge id<MTLBuffer>)db, dof, n);
+    enc_b_copy_buffer(blit_buffer((__bridge id<MTLBuffer>)sb, so, (__bridge id<MTLBuffer>)db, dof, n), (__bridge id<MTLBuffer>)sb, so, (__bridge id<MTLBuffer>)db, dof, n);
 }
 
 // TOTK: uniform updates carry their data inline in the (host-owned) recording; stage it in this submit's
@@ -1642,7 +1659,7 @@ static void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
     }
     if (ub_rename_on()) { g_ren_fallback++; upd_flush(); }   // pending table full: keep the order with a real copy
     usnap_drop(dst, n);   // TOTK: the update reaches memory on the GPU timeline; later readers read it there
-    enc_b_copy_buffer(blit(), sb, so, (__bridge id<MTLBuffer>)db, dof, n);
+    enc_b_copy_buffer(blit_buffer(sb, so, (__bridge id<MTLBuffer>)db, dof, n), sb, so, (__bridge id<MTLBuffer>)db, dof, n);
 }
 static void post(post_op o) {
     if (g_npost == g_postcap) { g_postcap = g_postcap ? g_postcap * 2 : 64; g_post = realloc(g_post, g_postcap * sizeof *g_post); }
@@ -13307,6 +13324,7 @@ int mtl_probe_arg_epoch(void) {
 }
 
 #include "nvn_tex_slots_probe.h"
+#include "nvn_copy_alias_probe.h"
 
 #include "nvn_pool_retire_probe.h"
 #include "nvn_cube_group_probe.h"
