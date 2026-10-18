@@ -50,6 +50,12 @@ static pid_t running_game(NSString *slot) {
     close(fd);
     if (!held) return 0;
     NSDictionary *h = kv_read([slot stringByAppendingPathComponent:@"holder"]);
+    /* A player launch must reach runtime/game_slot.c to preempt an agent's
+       test. Only an existing player game (or another test for a test request)
+       is brought forward here. */
+    const char *requestOwner = getenv("TOTK_SLOT_OWNER");
+    if (![h[@"owner"] isEqualToString:@"user"] &&
+        (!requestOwner || !*requestOwner || !strcmp(requestOwner, "user"))) return 0;
     pid_t pid = [h[@"game_pid"] intValue];
     return pid > 0 && pid_start(pid) == (uint64_t)[h[@"game_start"] longLongValue] ? pid : 0;
 }
@@ -95,8 +101,8 @@ int main(int argc, char **argv) {
             [[NSRunningApplication runningApplicationWithProcessIdentifier:running] activateWithOptions:NSApplicationActivateAllWindows];
             return 0;
         }
-#ifdef TOTK_GAME_V112
-        NSString *backup = [profile stringByAppendingString:@"-before-1.1.2"];
+#if defined(TOTK_GAME_V112) || defined(TOTK_GAME_V143)
+        NSString *backup = [profile stringByAppendingFormat:@"-before-%s", TOTK_GAME_VERSION];
         NSFileManager *fm = NSFileManager.defaultManager;
         if (![fm fileExistsAtPath:backup]) {
             NSString *temporary = [backup stringByAppendingFormat:@".copy-%d", getpid()];
@@ -127,7 +133,7 @@ int main(int argc, char **argv) {
         setenv("TOTK_SLOT_PURPOSE", "player", 0);
         unsetenv("TOTK_AUTOLOAD");   // the game starts at its title screen, as on the console
         /* runtime command channel (runtime/input.c): echo "shot ~/Desktop/shot.png" >> "<data>/input.txt" */
-        { NSString *cmds = [data stringByAppendingPathComponent:@"input.txt"];
+        { NSString *cmds = env_or("TOTK_INPUT_FILE", [data stringByAppendingPathComponent:@"input.txt"]);
           FILE *cf = fopen(cmds.fileSystemRepresentation, "w"); if (cf) fclose(cf);
           setenv("TOTK_INPUT_FILE", cmds.fileSystemRepresentation, 1); }
 

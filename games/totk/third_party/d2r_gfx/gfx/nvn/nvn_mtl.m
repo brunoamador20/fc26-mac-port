@@ -96,7 +96,6 @@ static id<MTLTexture> g_fps_tex[4];
 static id<MTLBuffer> g_fps_uv[3];
 static struct { fps_overlay_info info; int scale; } g_fps_key[4] = {{{.fps = -1000}, 0}, {{.fps = -1000}, 0}, {{.fps = -1000}, 0}, {{.fps = -1000}, 0}};
 static _Atomic int g_pic_big;   /* the game picture (its crop) is bigger than 1920x1080: true 2K (" 2K" in the FPS box) */
-static _Atomic int g_view_h;    /* height in pixels of the game picture on screen (the last present's viewport; 0 before the first) */
 static int g_fps_box[4][2];
 // TOTK load line (bottom-right, load_overlay_prepare; totk_sysload.c): same slots as the FPS box, a wider texture.
 static id<MTLTexture> g_load_tex[4];
@@ -2261,9 +2260,9 @@ void dm_gfx_set_flag(const char *name, int v) {
     if (!strcmp(name, "render_stream")) { atomic_store(&g_rs_on, v != 0); MLOG("[flag] render_stream = %d (next render pass)", v != 0); return; }
     if (!strcmp(name, "cube_merge")) { atomic_store(&g_cg_on, v != 0); MLOG("[flag] cube_merge = %d", v != 0); return; }
     if (!strcmp(name, "skip_invisible")) { skv_set(v); return; }
-    if (!strcmp(name, "mfx_upscale")) { mfxup_set(v < 0 ? !mfxup_enabled() : v); return; }   // TOTK_MFX_UPSCALE at run time (docked: MetalFX or the game's own upscale into the canvas); v < 0 toggles (key 1)
+    if (!strcmp(name, "mfx_upscale")) { mfxup_set(v < 0 ? !mfxup_enabled() : v); return; }   // TOTK_MFX_UPSCALE at run time (manual key 3 picture mode)
     if (!strcmp(name, "mfx_interp")) { mfx_set(v); return; }
-    if (!strcmp(name, "mfx_output")) { mfxup_output_set(v < 0 ? !mfxup_output_enabled() : v); return; }   // TOTK_MFX_OUTPUT at run time (the 2K output stage alone)   // TOTK_MFX=interp at run time (MetalFX frame interpolation, from the next game frame); v < 0 toggles (key 2)
+    if (!strcmp(name, "mfx_output")) { mfxup_output_set(v < 0 ? !mfxup_output_enabled() : v); return; }   // TOTK_MFX_OUTPUT at run time (the window output stage)
     if (!strcmp(name, "pass_gpu")) {
         if (v < 0 || v > 120) { MLOG("[flag] pass_gpu requires 0..120 frames"); return; }
         atomic_store_explicit(&g_pt_request, v, memory_order_relaxed);
@@ -8870,14 +8869,20 @@ static void mfxup_queue_residency(void) {   // the upscaler's own output texture
    blending, full write mask, viewport and scissor over the whole target, no depth / stencil test) and the region starts
    at the origin; anything else keeps the game's own upscale. Perceptual colour processing: the canvas holds display
    values (dd3d1e0e copies it to the swapchain unchanged). Returns 1 when the draw was replaced.
-   Only when the picture on screen is larger than 1080p, i.e. 2K (user, 2026-10-17: "1080p 不用 metalfx 只有2k用"): at
-   1080p and below the game's own upscale. view_h is 0 before the first present, which counts as not 2K. */
-static uint64_t g_mfxup_dock_n, g_mfxup_dock_no[7];
+   This is controlled only by the manual picture mode, not by the window's output resolution. */
+static uint64_t g_mfxup_dock_n, g_mfxup_dock_no[6];
 static int mfxup_dock(__unsafe_unretained NvShader *fs) {
-    if (strncmp(fs->key, "a3a570eb159202f1", 16)) return 0;
+    /* 1.4.3's EASU variant normalizes samples by 1/3.5, then multiplies its
+     * clamped result by 3.5. Those operations cancel for flat colors; adding
+     * another gain would brighten the picture incorrectly. Its source retains
+     * highlights above 1, so request HDR processing. Exact-shader GPU probe:
+     * scripts/upscale_color_probe.m (RGB/HDR + deliberately missing gain).
+     * Both variants use the same con0 and integer output-size layout below. */
+    int hdr = !strncmp(fs->key, "ac58fc18eda5f3878b16074dc28cd441644a66710f1b73954d39e57ac357561b-", 65);
+    if (!hdr && strncmp(fs->key, "a3a570eb159202f14bc86479b0d3a012ecd830b8550505536eb70bf82372e4bb-", 65)) return 0;
+    int color_mode = hdr ? MFXUP_HDR : MFXUP_PERCEPTUAL;
     const view_t *cv = &R.rt.cview[0]; int hv = R.rt.has_cview[0];
-    int why = 0, view_h = atomic_load(&g_view_h);
-    if (view_h <= 1080) { g_mfxup_dock_no[6]++; return 0; }   // 1080p or smaller on screen: the game's own upscale, nothing to log
+    int why = 0;
     if (R.rt.n < 1 || !R.rt.color[0]) why = 1;
     for (int i = 1; !why && i < R.rt.n; i++) if (R.rt.color[i]) why = 1;
     if (!why && ((S.color.blend_en & 1) || (S.chmask.mask & 0xf) != 0xf || S.ms.a2c || (R.rt.depth && (S.ds.dt || S.ds.st)))) why = 2;
@@ -8901,23 +8906,23 @@ static int mfxup_dock(__unsafe_unretained NvShader *fs) {
         }
     }
     { static int once; if (!once && (!why || why == 5)) { once = 1;
-        MLOG("[mfx-up] 主机模式放大点 a3a570eb：源 %lux%lu（格式 %lu）→ 画布 %lux%lu（格式 %lu）；常量 con0 %g %g %g %g、输出 %ux%u → 有效区域 %lux%lu%s",
-             (unsigned long)src.width, (unsigned long)src.height, (unsigned long)src.pixelFormat, (unsigned long)dst.width, (unsigned long)dst.height, (unsigned long)dst.pixelFormat,
+        MLOG("[mfx-up] 主机模式放大点 %.8s（%s）：源 %lux%lu（格式 %lu）→ 画布 %lux%lu（格式 %lu）；常量 con0 %g %g %g %g、输出 %ux%u → 有效区域 %lux%lu%s",
+             fs->key, hdr ? "HDR" : "perceptual", (unsigned long)src.width, (unsigned long)src.height, (unsigned long)src.pixelFormat, (unsigned long)dst.width, (unsigned long)dst.height, (unsigned long)dst.pixelFormat,
              k[0], k[1], k[2], k[3], ow, oh, (unsigned long)cw, (unsigned long)ch, why ? "：常量不符，保留游戏自己的放大" : ""); } }
     if (why) {
         static int told[6]; if (!told[why]++)   // the first refusal of each kind, with what was seen
-            MLOG("[mfx-up] 主机模式放大点 a3a570eb 不替换（原因 %d：1 目标 / 2 混合掩码深度 / 3 贴图 / 4 视口剪裁 / 5 常量）：附件 %d 个，视图 %d（级 %d:%u 层 %d:%u），"
+            MLOG("[mfx-up] 主机模式放大点 %.8s 不替换（原因 %d：1 目标 / 2 混合掩码深度 / 3 贴图 / 4 视口剪裁 / 5 常量）：附件 %d 个，视图 %d（级 %d:%u 层 %d:%u），"
                  "源 %s %lux%lu 类型 %lu，画布 %s %lux%lu 类型 %lu 用途 %#lx；混合 %#x 掩码 %#x a2c %d 深度 %d/%d；视口 %d %g,%g %gx%g 剪裁 %d %d,%d %dx%d；常量 %g %g %g %g 输出 %ux%u",
-                 why, R.rt.n, hv, hv ? cv->set_levels : 0, hv ? cv->base_level : 0, hv ? cv->set_layers : 0, hv ? cv->min_layer : 0,
+                 fs->key, why, R.rt.n, hv, hv ? cv->set_levels : 0, hv ? cv->base_level : 0, hv ? cv->set_layers : 0, hv ? cv->min_layer : 0,
                  src ? "有" : "无", (unsigned long)src.width, (unsigned long)src.height, (unsigned long)src.textureType,
                  dst ? "有" : "无", (unsigned long)dst.width, (unsigned long)dst.height, (unsigned long)dst.textureType, (unsigned long)dst.usage,
                  (unsigned)S.color.blend_en, S.chmask.mask, (int)S.ms.a2c, (int)S.ds.dt, (int)S.ds.st,
                  S.has_vp, S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3], R.has_sc, R.sc.x, R.sc.y, R.sc.w, R.sc.h, k[0], k[1], k[2], k[3], ow, oh);
         g_mfxup_dock_no[why]++; return 0; }
-    if (!mfxup_prepare(MFXUP_DOCKED, src, dst, dst.width, dst.height, MFXUP_PERCEPTUAL)) { g_mfxup_dock_no[0]++; return 0; }   // scaler still being built (background): the game's own upscale this frame
+    if (!mfxup_prepare(MFXUP_DOCKED, src, dst, dst.width, dst.height, color_mode)) { g_mfxup_dock_no[0]++; return 0; }   // scaler still being built (background): the game's own upscale this frame
     rp_end(); blit_close(); rs_sync();   // MetalFX encodes on the command buffer itself: the encode thread must be idle first
     pt_mark(g_cb, 'X', nil);   // TOTK_PASS_GPU: the MetalFX upscale as its own entry
-    if (!mfxup_encode_ex(MFXUP_DOCKED, g_cb, src, cw, ch, dst, dst.width, dst.height, MFXUP_PERCEPTUAL)) { g_mfxup_dock_no[0]++; return 0; }
+    if (!mfxup_encode_ex(MFXUP_DOCKED, g_cb, src, cw, ch, dst, dst.width, dst.height, color_mode)) { g_mfxup_dock_no[0]++; return 0; }
     mfxup_queue_residency();
     R.clear_c[0] = 0;   // MetalFX wrote every pixel of the canvas: a clear still pending for it would wipe the picture when the UI opens the pass
     g_mfxup_dock_n++; atomic_store(&g_mfxup_last, atomic_load(&g_cur_frame));
@@ -8934,12 +8939,11 @@ static int mfxup_draw(NvProg *pr) {
     if (!fs) return 0;
     if (mfxup_dock(fs)) {
         static unsigned n; if (++n % 1800 == 1) { char b[200]; mfxup_stats(MFXUP_DOCKED, b, sizeof b);
-            MLOG("[mfx-up] 至帧 %llu：%s；替换游戏放大 %llu 次，保留 %llu 次（建不出或在后台建 %llu、目标不符 %llu、混合/掩码/深度 %llu、尺寸 %llu、视口/剪裁 %llu、常量 %llu、屏幕上不到 2K %llu）",
+            MLOG("[mfx-up] 至帧 %llu：%s；替换游戏放大 %llu 次，保留 %llu 次（建不出或在后台建 %llu、目标不符 %llu、混合/掩码/深度 %llu、尺寸 %llu、视口/剪裁 %llu、常量 %llu）",
                  (unsigned long long)atomic_load(&g_cur_frame), b, (unsigned long long)g_mfxup_dock_n,
-                 (unsigned long long)(g_mfxup_dock_no[0] + g_mfxup_dock_no[1] + g_mfxup_dock_no[2] + g_mfxup_dock_no[3] + g_mfxup_dock_no[4] + g_mfxup_dock_no[5] + g_mfxup_dock_no[6]),
+                 (unsigned long long)(g_mfxup_dock_no[0] + g_mfxup_dock_no[1] + g_mfxup_dock_no[2] + g_mfxup_dock_no[3] + g_mfxup_dock_no[4] + g_mfxup_dock_no[5]),
                  (unsigned long long)g_mfxup_dock_no[0], (unsigned long long)g_mfxup_dock_no[1], (unsigned long long)g_mfxup_dock_no[2],
-                 (unsigned long long)g_mfxup_dock_no[3], (unsigned long long)g_mfxup_dock_no[4], (unsigned long long)g_mfxup_dock_no[5],
-                 (unsigned long long)g_mfxup_dock_no[6]); }
+                 (unsigned long long)g_mfxup_dock_no[3], (unsigned long long)g_mfxup_dock_no[4], (unsigned long long)g_mfxup_dock_no[5]); }
         return 1;
     }
     if (strncmp(fs->key, "0ac9a54938974396", 16) || !R.rt.n || !R.rt.color[0]) return 0;
@@ -10613,7 +10617,7 @@ static void present_pipeline(MTLPixelFormat format) {
 // TOTK: FPS and on-screen picture size in the top-right corner of the game picture (pixels come from fps_overlay.c). Rasterises into
 // the slot's texture only when what is shown changes, and returns the viewport and source rectangle to draw.
 static int fps_overlay_prepare(int slot, MTLViewport vp, MTLViewport *ovp, float uv[8]) {
-    if (!fps_overlay_enabled() || slot < 0 || slot > 3 || !g_fps_tex[slot]) return 0;
+    if (!fps_overlay_hints_enabled() || !fps_overlay_enabled() || slot < 0 || slot > 3 || !g_fps_tex[slot]) return 0;
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     static uint8_t px[FPS_OVERLAY_TEX_W * FPS_OVERLAY_TEX_H * 4];
     int scale = fps_overlay_scale(vp.height);
@@ -10638,7 +10642,7 @@ static int fps_overlay_prepare(int slot, MTLViewport vp, MTLViewport *ovp, float
    "SHADER +<variants new to the translation cache this run>/<variants in the cache> PSO +<pipelines added to the warm
    lists this run>", yellow for 3 s after something new was collected. Same texture size, font and scale as the FPS box. */
 static int shader_overlay_prepare(int slot, MTLViewport vp, MTLViewport *ovp, float uv[8]) {
-    if (!shader_overlay_enabled() || slot < 0 || slot > 3 || !g_shd_tex[slot]) return 0;
+    if (!fps_overlay_hints_enabled() || !shader_overlay_enabled() || slot < 0 || slot > 3 || !g_shd_tex[slot]) return 0;
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     static uint8_t px[FPS_OVERLAY_TEX_W * FPS_OVERLAY_TEX_H * 4];
     uint64_t fresh = 0, last = 0; int64_t total = -1; totk_rt_counts(&fresh, &total, &last);
@@ -10664,7 +10668,7 @@ static int shader_overlay_prepare(int slot, MTLViewport vp, MTLViewport *ovp, fl
    "P 55% 56% 55% 53%  E 43% 29% 20% 12%  9%  7%  T 47%  GPU 99% (70%)" -- performance / efficiency cores, the busiest thread, the GPU as macOS reports it (our
    keep-alive keeps it near 100 %) and in brackets the GPU time of the game's own work. Values from totk_sysload.c (0.5 s). */
 static int load_overlay_prepare(int slot, MTLViewport vp, MTLViewport *ovp, float uv[8]) {
-    if (!sysload_enabled() || slot < 0 || slot > 3 || !g_load_tex[slot]) return 0;
+    if (!fps_overlay_hints_enabled() || !sysload_enabled() || slot < 0 || slot > 3 || !g_load_tex[slot]) return 0;
     sysload_start();
     sysload_info li; if (!sysload_get(&li)) return 0;
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -10688,7 +10692,7 @@ static int load_overlay_prepare(int slot, MTLViewport vp, MTLViewport *ovp, floa
 /* TOTK 2K output (user, 2026-10-16 night: "2K output with MetalFX"): when the window or the full screen shows the game
    picture bigger than it is (the 1920x1080 picture at 2560x1440 full screen on the user's 3440x1440 display), MetalFX
    upscales it to the viewport (perceptual: display values) and the present draws the result 1:1, instead of the bilinear
-   stretch. Key 1 / TOTK_MFX_UPSCALE switches every MetalFX upscale, TOTK_MFX_OUTPUT=0 this one alone. Only an enlargement
+   stretch. Key 3 enables both MetalFX stages in its manual mode; TOTK_MFX_OUTPUT=0 disables the output stage. Only an enlargement
    by a margin and a picture region at the texture's origin (MetalFX reads the top-left content region); while the window
    is being resized the size must hold for 15 pictures first (building a scaler per size would stall every present). */
 static uint64_t g_outup_n, g_outup_skip[3];   // done; skipped: off, not an enlargement / region not at the origin / not built, size settling
@@ -10798,7 +10802,6 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     double dw = dst.width, dh = dst.height, s = fmin(dw / cw, dh / ch);
     MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
     if (fabs((dw / dh) / ((double)cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
-    atomic_store(&g_view_h, (int)vp.height);   // the picture's height on screen: up to 1080 the docked upscale stays the game's own (mfxup_dock)
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     id<MTLTexture> up = output_upscale(cb, src, cx, cy, cw, ch, vp, uv_i);   // TOTK 2K output: MetalFX to the viewport, drawn 1:1 below
     id<MTLTexture> pic = up ? up : src;
@@ -11562,7 +11565,7 @@ void mtl_present_discard(int on) { atomic_store(&g_present_discard, on != 0); if
    per-frame state. Returns the output slot or -1. */
 static id<MTL4CommandAllocator> g_mfx_alloc[3]; static id<MTL4CommandBuffer> g_mfx_cb[3]; static _Atomic int g_mfx_busy[3];
 static id<MTLTexture> g_mfx_swap_prev;   // TOTK_MFX_DUMP: copy of the previous presented image
-static int mfx_present_frame(const tex_t *t, double period, int discard) {
+static int mfx_present_frame_body(const tex_t *t, double period, int discard) {
     if (t) {
         int known = 0; for (int i = 0; i < g_mfx.nswap; i++) known |= g_mfx.swap[i] == t->serial;
         if (!known) g_mfx.swap[g_mfx.nswap < 4 ? g_mfx.nswap++ : (int)(t->serial % 4)] = t->serial;
@@ -11580,12 +11583,15 @@ static int mfx_present_frame(const tex_t *t, double period, int discard) {
             static id<MTL4CounterHeap> heap; static double hz;   // GPU time of the MetalFX part, for the statistics line
             if (!heap) { MTL4CounterHeapDescriptor *hd = [MTL4CounterHeapDescriptor new]; hd.type = MTL4CounterHeapTypeTimestamp; hd.count = 6;
                          NSError *e = nil; heap = [g_dev newCounterHeapWithDescriptor:hd error:&e]; hz = (double)[g_dev queryTimestampFrequency]; }
-            mfx_frame_encode(cb, slot, heap, (NSUInteger)a * 2);
+            NSArray *frame_resources = mfx_frame_encode(cb, slot, heap, (NSUInteger)a * 2);
             [cb endCommandBuffer];
             atomic_store(&g_mfx_busy[a], 1);
             TotkCommitOptions *o = [TotkCommitOptions new];
             id<MTL4CounterHeap> h = heap; double fq = hz;
             [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+                // Capturing the payload keeps this frame's inputs/output and
+                // interpolator alive even across a canvas/configuration change.
+                if (frame_resources.count != 8) MDIE("invalid interpolation resource lifetime payload");
                 sysload_note_gpu(f.GPUStartTime, f.GPUEndTime);   // the load line's game GPU share includes the interpolation
                 if (f.error) MLOG("【红】[mfx] 插值命令缓冲错误：%s", f.error.description.UTF8String);
                 else if (h && fq > 0) { NSData *d = [h resolveCounterRange:NSMakeRange((NSUInteger)a * 2, 2)]; const MTL4TimestampHeapEntry *t = d.bytes;
@@ -11616,6 +11622,9 @@ static int mfx_present_frame(const tex_t *t, double period, int discard) {
     g_mfx.scene_done = g_mfx.ui_cleared = g_mfx.depth_done = g_mfx.want_cam = 0;
     if (++g_mfx.frames % 300 == 0) { char b[256]; mfx_stats(b, sizeof b); MLOG("[mfx] 至帧 %llu：%s", (unsigned long long)atomic_load(&g_cur_frame), b); }
     return slot;
+}
+static int mfx_present_frame(const tex_t *t, double period, int discard) {
+    @autoreleasepool { return mfx_present_frame_body(t, period, discard); }
 }
 uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
     int discard = atomic_load(&g_present_discard), islot = mfx_enabled() && t ? mfx_present_frame(t, period, discard) : -1;

@@ -50,6 +50,74 @@ void *runtime_symbol(const char *name) {
  return NULL;
 }
 uint8_t *runtime_module_base(const char *name){for(unsigned i=0;i<NM;i++)if(!strcmp(modules[i].name,name))return modules[i].base;return NULL;}
+/* RELRO in newer SDKs protects relocated data after linking. Keep permissions at
+ * the guest's 4 KiB granularity. A Darwin 16 KiB page receives the union of its
+ * four guest permissions, so protecting an edge never removes access from an
+ * adjacent writable object. Whole interior pages are actually made read-only. */
+static pthread_mutex_t module_permission_lock=PTHREAD_MUTEX_INITIALIZER;
+static unsigned char *module_permissions[NM];
+static unsigned module_page_permission(unsigned i,uint64_t off){
+ Module *m=&modules[i];
+ if(off<m->data_off)return off<page_up(m->text_end)?5:1;
+ if(off>=m->key_off)return off>=m->patch_off?5:1;
+ return module_permissions[i]?module_permissions[i][(off-m->data_off)/4096]:3;
+}
+uint64_t runtime_module_permission(uint64_t address,uint64_t size,unsigned permission){
+ if(address&4095)return 0xcc01;
+ if(!size||(size&4095))return 0xca01;
+ if(permission!=0&&permission!=1&&permission!=3)return 0xd801;
+ for(unsigned i=0;i<NM;i++){
+  Module *m=&modules[i];uint64_t base=(uintptr_t)m->base;
+  if(address<base||address-base<m->data_off||address-base>=m->key_off||size>m->key_off-(address-base))continue;
+  uint64_t off=address-base;
+  pthread_mutex_lock(&module_permission_lock);
+  if(!module_permissions[i]){size_t count=(m->key_off-m->data_off+4095)/4096;module_permissions[i]=malloc(count);need(module_permissions[i]!=NULL,"module permission table");memset(module_permissions[i],3,count);}
+  for(uint64_t p=0;p<size/4096;p++)if(module_permissions[i][(off-m->data_off)/4096+p]&16){pthread_mutex_unlock(&module_permission_lock);return 0xd401;}
+  memset(module_permissions[i]+(off-m->data_off)/4096,permission,size/4096);
+  uint64_t lo=off&~0x3fffULL,hi=page_up(off+size);
+  for(uint64_t page=lo;page<hi;page+=0x4000){
+   unsigned combined=0;for(unsigned p=0;p<4;p++)combined|=module_page_permission(i,page+p*4096);
+   int prot=(combined&1?PROT_READ:0)|(combined&2?PROT_WRITE:0);
+   need(!(combined&4),"module permission overlaps executable page");
+   need(mprotect(m->base+page,0x4000,prot)==0,"module data permission");
+  }
+  pthread_mutex_unlock(&module_permission_lock);
+  fprintf(stderr,"[totk] %s data permission +%#llx size=%#llx perm=%u\n",m->name,(unsigned long long)off,(unsigned long long)size,permission);
+  return 0;
+ }
+ return 0xd401;
+}
+uint64_t runtime_module_lock_permission(uint64_t address,uint64_t size,unsigned mask,unsigned attribute){
+ if(address&4095)return 0xcc01;
+ if(!size||(size&4095))return 0xca01;
+ /* The only module attribute used by the SDK is the irreversible RELRO lock. */
+ if(mask!=16||attribute!=16)return 0xd801;
+ for(unsigned i=0;i<NM;i++){
+  Module *m=&modules[i];uint64_t start=(uintptr_t)m->base;
+  if(address<start||address-start<m->data_off||address-start>=m->key_off||size>m->key_off-(address-start))continue;
+  pthread_mutex_lock(&module_permission_lock);
+  if(!module_permissions[i]){size_t count=(m->key_off-m->data_off+4095)/4096;module_permissions[i]=malloc(count);need(module_permissions[i]!=NULL,"module attribute table");memset(module_permissions[i],3,count);}
+  size_t first=(address-start-m->data_off)/4096;
+  for(uint64_t p=0;p<size/4096;p++)module_permissions[i][first+p]|=16;
+  pthread_mutex_unlock(&module_permission_lock);return 0;
+ }
+ return 0xd401;
+}
+int runtime_module_query(uint64_t address,uint64_t *base,uint64_t *size,unsigned *state,unsigned *permission,unsigned *attribute){
+ for(unsigned i=0;i<NM;i++){
+  Module *m=&modules[i];uint64_t start=(uintptr_t)m->base;
+  if(address<start||address-start>=m->key_off)continue;
+  uint64_t off=(address-start)&~4095ULL,lo=off,hi=off+4096;
+  pthread_mutex_lock(&module_permission_lock);
+  unsigned perm=module_page_permission(i,off);int data=off>=m->data_off;
+  uint64_t limit=data?m->data_off:0,end=data?m->key_off:m->data_off;
+  while(lo>limit&&module_page_permission(i,lo-4096)==perm)lo-=4096;
+  while(hi<end&&module_page_permission(i,hi)==perm)hi+=4096;
+  pthread_mutex_unlock(&module_permission_lock);
+  *base=start+lo;*size=hi-lo;*state=data?4:3;*permission=perm&7;*attribute=perm&16;return 1;
+ }
+ return 0;
+}
 void runtime_describe_address(uint64_t a,char *out,size_t n){for(unsigned i=0;i<NM;i++)if(a>=(uintptr_t)modules[i].base&&a<(uintptr_t)modules[i].base+modules[i].size){snprintf(out,n,"%s+0x%llx",modules[i].name,(unsigned long long)(a-(uintptr_t)modules[i].base));return;}Dl_info di;if(dladdr((void *)(uintptr_t)a,&di)&&di.dli_sname){snprintf(out,n,"%s+0x%llx",di.dli_sname,(unsigned long long)(a-(uintptr_t)di.dli_saddr));return;}snprintf(out,n,"0x%llx",(unsigned long long)a);}
 /* Guest frame-pointer chain. Guest threads run on guest stacks (not the host pthread stack), so frames are read with
    mach_vm_read_overwrite (a bad pointer ends the walk instead of faulting); the chain must grow upwards. */
@@ -339,7 +407,13 @@ int runtime_module_offset(uint64_t pc,const char **name,uint64_t *off) {
  for(unsigned i=0;i<NM;i++)if(pc>=(uintptr_t)modules[i].base&&pc<(uintptr_t)modules[i].base+modules[i].size){*name=modules[i].name;*off=pc-(uintptr_t)modules[i].base;return 1;}
  return 0;
 }
-uintptr_t runtime_frame_controller_return_pc(void) { return (uintptr_t)modules[0].base + GAME_ADDR(0x8f6cbc); }
+uintptr_t runtime_frame_controller_return_pc(void) {
+#ifdef TOTK_GAME_V143
+ return 0; /* The older graphics diagnostic reads the pre-1.4 controller layout. */
+#else
+ return (uintptr_t)modules[0].base + GAME_ADDR(0x8f6cbc);
+#endif
+}
 uint64_t runtime_image_bytes(void) { uint64_t total=0;for(unsigned i=0;i<NM;i++)total+=modules[i].key_off;return page_up(total); }
 static void loader_ready(void) { fprintf(stderr,"[totk] rtld callback: modules linked\n"); }
 static void module_inits(void) {

@@ -23,7 +23,7 @@
 #define RING_FRAMES 16384            /* stereo frames, ~340 ms at 48 kHz */
 #define SPLITTER_UNUSED 0xffffffffu
 
-typedef struct { float vol[24]; int32_t dest; uint8_t used; } SplitDest;
+typedef struct { float vol[24]; int32_t dest; uint8_t used; AudrenBiquadFloat biquads[2]; float state[2][2]; } SplitDest;
 typedef struct { int32_t ndest; int32_t *ids; } SplitInfo;
 typedef struct {
     Reverb3d *reverb; Reverb3dParam param; int pending;
@@ -134,11 +134,21 @@ static void splitters_update(AudioRenderer *r, const uint8_t *p, uint32_t n) {
         for (uint32_t k = 0; k < h[3]; k++) if (s->ids[k] < 0 || s->ids[k] >= m->ndest) runtime_fail("audio splitter destination id");
     }
     for (uint32_t i = 0; i < nd; i++) {
-        uint8_t e[0x70]; if (at + sizeof e > n) runtime_fail("audio splitter destination overruns section");
-        memcpy(e, p + at, sizeof e); at += sizeof e;
+        unsigned rev=(r->revision>>24)-'0',stride=rev>=15?0xa8:rev>=12?0x90:0x70;
+        uint8_t e[0xa8]={0}; if (at>n||stride>n-at) runtime_fail("audio splitter destination overruns section");
+        memcpy(e, p + at, stride); at += stride;
         uint32_t magic, id; int32_t dst; memcpy(&magic, e, 4); memcpy(&id, e + 4, 4); memcpy(&dst, e + 0x68, 4);
         if (magic != 0x44444e53u || id >= (uint32_t)m->ndest) runtime_fail("audio splitter destination (SNDD)");
-        SplitDest *d = &m->dest[id]; memcpy(d->vol, e + 8, sizeof d->vol); d->dest = dst; d->used = e[0x6c];
+        SplitDest *d = &m->dest[id]; memcpy(d->vol, e + 8, sizeof d->vol); d->dest = dst;
+        d->used=e[rev>=15?0x9c:rev>=12?0x84:0x6c];
+        for(unsigned f=0;f<2;f++){
+            AudrenBiquadFloat b={0};
+            if(rev>=15)memcpy(&b,e+0x6c+f*sizeof b,sizeof b);
+            else if(rev>=12){AudrenBiquad q;memcpy(&q,e+0x6c+f*sizeof q,sizeof q);b.enable=q.enable;for(unsigned c=0;c<3;c++)b.numerator[c]=q.numerator[c]/16384.0f;for(unsigned c=0;c<2;c++)b.denominator[c]=q.denominator[c]/16384.0f;}
+            if(b.enable){for(unsigned c=0;c<3;c++)if(!isfinite(b.numerator[c]))runtime_fail("audio splitter nonfinite numerator");for(unsigned c=0;c<2;c++)if(!isfinite(b.denominator[c]))runtime_fail("audio splitter nonfinite denominator");}
+            if(!b.enable||!d->biquads[f].enable||!d->used)memset(d->state[f],0,sizeof d->state[f]);
+            d->biquads[f]=b;
+        }
     }
     if (at <= n && n - at < 16) at = n;   /* the section is padded to 16 bytes; the padding is not cleared by the game (measured) */
     if (at != n) { fprintf(stderr, "[totk-audio] splitter section %u bytes, parsed %u (infos %u, destinations %u)\n", n, at, ni, nd); runtime_fail("audio splitter section size"); }
@@ -357,6 +367,19 @@ static void mix_effects(AudioRenderer *r, int mix) {
     }
 }
 
+static const float *splitter_filter(SplitDest *d,const float *input,float *output,int frames){
+    if(!d->biquads[0].enable&&!d->biquads[1].enable)return input;
+    memcpy(output,input,(size_t)frames*sizeof *output);
+    for(unsigned f=0;f<2;f++)if(d->biquads[f].enable){
+        const AudrenBiquadFloat *b=&d->biquads[f];float *z=d->state[f];
+        for(int k=0;k<frames;k++){
+            float x=output[k],y=b->numerator[0]*x+z[0];
+            z[0]=b->numerator[1]*x+b->denominator[0]*y+z[1];
+            z[1]=b->numerator[2]*x+b->denominator[1]*y;output[k]=y;
+        }
+    }
+    return output;
+}
 void audio_mixer_render(AudioRenderer *r, double seconds) {
     (void)seconds;
     Mixer *m = r->mixer; if (!m) return;
@@ -366,7 +389,7 @@ void audio_mixer_render(AudioRenderer *r, double seconds) {
     for (int i = 0; i < mc; i++) { m->offset[i] = at; if (r->mixes[i].in_use) at += r->mixes[i].buffer_count; }
     if (at > m->nbuf) { fprintf(stderr, "[totk-audio] mixes use %d buffers, renderer has %d\n", at, m->nbuf); runtime_fail("audio mix buffer layout"); }
 
-    static float vs[6][MAX_FRAME];
+    static float vs[6][MAX_FRAME],filtered[MAX_FRAME];
     for (int i = 0; i < r->param.voice_count; i++) {
         ServerVoice *v = &r->voices[i];
         if (!v->in.in_use || v->state != SV_STARTED || !v->in.sample_rate || !v->valid[v->index]) continue;
@@ -374,8 +397,12 @@ void audio_mixer_render(AudioRenderer *r, double seconds) {
         voice_render(r, v, vs, frames);
         for (int f = 0; f < 2; f++) if (v->in.biquads[f].enable) {
             const AudrenBiquad *b = &v->in.biquads[f];
-            const float a0 = b->numerator[0] / 16384.0f, a1 = b->numerator[1] / 16384.0f, a2 = b->numerator[2] / 16384.0f;
-            const float b1 = b->denominator[0] / 16384.0f, b2 = b->denominator[1] / 16384.0f;
+            const AudrenBiquadFloat *bf=&v->float_biquads[f];
+            const float a0 = v->use_float_biquads?bf->numerator[0]:b->numerator[0]/16384.0f;
+            const float a1 = v->use_float_biquads?bf->numerator[1]:b->numerator[1]/16384.0f;
+            const float a2 = v->use_float_biquads?bf->numerator[2]:b->numerator[2]/16384.0f;
+            const float b1 = v->use_float_biquads?bf->denominator[0]:b->denominator[0]/16384.0f;
+            const float b2 = v->use_float_biquads?bf->denominator[1]:b->denominator[1]/16384.0f;
             for (int c = 0; c < cc; c++) {
                 float *z = v->biquad_state[f][c];
                 for (int k = 0; k < frames; k++) {
@@ -389,9 +416,10 @@ void audio_mixer_render(AudioRenderer *r, double seconds) {
         if (v->in.splitter_id != SPLITTER_UNUSED && v->in.splitter_id < (uint32_t)m->nsplit) {
             const SplitInfo *s = &m->split[v->in.splitter_id];
             for (int c = 0; c < cc; c++) for (int k = c; k < s->ndest; k += cc) {
-                const SplitDest *d = &m->dest[s->ids[k]];
+                SplitDest *d = &m->dest[s->ids[k]];
                 if (!d->used || !mix_valid(r, d->dest)) continue;
-                for (int b = 0; b < r->mixes[d->dest].buffer_count && b < 24; b++) accumulate(m, m->offset[d->dest] + b, vs[c], d->vol[b] * v->in.volume, frames);
+                const float *source=splitter_filter(d,vs[c],filtered,frames);
+                for (int b = 0; b < r->mixes[d->dest].buffer_count && b < 24; b++) accumulate(m, m->offset[d->dest] + b, source, d->vol[b] * v->in.volume, frames);
             }
         } else if (mix_valid(r, v->in.mix_id)) {
             for (int c = 0; c < cc; c++) {
@@ -411,9 +439,10 @@ void audio_mixer_render(AudioRenderer *r, double seconds) {
         if (x->dest_splitter_id != SPLITTER_UNUSED && x->dest_splitter_id < (uint32_t)m->nsplit) {
             const SplitInfo *s = &m->split[x->dest_splitter_id];
             for (int c = 0; c < x->buffer_count && c < 24; c++) for (int k = c; k < s->ndest; k += x->buffer_count) {
-                const SplitDest *d = &m->dest[s->ids[k]];
+                SplitDest *d = &m->dest[s->ids[k]];
                 if (!d->used || !mix_valid(r, d->dest)) continue;
-                for (int b = 0; b < r->mixes[d->dest].buffer_count && b < 24; b++) accumulate(m, m->offset[d->dest] + b, mixbuf(m, src + c), d->vol[b] * x->volume, frames);
+                const float *source=splitter_filter(d,mixbuf(m,src+c),filtered,frames);
+                for (int b = 0; b < r->mixes[d->dest].buffer_count && b < 24; b++) accumulate(m, m->offset[d->dest] + b, source, d->vol[b] * x->volume, frames);
             }
         } else if (mix_valid(r, x->dest_mix_id)) {
             for (int c = 0; c < x->buffer_count && c < 24; c++)

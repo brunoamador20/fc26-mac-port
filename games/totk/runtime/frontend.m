@@ -13,6 +13,7 @@ static CAMetalLayer *metalLayer;
 static NSView *bootOverlay;
 static NSTextField *bootStage,*bootDetail;
 static NSProgressIndicator *bootProgress;
+static NSView *shortcutHelp;
 static uint64_t bootStartNS;
 static _Atomic uint64_t presentedFrames;
 static _Atomic int warmPending;
@@ -79,6 +80,19 @@ static CVReturn vsync_callback(CVDisplayLinkRef link,const CVTimeStamp *now,cons
 -(void)keyUp:(NSEvent *)e{runtime_input_key(e.keyCode,0);}
 -(void)flagsChanged:(NSEvent *)e{if(e.keyCode==56)runtime_input_key(56,!!(e.modifierFlags&NSEventModifierFlagShift));if(e.keyCode==58)runtime_input_key(58,!!(e.modifierFlags&NSEventModifierFlagOption));}
 @end
+@interface TOTKShortcutHelp:NSView
+@property(strong) NSTextField *label;
+-(void)position;
+@end
+@implementation TOTKShortcutHelp
+-(instancetype)initWithFrame:(NSRect)frame{if((self=[super initWithFrame:frame])){self.wantsLayer=YES;self.layer.backgroundColor=[NSColor colorWithCalibratedWhite:0.04 alpha:0.86].CGColor;self.layer.cornerRadius=14;self.layer.borderWidth=1;self.layer.borderColor=[NSColor colorWithCalibratedWhite:1 alpha:0.2].CGColor;
+ self.label=[NSTextField labelWithString:@"快捷键说明\n1  显示 / 隐藏所有提示\n2  补帧：关 → 30+30 → 刷新率一半 → 不限帧\n3  画质：MetalFX 2K → 原生 2K → 关闭"];self.label.font=[NSFont systemFontOfSize:17 weight:NSFontWeightMedium];self.label.textColor=NSColor.whiteColor;self.label.alignment=NSTextAlignmentCenter;self.label.maximumNumberOfLines=0;self.label.lineBreakMode=NSLineBreakByWordWrapping;self.label.frame=NSInsetRect(self.bounds,20,18);self.label.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;[self addSubview:self.label];}return self;}
+-(NSView *)hitTest:(NSPoint)p{(void)p;return nil;}
+-(void)viewDidMoveToSuperview{[super viewDidMoveToSuperview];[self position];}
+-(void)layout{[super layout];[self position];}
+-(void)position{if(!self.superview)return;CGFloat w=MIN(560,MAX(280,self.superview.bounds.size.width-40)),h=140;NSRect f=NSMakeRect(floor((self.superview.bounds.size.width-w)/2),floor((self.superview.bounds.size.height-h)/2),w,h);if(!NSEqualRects(self.frame,f))self.frame=f;self.label.frame=NSInsetRect(self.bounds,20,18);}
+@end
+void runtime_shortcut_help_toggle(void){int show=fps_overlay_toggle_hints();dispatch_async(dispatch_get_main_queue(), ^{shortcutHelp.hidden=!show;});}
 /* The drawable follows the window's pixel size; the present pass scales the game picture (1920x1080 docked) into it and
    keeps 16:9 (black bars on other shapes), so a larger window or full screen shows the game at its own resolution instead
    of a fixed small drawable that the compositor stretches. */
@@ -152,6 +166,8 @@ void runtime_front_run(void(*callback)(void)){
   bootProgress.minValue=0;bootProgress.maxValue=100;bootProgress.indeterminate=YES;bootProgress.autoresizingMask=NSViewMinXMargin|NSViewMaxXMargin|NSViewMinYMargin|NSViewMaxYMargin;
   [bootOverlay addSubview:bootStage];[bootOverlay addSubview:bootDetail];[bootOverlay addSubview:bootProgress];
   [window.contentView addSubview:bootOverlay];[bootProgress startAnimation:nil];
+  shortcutHelp=[[TOTKShortcutHelp alloc] initWithFrame:NSZeroRect];shortcutHelp.autoresizingMask=NSViewMinXMargin|NSViewMaxXMargin|NSViewMinYMargin|NSViewMaxYMargin;[window.contentView addSubview:shortcutHelp];
+  [(TOTKShortcutHelp *)shortcutHelp position];
   /* The FPS counter is drawn into the game picture's top-right corner (with the on-screen size) by the present encoder (gfx/nvn/fps_overlay.c). */
   [window makeFirstResponder:window.contentView];[window center];front_sync_drawable();
   if(assume_focus()){[window orderFrontRegardless];}else{[window makeKeyAndOrderFront:nil];[NSApp activateIgnoringOtherApps:YES];}   /* in front of other apps' windows, keyboard left alone */

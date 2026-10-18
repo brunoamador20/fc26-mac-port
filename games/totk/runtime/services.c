@@ -167,6 +167,10 @@ void runtime_guest_resident(uint64_t *resident,uint64_t *dirty,uint64_t *compres
 static void host_diag_init(void) { fprintf(stderr,"[totk] native diagnostics initialized\n"); }
 static void host_oe_init(void) { fprintf(stderr,"[totk] application environment: local macOS process\n"); }
 static void host_aoc_init(void) { fprintf(stderr,"[totk] add-on content: no DLC\n"); }
+static int host_aoc_count(void) { return 0; }
+static int host_aoc_list(int *out,int offset,int count) {
+ (void)out;if(offset<0||count<0)runtime_fail("invalid add-on content list range");return 0;
+}
 static void host_error_init(void) { fprintf(stderr,"[totk] error contexts: local diagnostics\n"); }
 static void host_fs_init(void) { runtime_fs_init(); }
 static void host_pctl_init(void) { fprintf(stderr,"[totk] local application parental controls initialized\n"); }
@@ -231,6 +235,7 @@ void *runtime_override(const char *name) {
   {"_ZN2nn2oe20SetFocusHandlingModeENS0_17FocusHandlingModeE",focus_mode},{"_ZN2nn2oe20GetCurrentFocusStateEv",focus_state},
   {"_ZN2nn2oe28SetResumeNotificationEnabledEb",resume_enabled},{"_ZN2nn2oe42SetOperationModeChangedNotificationEnabledEb",operation_enabled},{"_ZN2nn2oe44SetPerformanceModeChangedNotificationEnabledEb",performance_enabled},
   {"nndiagStartup",host_diag_init},{"_ZN2nn2oe10InitializeEv",host_oe_init},{"_ZN2nn3aoc10InitializeEv",host_aoc_init},
+  {"_ZN2nn3aoc17CountAddOnContentEv",host_aoc_count},{"_ZN2nn3aoc16ListAddOnContentEPiii",host_aoc_list},
   {"_ZN2nn3err26InitializeContextWriterApiEv",host_error_init},{"_ZN2nn2fs24InitializeForApplicationEv",host_fs_init},
   {"_ZN2nn4pctl10InitializeEv",host_pctl_init},{"_ZN2nn4diag34InitializeApplicationAbortObserverEv",host_abort_init}};
  for(size_t i=0;i<sizeof(entries)/sizeof(entries[0]);i++)if(!strcmp(name,entries[i].name))return entries[i].fn;
@@ -239,15 +244,17 @@ void *runtime_override(const char *name) {
 void runtime_core_checkpoint(void);
 uint64_t runtime_svc(unsigned num,uint64_t *r,const char *module,uint64_t offset) {
  runtime_core_checkpoint();
- if(svc_thread((int)num,r))return r[0];
- if(runtime_ipc_svc(num,r))return r[0];
- memory_init();
  // Successful SVCs occur several times per frame. Keep the detailed trace available
  // for diagnostics without formatting and writing every call during normal play.
  static _Atomic int trace=-1;int enabled=atomic_load_explicit(&trace,memory_order_relaxed);
  if(enabled<0){enabled=getenv("TOTK_TRACE_SVC")!=NULL;atomic_store_explicit(&trace,enabled,memory_order_relaxed);}
  if(enabled)fprintf(stderr,"[totk] SVC 0x%x at %s+0x%llx x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx\n",num,module,(unsigned long long)offset,(unsigned long long)r[0],(unsigned long long)r[1],(unsigned long long)r[2],(unsigned long long)r[3]);
+ if(svc_thread((int)num,r))return r[0];
+ if(runtime_ipc_svc(num,r))return r[0];
+ memory_init();
  switch(num) {
+ case 0x02:r[0]=runtime_module_permission(r[0],r[1],(unsigned)r[2]);return r[0];
+ case 0x03:r[0]=runtime_module_lock_permission(r[0],r[1],(unsigned)r[2],(unsigned)r[3]);return r[0];
  case 0x29: {
   uint64_t value=0;unsigned id=(unsigned)r[1];
   switch(id) {
@@ -263,6 +270,9 @@ uint64_t runtime_svc(unsigned num,uint64_t *r,const char *module,uint64_t offset
   case 14:value=STACK_START;break;case 15:value=STACK_SIZE;break;
   case 16:value=SYSTEM_RESOURCE_BUDGET;break;case 17:value=sizeof(stack_maps)+sizeof(alias_pages);break;case 18:value=0x0100f2c0115b6000ULL;break;
   case 20:value=(uintptr_t)user_exception_context;break;   /* UserExceptionContextAddress: SDK stores e.g. the dying-message region at +0x1c0 */case 23:value=1;break;
+  /* AliasRegionExtraSize (18.0.0+): our alias reservation contains no
+   * kernel-owned extension outside the range reported by ids 2 and 3. */
+  case 28:value=0;break;
   default:fprintf(stderr,"unknown GetInfo id %u\n",id);runtime_fail("GetInfo id not implemented");
   }
   r[0]=0;r[1]=value;return 0;
@@ -272,15 +282,16 @@ uint64_t runtime_svc(unsigned num,uint64_t *r,const char *module,uint64_t offset
   if(r[0])fprintf(stderr,"[totk] %sMapPhysicalMemory %#llx+%#llx failed %#llx (alias %#llx used, heap %#llx)\n",num==0x2d?"Un":"",(unsigned long long)a,(unsigned long long)n,(unsigned long long)r[0],(unsigned long long)alias_bytes,(unsigned long long)heap_size);return r[0];}
  case 0x04:case 0x05:r[0]=stack_move(num==5,r[0],r[1],r[2]);return r[0];
  case 0x06: {
-  uint64_t addr=r[2],base=addr&~0xfffULL,size=0x1000;unsigned state=0,perm=0;
+  uint64_t addr=r[2],base=addr&~0xfffULL,size=0x1000;unsigned state=0,perm=0,attr=0;
   uintptr_t top=(uintptr_t)pthread_get_stackaddr_np(pthread_self());size_t stack=pthread_get_stacksize_np(pthread_self());
   if(addr>=top-stack&&addr<top){base=top-stack;size=stack;state=0xb;perm=3;}
   else if(addr>=(uintptr_t)heap&&addr<(uintptr_t)heap+heap_size){base=(uintptr_t)heap;size=heap_size;state=5;perm=3;}
   else if(addr>=(uintptr_t)low_space&&addr<(uintptr_t)low_space+LOW_SIZE){base=(uintptr_t)low_space;size=LOW_SIZE;if(addr<(uintptr_t)heap){size=(uintptr_t)heap-base;}else{base=(uintptr_t)heap+heap_size;size=(uintptr_t)low_space+LOW_SIZE-base;}}
   else if(addr>=(uintptr_t)low_space+LOW_SIZE&&addr<ALIAS_START){base=(uintptr_t)low_space+LOW_SIZE;size=ALIAS_START-base;state=0x10;perm=0;}   /* host-owned: Inaccessible */
   else if(!addr){base=0;size=ASLR_START;state=0;perm=0;}
+  else if(runtime_module_query(addr,&base,&size,&state,&perm,&attr)){}
   else {state=3;perm=5;}
-  unsigned attr=0;pthread_mutex_lock(&memory_lock);
+  pthread_mutex_lock(&memory_lock);
   if(addr>=ALIAS_START&&addr<ALIAS_START+ALIAS_SIZE){
    unsigned p=(unsigned)((addr-ALIAS_START)/4096),low=p,high=p+1;unsigned allocated=alias_pages[p];
    while(low>0&&alias_pages[low-1]==allocated)low--;while(high<sizeof(alias_pages)&&alias_pages[high]==allocated)high++;
@@ -307,6 +318,6 @@ uint64_t runtime_svc(unsigned num,uint64_t *r,const char *module,uint64_t offset
  case 0x26: {uint32_t result=0;if(r[1]&&r[2]>=4)memcpy(&result,(void *)(uintptr_t)r[1],4);fprintf(stderr,"[totk] guest Break reason=%llx result=%x\n",(unsigned long long)r[0],result);runtime_trace_guest(r[29],r[30]);if(r[0]&0x80000000ULL)return 0;runtime_fail("original SDK Break");}
  case 0x27: {size_t n=r[1];if(n>65536)runtime_fail("debug string too long");fwrite((void *)(uintptr_t)r[0],1,n,stderr);r[0]=0;return 0;}
  case 0x0b:{int64_t ns=(int64_t)r[0];if(ns>0){struct timespec t={ns/1000000000,ns%1000000000};nanosleep(&t,NULL);}r[0]=0;return 0;}
- default:if(num==0x1f)fprintf(stderr,"[totk] named port %.12s\n",(const char *)(uintptr_t)r[1]);runtime_trace_guest(r[29],r[30]);runtime_fail("system service not implemented");return 0;
+ default:fprintf(stderr,"[totk] unimplemented SVC 0x%x at %s+%#llx\n",num,module,(unsigned long long)offset);if(num==0x1f)fprintf(stderr,"[totk] named port %.12s\n",(const char *)(uintptr_t)r[1]);runtime_trace_guest(r[29],r[30]);runtime_fail("system service not implemented");return 0;
  }
 }

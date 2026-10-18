@@ -4,20 +4,25 @@ import argparse
 import hashlib
 import json
 import struct
+import sys
 from pathlib import Path
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'third_party/d2r'))
+from relr import decode_relr
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--version', choices=('v0','v112'), default='v0')
+parser.add_argument('--version', choices=('v0','v112','v143'), default='v0')
 version = parser.parse_args().version
-OUT = ROOT / ('build' if version == 'v0' else 'build/v112')
+OUT = ROOT / ('build' if version == 'v0' else f'build/{version}')
 OUT.mkdir(parents=True, exist_ok=True)
-report = json.loads((ROOT / ('analysis/phase12-validation.json' if version == 'v0' else 'analysis/v112-port/phase12-validation.json')).read_text())
+report = json.loads((ROOT / ('analysis/phase12-validation.json' if version == 'v0' else f'analysis/{version}-port/phase12-validation.json')).read_text())
 assert report['status'] == 'pass' and report['rom_version'] == version
 if version == 'v112':
     expected = 'f04fbebdaacbcde0bcca20cbe0caff06bd51f7c8f904d217e5f17efe3308d1ac'
     assert report['module_file_sha256']['extracted/v112/exefs/main'] == expected, 'Unsupported 1.1.2 main image'
+if version == 'v143':
+    assert report['module_file_sha256']['extracted/v143/exefs/main'] == 'e84a90d551fed0824b4b74933b9c6d043c458521363a7cea58b2faca1822dc9e', 'Unsupported 1.4.3 main image'
 modules = []
 for name in ['main', 'subsdk0', 'sdk']:
     path = ROOT / f'rewritten/{version}/{name}.patched.bin'
@@ -38,7 +43,16 @@ for name in ['main', 'subsdk0', 'sdk']:
         if tag == 0: break
         tags[tag] = value
     else: raise ValueError('Unterminated dynamic table')
-    nsym = struct.unpack_from('<I', image, tags[4] + 4)[0]
+    if 4 in tags:
+        nsym = struct.unpack_from('<I', image, tags[4] + 4)[0]
+    else:
+        # Newer SDK modules carry GNU hash only. NSO's verified dynsym extent
+        # supplies the exact count, as in prepare_modules.py's inventory gate.
+        raw_header = (ROOT / f'extracted/{version}/exefs/{name}').read_bytes()[:256]
+        _, _, symbol_offset, symbol_size = struct.unpack_from('<IIII', raw_header, 0x90)
+        assert layout['RO_OFF'] + symbol_offset == tags[6] and symbol_size % 24 == 0
+        assert 0 < symbol_size <= layout['DATA_OFF'] - tags[6]
+        nsym = symbol_size // 24
     assert tags[11] == 24 and tags[9] == 24 and tags[20] == 7
     symbols = []
     for i in range(nsym):
@@ -46,7 +60,9 @@ for name in ['main', 'subsdk0', 'sdk']:
         end = image.index(0, tags[5] + no, tags[5] + tags[10])
         symbols.append(dict(name=image[tags[5] + no:end].decode(), value=value, size=size,
                             defined=bool(section), binding=info >> 4, type=info & 15))
-    relocs = []
+    relocs = [dict(where=where, kind=1027, symbol=0, addend=addend)
+              for where, addend in decode_relr(image, tags, layout['DATA_OFF'], layout['KEY_PAGE_OFF'])]
+    relocated = {reloc['where'] for reloc in relocs}
     for address, size in [(tags[7], tags[8]), (tags[23], tags[2])]:
         assert size % 24 == 0
         for offset in range(address, address + size, 24):
@@ -55,15 +71,18 @@ for name in ['main', 'subsdk0', 'sdk']:
             assert kind in [257, 1025, 1026, 1027] and si < nsym
             assert layout['DATA_OFF'] <= where <= layout['KEY_PAGE_OFF'] - 8
             assert kind != 1027 or 0 <= addend < layout['KEY_PAGE_OFF']
+            assert where not in relocated, 'Duplicate RELR/RELA relocation'
+            relocated.add(where)
             relocs.append(dict(where=where, kind=kind, symbol=si, addend=addend))
     gates = []
     for line in (ROOT / f'rewritten/{version}/{name}.gates.tsv').read_text().splitlines():
         ret, kind, arg, original = line.split()
         assert kind in ['cntpct', 'cntvct', 'svc']
         gates.append(dict(ret=int(ret, 0), timer=kind != 'svc', arg=int(arg), original=int(original, 0)))
-    # The v0 modules use the same DT_INIT flag load; verify before decoding.
-    a, w = struct.unpack_from('<I', image, tags[12]+16)[0], struct.unpack_from('<I', image, tags[12]+24)[0]
-    assert a & 0x9f00001f == 0x90000014 and w & 0xffc003ff == 0xb9400288
+    # Match each compiler's actual DT_INIT state load before decoding it.
+    flag_reg, load_offset = (19, 20) if version == 'v143' else (20, 24)
+    a, w = struct.unpack_from('<I', image, tags[12]+16)[0], struct.unpack_from('<I', image, tags[12]+load_offset)[0]
+    assert a & 0x9f00001f == 0x90000000 | flag_reg and w & 0xffc003ff == 0xb9400008 | (flag_reg << 5)
     imm = ((a >> 29) & 3) | (((a >> 5) & 0x7ffff) << 2)
     imm = (imm ^ (1 << 20)) - (1 << 20)
     ctor_flag = ((tags[12]+16) & ~4095) + (imm << 12) + ((w >> 10) & 0xfff)*4
@@ -108,5 +127,5 @@ lines.append('};')
 lines.append(f'#define PROBE_PLT {main["probe_plt"]}ULL\n#define PROBE_SLOT {slot}ULL')
 (OUT / 'runtime_tables.h').write_text('\n'.join(lines) + '\n')
 # Details are evidence, not additional source code.
-(ROOT / ('analysis/runtime-layout.json' if version == 'v0' else 'analysis/v112-port/runtime-layout.json')).write_text(json.dumps(modules, indent=2) + '\n')
+(ROOT / ('analysis/runtime-layout.json' if version == 'v0' else f'analysis/{version}-port/runtime-layout.json')).write_text(json.dumps(modules, indent=2) + '\n')
 print(json.dumps(dict(modules=len(modules), relocations=sum(len(m['relocs']) for m in modules), original_main_plt=hex(plt[0]), original_main_slot=hex(slot))))

@@ -5,7 +5,7 @@ ROOT=Path(__file__).resolve().parents[1]
 def options():
     p=argparse.ArgumentParser();p.add_argument('--version',choices=('v0','v112'),default='v0');return p.parse_args()
 def offsets(version):
-    source=(ROOT/'runtime/game_version.h').read_text().split('#ifdef TOTK_GAME_V112',1)[1].split('#else',1)[0]
+    source=(ROOT/'runtime/game_version.h').read_text().split('#elif defined(TOTK_GAME_V112)',1)[1].split('#else',1)[0]
     mapping={int(a,16):int(b,16) for a,b in re.findall(r'#define GAME_ADDR_(0x[0-9a-f]+) (0x[0-9a-f]+)',source)}
     def address(value):return mapping[value] if version=='v112' else value
     return address

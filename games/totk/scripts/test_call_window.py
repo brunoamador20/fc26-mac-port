@@ -30,9 +30,9 @@ def put(image, address, *words):
     image[address:address + 4 * len(words)] = struct.pack('<' + 'I' * len(words), *words)
 
 
-def image(patched, recursive, mutation=None):
+def image(patched, recursive, mutation=None, prefix_word=STORE):
     blob = bytearray(0x4000)
-    put(blob, OUTER, STORE, BLR_X18, 0xD503201F)
+    put(blob, OUTER, prefix_word, BLR_X18, 0xD503201F)
     if recursive:
         put(blob, CALLEE, 0xA9BC7BFD, 0x910003FD, 0x71000694, 0x54000060,
             STORE, BLR_X18, 0x91000400, 0xA8C47BFD, 0xD65F03C0)
@@ -46,7 +46,7 @@ def image(patched, recursive, mutation=None):
         windows = [(OUTER, PATCH)]
     if patched:
         for prefix, patch in windows:
-            code = prepare_call(STORE, prefix, prefix + 4, patch, KEYPAGE, 0)
+            code = prepare_call(prefix_word, prefix, prefix + 4, patch, KEYPAGE, 0)
             blob[patch:patch + len(code)] = code
             put(blob, prefix, branch(prefix, patch), BLR_X30)
         if mutation == 'wrong_call_register': put(blob, OUTER + 4, 0xD63F0200)
@@ -56,17 +56,18 @@ def image(patched, recursive, mutation=None):
     return blob
 
 
-def execute(seed, patched, recursive=False, mutation=None, target=None):
+def execute(seed, patched, recursive=False, mutation=None, target=None, prefix_word=STORE):
     rng = random.Random(seed)
     registers = [rng.getrandbits(64) for _ in range(31)]
     registers[18] = BASE + CALLEE if target is None else target
     registers[19] = STACK + 0x200
     registers[20] = rng.randrange(1, 9)
+    if prefix_word != STORE: registers[29] = SP + 0x80
     vectors = [rng.getrandbits(128) for _ in range(32)]
     slot = rng.randrange(32, 480)
     u = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
     u.mem_map(BASE, 0x4000)
-    u.mem_write(BASE, bytes(image(patched, recursive, mutation)))
+    u.mem_write(BASE, bytes(image(patched, recursive, mutation, prefix_word)))
     u.mem_map(STACK, 0x20000)
     u.mem_write(STACK, rng.randbytes(0x20000))
     u.mem_map(TSD, 0x10000)
@@ -113,6 +114,12 @@ def execute(seed, patched, recursive=False, mutation=None, target=None):
 
 
 class CallWindowTest(unittest.TestCase):
+    def test_v143_frame_pointer_load_and_store(self):
+        for prefix_word in (0xf85e83a0, 0xb81f83af):
+            for seed in range(64):
+                with self.subTest(prefix=hex(prefix_word), seed=seed):
+                    self.assertEqual(execute(seed, False, prefix_word=prefix_word),
+                                     execute(seed, True, prefix_word=prefix_word))
     def test_actual_stack_store_and_callee_return(self):
         for seed in range(256):
             with self.subTest(seed=seed):

@@ -3,10 +3,10 @@
 import argparse,hashlib,json,os,re,subprocess
 from pathlib import Path
 root=Path(__file__).resolve().parents[1]
-p=argparse.ArgumentParser(description=__doc__);p.add_argument('--version',choices=('v0','v112'),default='v0');version=p.parse_args().version
-exe=root/('build/totk-native' if version=='v0' else 'build/totk-native-v112')
-out=root/('analysis' if version=='v0' else 'analysis/v112-port')
-checkpoint_pc='0xe995c4' if version=='v0' else '0xea7e14'
+p=argparse.ArgumentParser(description=__doc__);p.add_argument('--version',choices=('v0','v112','v143'),default='v0');version=p.parse_args().version
+exe=root/('build/totk-native' if version=='v0' else f'build/totk-native-{version}')
+out=root/('analysis' if version=='v0' else f'analysis/{version}-port')
+checkpoint_pc={'v0':'0xe995c4','v112':'0xea7e14','v143':'0xbdb48c'}[version]
 expected=['ENTER nnosInitialize','RETURN nnosInitialize','ENTER nninitInitializeSdkModule','RETURN nninitInitializeSdkModule','ENTER nninitStartup','RETURN nninitStartup','ENTER main DT_INIT','RETURN main DT_INIT','ENTER subsdk0 DT_INIT','RETURN subsdk0 DT_INIT','ENTER sdk DT_INIT','RETURN sdk DT_INIT','ENTER nnMain']
 trials=[]
 for i in range(2):

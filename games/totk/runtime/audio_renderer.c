@@ -27,6 +27,7 @@ static AudioRenderer *renderer_new(const AudrenParameter *p) {
     AudioRenderer *r = calloc(1, sizeof *r);
     need(r != NULL, "renderer allocation");
     r->param = *p;
+    r->revision=p->revision;
     need(p->sample_rate == 48000 || p->sample_rate == 32000, "unsupported output rate");
     need(p->voice_count > 0 && p->voice_count <= 1024 && p->sink_count > 0 && p->effect_count >= 0 && p->submix_count >= 0, "renderer counts");
     r->voices = calloc((size_t)p->voice_count, sizeof *r->voices);
@@ -62,6 +63,7 @@ static void update_voice(AudioRenderer *r, const AudrenVoiceIn *in) {
     for (int i = 0; i < 2; i++) if (!in->biquads[i].enable)
         memset(v->biquad_state[i], 0, sizeof v->biquad_state[i]);
     v->in = *in;
+    v->use_float_biquads=0;
     if (!in->in_use) return;
     need(in->wave_buffer_index < 4, "wave buffer index");
     /* The server's play state the way the DSP keeps it (Ryujinx VoiceInfo.UpdatePlayState): Stop on a voice that is not
@@ -154,8 +156,10 @@ static void request_update(AudioRenderer *r, const uint8_t *input, uint64_t in_s
     const AudrenPoolIn *pools = (const AudrenPoolIn *)take(&in, h.memory_pools, "memory pools");
     need(h.voice_resources % sizeof(AudrenChannelIn) == 0 && h.voice_resources / sizeof(AudrenChannelIn) <= (uint32_t)vc * 6, "voice channel section size");
     const AudrenChannelIn *chans = (const AudrenChannelIn *)take(&in, h.voice_resources, "voice channels");
-    need(h.voices == (uint32_t)vc * sizeof(AudrenVoiceIn), "voice section size");
-    const AudrenVoiceIn *voices = (const AudrenVoiceIn *)take(&in, h.voices, "voices");
+    int float_voices=revision_number(h.revision)>=15;
+    size_t voice_stride=float_voices?sizeof(AudrenVoiceInV2):sizeof(AudrenVoiceIn);
+    need(h.voices == (uint32_t)vc * voice_stride, "voice section size");
+    const uint8_t *voices = take(&in, h.voices, "voices");
     need(h.effects == (uint32_t)ec * sizeof(AudrenEffectIn), "effect section size");
     const AudrenEffectIn *effects = (const AudrenEffectIn *)take(&in, h.effects, "effects");
     const uint8_t *splitters = take(&in, h.splitters, "splitters");
@@ -170,7 +174,25 @@ static void request_update(AudioRenderer *r, const uint8_t *input, uint64_t in_s
         need(chans[i].id < (uint32_t)vc * 6, "channel resource id");
         r->channels[chans[i].id] = chans[i];
     }
-    for (int i = 0; i < vc; i++) update_voice(r, &voices[i]);
+    for (int i = 0; i < vc; i++) {
+        AudrenVoiceIn v;
+        AudrenVoiceInV2 v2;
+        if(float_voices){
+            memcpy(&v2,voices+i*voice_stride,sizeof v2);memset(&v,0,sizeof v);
+            memcpy(&v,v2.prefix,sizeof v2.prefix);
+            memcpy((uint8_t *)&v+0x3c,v2.tail,sizeof v2.tail);
+            for(unsigned f=0;f<2;f++){
+                v.biquads[f].enable=v2.biquads[f].enable;
+                if(v.biquads[f].enable){
+                    for(unsigned c=0;c<3;c++)need(isfinite(v2.biquads[f].numerator[c]),"nonfinite voice biquad numerator");
+                    for(unsigned c=0;c<2;c++)need(isfinite(v2.biquads[f].denominator[c]),"nonfinite voice biquad denominator");
+                }
+            }
+        }else memcpy(&v,voices+i*voice_stride,sizeof v);
+        update_voice(r,&v);
+        ServerVoice *server=&r->voices[v.id];server->use_float_biquads=float_voices;
+        if(float_voices)memcpy(server->float_biquads,v2.biquads,sizeof v2.biquads);
+    }
     for (int i = 0; i < ec; i++) r->effects[i] = effects[i];
     if (getenv("TOTK_AUDIO_DUMP")) { static unsigned dumped; unsigned active = 0; for (int i=0;i<ec;i++) if (effects[i].enabled && effects[i].type) active++;
         if (active > dumped) { dumped = active; FILE *f = fopen("analysis/audio-effects.bin", "wb"); if (f) { fwrite(effects, sizeof *effects, ec, f); fclose(f); } }
@@ -322,12 +344,53 @@ __attribute__((constructor)) static void register_audio(void) { runtime_audio_re
 /* ---------- make probe-audio: mixer checks on constructed renderer state (no game, no audio device) ---------- */
 int audio_mixer_read(AudioRenderer *r, float *lr, int frames);
 static int near(float a, float b) { return fabsf(a - b) <= 1e-4f; }
+/* Complete REV15 wire request -> parser -> float voice/splitter filters -> sink.
+ * Expected samples use separate double-precision recurrences, including state
+ * across two requests. Coefficients deliberately cannot be represented in Q14. */
+static int probe_rev15(void){
+    AudrenParameter p={.sample_rate=48000,.sample_count=240,.mix_buffer_count=2,.voice_count=1,.sink_count=1,.splitter_count=1,.splitter_destination_count=1,.revision=REV(15)};
+    AudioRenderer *r=renderer_new(&p);audio_mixer_open(r);
+    static float pcm[480];for(unsigned k=0;k<480;k++)pcm[k]=(float)(0.3*sin(k*0.071)+(k%37==0?0.1:0));
+    AudrenHeader h={.revision=REV(15),.behavior=16,.memory_pools=4*sizeof(AudrenPoolIn),.voice_resources=sizeof(AudrenChannelIn),.voices=sizeof(AudrenVoiceInV2),.splitters=0x40+0xa8,.mixes=sizeof(AudrenMixIn),.sinks=sizeof(AudrenSinkIn),.performance=16};
+    h.total=sizeof h+h.behavior+h.memory_pools+h.voice_resources+h.voices+h.splitters+h.mixes+h.sinks+h.performance;
+    uint8_t *input=calloc(1,h.total),output[4096];need(input!=NULL,"REV15 probe allocation");
+    AudrenVoiceIn v={.id=0,.is_new=1,.in_use=1,.play_state=PLAY_STARTED,.sample_format=FMT_PCMF32,.sample_rate=48000,.channel_count=1,.pitch=1,.volume=1,.mix_id=0x7fffffff,.splitter_id=0};
+    v.wave_buffers[0]=(AudrenWaveBuffer){.address=(uintptr_t)pcm,.size=sizeof pcm,.end=480};
+    for(unsigned k=1;k<4;k++)v.wave_buffers[k].sent=1;
+    AudrenBiquadFloat voice={.enable=1,.numerator={0.1234567f,0.0712345f,0},.denominator={0.25f,0}};
+    AudrenBiquadFloat splitter={.enable=1,.numerator={0.7654321f,0,0},.denominator={0.125f,0}};
+    double vx=0,vy=0,sy=0;int checked=0;
+    for(unsigned block=0;block<2;block++){
+        uint8_t *at=input;memcpy(at,&h,sizeof h);at+=sizeof h+h.behavior+h.memory_pools+h.voice_resources;
+        AudrenVoiceInV2 wire={0};memcpy(wire.prefix,&v,sizeof wire.prefix);memcpy(wire.tail,(uint8_t *)&v+0x3c,sizeof wire.tail);wire.biquads[0]=voice;
+        memcpy(at,&wire,sizeof wire);at+=sizeof wire;
+        uint32_t sh[3]={0x48444e53,1,1},si[5]={0x49444e53,0,48000,1,0},magic=0x44444e53;
+        memcpy(at,sh,12);memcpy(at+0x20,si,sizeof si);
+        uint8_t *dest=at+0x40;memcpy(dest,&magic,4);float volumes[24]={1,0.5f};memcpy(dest+8,volumes,sizeof volumes);memcpy(dest+0x6c,&splitter,sizeof splitter);dest[0x9c]=1;
+        at+=h.splitters;
+        AudrenMixIn mix={.volume=1,.sample_rate=48000,.buffer_count=2,.in_use=1,.mix_id=0,.dest_mix_id=0x7fffffff,.dest_splitter_id=0xffffffff};memcpy(at,&mix,sizeof mix);at+=sizeof mix;
+        AudrenSinkIn sink={.type=SINK_DEVICE,.in_use=1,.input_count=2,.inputs={0,1}};memcpy(at,&sink,sizeof sink);
+        request_update(r,input,h.total,output,sizeof output,0);
+        AudrenHeader reply;memcpy(&reply,output,sizeof reply);need(reply.revision==REV(15)&&reply.voices==sizeof(AudrenVoiceOut)&&reply.total<=sizeof output,"REV15 probe response");
+        if(getenv("TOTK_AUDIO_REV15_NEGATIVE"))r->voices[0].use_float_biquads=0;
+        audio_voices_prepare(r);audio_mixer_render(r,240.0/48000);advance_voice(r,&r->voices[0],240.0/48000);
+        float samples[480];need(audio_mixer_read(r,samples,240)==240,"REV15 probe ring");
+        for(unsigned k=0;k<240;k++){
+            double x=pcm[block*240+k],y=voice.numerator[0]*x+voice.numerator[1]*vx+voice.denominator[0]*vy;vx=x;vy=y;
+            double z=splitter.numerator[0]*y+splitter.denominator[0]*sy;sy=z;
+            need(fabs(samples[2*k]-z)<1e-6&&fabs(samples[2*k+1]-z*0.5)<1e-6,"audio probe: REV15 float voice and splitter samples");checked+=2;
+        }
+        v.is_new=0;v.wave_buffers[0].sent=1;
+    }
+    free(input);audio_mixer_close(r);free(r->voices);free(r->pools);free(r->mixes);free(r->sinks);free(r->effects);free(r->channels);free(r);
+    return checked;
+}
 void runtime_audio_probe(void) {
     setenv("TOTK_AUDIO_OFF", "1", 1);
     const int neg = getenv("TOTK_PROBE_NEGATIVE") != NULL;
     AudrenParameter p = {48000, 240, 8, 1, 4, 1, 2, 0, 0, 0, 0, 0, 1, 2, 0, REV(11)};
     AudioRenderer *r = renderer_new(&p); audio_mixer_open(r);
-    int checked = 0;
+    int checked = probe_rev15();
     /* final mix 0: buffers 0-1; submix 1: buffers 2-3 -> mix 0 with a swap matrix at volume 0.5 */
     r->mixes[0] = (AudrenMixIn){.volume = 1, .sample_rate = 48000, .buffer_count = 2, .in_use = 1, .mix_id = 0, .dest_mix_id = 0x7fffffff, .dest_splitter_id = 0xffffffffu};
     r->mixes[1] = (AudrenMixIn){.volume = 0.5f, .sample_rate = 48000, .buffer_count = 2, .in_use = 1, .mix_id = 1, .dest_mix_id = 0, .dest_splitter_id = 0xffffffffu};
@@ -529,5 +592,5 @@ void runtime_audio_probe(void) {
         checked += 3;
         x.flush_wave_buffer_count = 0; x.in_use = 0; update_voice(r, &x);
     }
-    printf("{\"status\":\"pass\",\"probe\":\"probe-audio\",\"checked\":%d,\"scope\":\"PCM16 channel mix, pitch interpolation, DSP-ADPCM decode, splitter to submix to final mix, device sink, stereo cascaded biquads, ordered submix reverb, auxiliary ring exchange, output limiter, bypass, frame continuity and reset\"}\n", checked);
+    printf("{\"status\":\"pass\",\"probe\":\"probe-audio\",\"checked\":%d,\"scope\":\"REV15 wire parsing, native float voice/splitter biquads and consecutive request state; PCM16 channel mix, pitch interpolation, DSP-ADPCM decode, splitter to submix to final mix, device sink, stereo cascaded biquads, ordered submix reverb, auxiliary ring exchange, output limiter, bypass, frame continuity and reset\"}\n", checked);
 }

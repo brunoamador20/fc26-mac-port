@@ -26,6 +26,8 @@ typedef struct { uint32_t id; float mix[24]; uint8_t in_use, pad[11]; } AudrenCh
 _Static_assert(sizeof(AudrenChannelIn) == 0x70, "voice channel resource");
 
 typedef struct { uint8_t enable, pad; int16_t numerator[3], denominator[2]; } AudrenBiquad;
+typedef struct { uint8_t enable,pad[3]; float numerator[3],denominator[2]; } AudrenBiquadFloat;
+_Static_assert(sizeof(AudrenBiquadFloat)==0x18,"REV15 float biquad");
 typedef struct {
     uint64_t address, size; int32_t start, end; uint8_t loop, end_of_stream, sent, pad;
     int32_t loop_count; uint64_t context_address, context_size; int32_t loop_start, loop_end;
@@ -41,6 +43,10 @@ typedef struct {
     uint8_t clear_voice_drop, flush_wave_buffer_count, pad2[2], flags, pad3, src_quality, pad4[17];
 } AudrenVoiceIn;
 _Static_assert(sizeof(AudrenVoiceIn) == 0x170, "voice in parameter");
+/* REV15 enlarges only the two filter records (Q14 -> native float). The
+ * surrounding fields retain their order; the tail moves by 24 bytes. */
+typedef struct { uint8_t prefix[0x24]; AudrenBiquadFloat biquads[2]; uint8_t tail[0x134]; } AudrenVoiceInV2;
+_Static_assert(sizeof(AudrenVoiceInV2)==0x188,"REV15 voice in parameter");
 typedef struct { uint64_t played_samples; uint32_t wave_buffers_consumed, voice_drops; } AudrenVoiceOut;
 enum { PLAY_STARTED, PLAY_STOPPED, PLAY_PAUSED };
 enum { FMT_INVALID, FMT_PCM8, FMT_PCM16, FMT_PCM24, FMT_PCM32, FMT_PCMF32, FMT_ADPCM };

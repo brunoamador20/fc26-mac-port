@@ -29,6 +29,15 @@ static int64_t total_active_time(void) { return (int64_t)(runtime_now_ns() - sta
 static void inactivity_extended(unsigned char on) { (void)on; }
 /* No system startup logo is drawn on the host, so there is nothing to dismiss. */
 static void finish_startup_logo(void) { fprintf(stderr, "[totk] game finished startup logo\n"); }
+/* The single native executable was launched directly; it has no predecessor
+ * in an applet ExecuteProgram chain. -1 keeps the game's normal user-open path. */
+static int previous_program_index(void) { return -1; }
+/* A stable, nonzero resource id for this process's one application. Host input
+ * and audio share that application; there is no separate system applet client. */
+static uint64_t applet_resource_user_id(void) { return 1; }
+static unsigned char try_pop_launch_parameter(uint64_t *size,void *buffer,uint64_t capacity) {
+    (void)buffer;(void)capacity;if(size)*size=0;return 0;
+}
 static unsigned char try_pop(uint32_t *out) {
     pthread_mutex_lock(&lock); int ok = head != tail; if (ok && out) *out = messages[head++ % 32]; pthread_mutex_unlock(&lock); return (unsigned char)ok;
 }
@@ -64,8 +73,13 @@ static void show_error(uint32_t result) {
 
 void *runtime_applet_override(const char *name) {
     static const struct { const char *name; void *fn; } map[] = {
+        {"_ZN2nn6applet23GetPreviousProgramIndexEv", previous_program_index},
+        {"_ZN2nn6applet23GetAppletResourceUserIdEv", applet_resource_user_id},
+        {"_ZN2nn2am23GetAppletResourceUserIdEv", applet_resource_user_id},
+        {"_ZN2nn2oe21TryPopLaunchParameterEPmPvm", try_pop_launch_parameter},
         {"_ZN2nn2oe24GetExpectedVolumeBalanceEPfS1_", get_balance}, {"_ZN2nn2oe24SetExpectedVolumeBalanceEff", set_balance},
         {"_ZN2nn2oe25GetProgramTotalActiveTimeEv", total_active_time}, {"_ZN2nn2oe38SetUserInactivityDetectionTimeExtendedEb", inactivity_extended},
+        {"_ZN2nn2oe44SetUserInactivityDetectionTimeExtendedUnsafeEb", inactivity_extended},
         {"_ZN2nn2oe17FinishStartupLogoEv", finish_startup_logo}, {"_ZN2nn2oe25TryPopNotificationMessageEPj", try_pop},
         {"_ZN2nn2oe22PopNotificationMessageEv", pop},
         {"_ZN2nn5prepo10PlayReport4SaveEv", report_save}, {"_ZN2nn5prepo10PlayReport4SaveERKNS_7account3UidE", report_save_uid},

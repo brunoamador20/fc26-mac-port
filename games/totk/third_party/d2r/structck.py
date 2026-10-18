@@ -87,6 +87,7 @@ for l in open(f'{out_dir}/{mod}.sites.tsv'):
         calls[a] = end - 4; wins.append((a, end)); sites[a] = 'C'
     else: sites[a] = f[1]
 inwin = set(o for lo, hi in wins for o in range(lo, hi, 4))
+atomic_groups = nsoimg.exclusive_groups(orig, [(lo, hi) for lo, hi in wins if lo not in calls])
 
 # ⓪ 已登记剪口
 # ⓪ Registered cuts
@@ -258,9 +259,9 @@ for prefix, call in calls.items():
         bad(f'call preparation has no trampoline {prefix:#x}'); continue
     decoded = list(_md.disasm(pat[start:start + 36], start))
     first = next(_md.disasm(orig[prefix:prefix + 4], prefix), None)
-    safe = first and first.mnemonic in ('str', 'stp', 'stur') and not first.writeback \
-        and first.reg_name(first.operands[-1].mem.base) == 'sp' and not first.operands[-1].mem.index \
-        and first.operands[-1].mem.disp >= 0 and not RX18.search(first.op_str)
+    safe = first and first.mnemonic in ('str', 'stp', 'stur', 'ldr', 'ldp', 'ldur') and not first.writeback \
+        and first.reg_name(first.operands[-1].mem.base) in ('sp', 'fp') and not first.operands[-1].mem.index \
+        and (first.reg_name(first.operands[-1].mem.base) != 'sp' or first.operands[-1].mem.disp >= 0) and not RX18.search(first.op_str)
     slot = keyseq(start + 8)
     if len(decoded) != 9 or not safe or W(pat, start) != W(orig, prefix) \
             or W(orig, call) != 0xD63F0240 or W(pat, call) != 0xD63F03C0 \
@@ -503,7 +504,8 @@ for a, allowed in static_entries:
     block = _block(s); static_seen += 1
     if not allowed:
         end = next((hi for lo, hi in wins if lo == a), a + 4)
-        for ins in _md.disasm(orig[a:end], a): allowed |= _writes(ins)
+        for lo, hi in atomic_groups.get(a, [(a, end)]):
+            for ins in _md.disasm(orig[lo:hi], lo): allowed |= _writes(ins)
         if next(_md.disasm(orig[a:a + 4], a), None).mnemonic in ('stp', 'ldp'):
             allowed.update(('x0', 'x1'))
     saved = {}
@@ -577,7 +579,9 @@ def _exits(start):
 nexit = 0; _cutoff = {c[0] for c in cuts}; _cutex = []
 for a in sorted(_heads):
     if a in _wend:
-        seg = range(a, _wend[a], 4); legal = {calls[a]} if a in calls else {_wend[a]}
+        group = atomic_groups.get(a, [(a, _wend[a])])
+        seg = [o for lo, hi in group for o in range(lo, hi, 4)]
+        legal = {calls[a]} if a in calls else {hi for lo, hi in group}
     else:
         e = a + 4
         while e < TE and W(pat, e) != W(orig, e) and e not in _heads: e += 4

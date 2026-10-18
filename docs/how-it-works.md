@@ -8,9 +8,9 @@ a loader, the operating system's services, and a graphics driver.
 The Switch and Apple silicon are both ARM64, so almost every instruction of the game runs as it is. A few things
 macOS does not allow are rewritten ahead of time (`patch_nso.py`): the platform register x18, the thread pointer
 register, system calls (`svc`), and the counter registers. Each one becomes a short jump into a stub that does the same
-thing for macOS. The rewrites of versions 1.0.0 and 1.1.2 were verified site by site (every rewritten site executed with random
+thing for macOS. The rewrites of versions 1.0.0, 1.1.2 and 1.4.3 were verified site by site (every rewritten site executed with random
 inputs against the original in an emulator, with negative controls); the build checks that your rewrite is byte for
-byte the selected version (`games/totk/assets/expected-v1.0.0.json` / `expected-v1.1.2.json`).
+byte the selected version (`games/totk/assets/expected-v1.0.0.json` / `expected-v1.1.2.json` / `expected-v1.4.3.json`).
 
 The loader maps the three rewritten modules (main, sdk, subsdk0) at their original layout, resolves their imports
 against each other, and starts the game's own `nn::init::Start`.
@@ -50,10 +50,17 @@ ships ready-made in `games/totk/prebuilt/macos-arm64`, so neither building nor p
    sizes the 1440p output needs) are made from your own files.
 3. SPIRV-Cross compiled with clang; the prebuilt shader translator checked against its SHA-256.
 4. The game binary built against your extracted files (it checks their hashes at every start) and everything put into
-   an app bundle; the app's launcher points the game at your profile, cache and log folders.
+   an app bundle; the app's launcher points the game at your profile, cache and log folders. The builder seals and
+   strictly verifies the complete bundle before replacing the previous app, then refreshes its LaunchServices record.
+
+The optional `games/totk/tools/install_desktop_entry.py` installer keeps one desktop link to that bundle. When replacing
+the older development launcher, it verifies a copy of its profile in the standard user-data folder, keeps an upgrade
+backup and leaves the original profile intact. The game slot, shader cache and RomFS verification records also live
+outside the app, so playing does not change the signed resources. A full verification record is reused only while the
+image's file identity and modification metadata match; `TOTK_ROMFS_VERIFY=full` forces a fresh SHA-256 check.
 
 The output is macOS-only: Apple silicon, macOS 26 or later, and an AppKit launcher. There is no iPhone/iOS build option.
-The separate cumulative 1.1.2 update is accepted with `--update`. Other updates, DLC, combined packages, personalized tickets and NSZ/XCZ remain unsupported.
+The separate cumulative 1.1.2 and 1.4.3 updates are accepted with `--update` (NSP or NSZ). NSZ updates are decompressed and their NCA hashes verified locally. Other versions, DLC, combined packages, personalized tickets and compressed base games (NSZ/XCZ) remain unsupported.
 Changing an input path, size, or modification time invalidates the extraction manifest, including its NCA offsets;
 verified version-specific output can still be reused after the new input's code passes the hash checks.
 
@@ -65,13 +72,15 @@ Container tests use generated encrypted fixtures with no game data or real keys:
 
 ## Cumulative update path
 
-`--update` first validates the base code, then extracts and validates the update ExeFS and its rewritten modules against the fixed 1.1.2 manifest. An update's Program NCA can have the base title ID; the BKTR section marker identifies the input type, while exact ExeFS and merged RomFS hashes identify the supported version. A renamed 1.1.0/1.2.1 file cannot pass as 1.1.2.
+`--update` validates the base code and selects the update version by its exact ExeFS hashes, then checks its rewritten modules against that version's fixed manifest. An update's Program NCA can have the base title ID; the BKTR section marker identifies the input type, while exact ExeFS and merged RomFS hashes identify the supported version. Renaming a file cannot change the selected version or make an unsupported version pass.
 
-The pinned hactool commit `1d64a83450e025622f3468c28fc4164dad2c5ef6` merges the base and update Program NCAs. The build adds a small explicit title-key-file hook (`MNG_TITLE_KEYS`): temporary common tickets for both inputs stay in a 0600 file under a private temporary directory, and are removed on success or failure. It does not edit the player's key store or pass keys in process arguments. All six IVFC levels must verify, then the final image must match the 1.1.2 SHA-256. The hactool output uses `--sectionN`, because `--romfs` does not export this BKTR section.
+The pinned hactool commit `1d64a83450e025622f3468c28fc4164dad2c5ef6` merges the base and update Program NCAs. The build adds a small explicit title-key-file hook (`MNG_TITLE_KEYS`): temporary common tickets for both inputs stay in a 0600 file under a private temporary directory, and are removed on success or failure. It does not edit the player's key store or pass keys in process arguments. A bounded-input hook (`MNG_BASE_RANGE_OFFSET` / `MNG_BASE_RANGE_SIZE`) reads the original container's base NCA in place, preventing a second temporary 17 GB base copy; only the update NCA is extracted. All six IVFC levels must verify, then the final image must match the selected version's SHA-256. The hactool output uses `--sectionN`, because `--romfs` does not export this BKTR section.
 
-Runtime addresses, resource overlays, generated headers and modules are selected together. The app contains one executable and one selected data set; its launcher is compiled for that same version and `--check` verifies the bundle's version metadata. The normal window title reports the version. Saves keep their existing location, with an atomic full pre-upgrade backup before the first 1.1.2 launch.
+Runtime addresses, resource overlays, generated headers and modules are selected together. The app contains one executable and one selected data set; its launcher is compiled for that same version and `--check` verifies the bundle's version metadata. The normal window title reports the version. Saves keep their existing location, with an atomic full pre-upgrade backup before the first 1.1.2 or 1.4.3 launch.
 
 The exact 1.1.2 visibility-counter vertex shader needs a targeted lowering: each passing vertex atomically adds one instead of using a subgroup ballot/reduction. The original atomic side effect is retained, and the code SHA-256 limits this transformation to the analysed shader. This is not a general subgroup fallback. The native prebuilt translator is rebuilt from the checked-in source and has an updated SHA-256.
+
+The 1.4.3 compiler also emits packed RELR relocations, GNU-hash-only SDK modules, and additional x18/atomic instruction windows. Its runtime uses a separately guarded frame/output patch table, the new SDK's logical permissions and locks, and REV15 audio wire layouts with floating biquads. Its instance-based visibility counter has a separate exact-hash lowering; both old/new variants pass 96 native GPU cases. The new EASU shader is separately checked before admitting it to the manual MetalFX HDR path. Current validation and remaining gameplay tests are recorded in [the 1.4.3 port notes](v1.4.3-port.md).
 
 <a id="112-validation"></a>
 ## 1.1.2 validation

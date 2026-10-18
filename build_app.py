@@ -3,7 +3,7 @@
 
     python3 build_app.py <game.xci|game.nsp> -k <prod.keys> [-o "<output>.app"] [--work <folder>]
 
-Supported: TOTK base 1.0.0 (0100F2C0115B6000), XCI or NSP; optional --update with the separate cumulative 1.1.2 NSP.
+Supported: TOTK base 1.0.0 (0100F2C0115B6000), XCI or NSP; optional --update with a supported cumulative update.
 NSPs need common tickets (unless rights-free) and a separate shared-font source. No iPhone/iOS builds are supported.
 Nothing from the game is in this repository; everything is made from your files on your Mac. Key values are never printed.
 
@@ -30,9 +30,12 @@ REPO = Path(__file__).resolve().parent
 GAME = REPO / 'games/totk'
 EXPECTED = json.loads((GAME / 'assets/expected-v1.0.0.json').read_text())
 UPDATED = json.loads((GAME / 'assets/expected-v1.1.2.json').read_text())
+UPDATED143 = json.loads((GAME / 'assets/expected-v1.4.3.json').read_text())
+VERSIONS = {'v0': EXPECTED, 'v112': UPDATED, 'v143': UPDATED143}
 HACTOOL = ('https://github.com/SciresM/hactool.git', '1d64a83450e025622f3468c28fc4164dad2c5ef6')
 APP_NAME = 'Tears of the Kingdom'
 BUNDLE_ID = 'org.macnativegames.totk'
+LSREGISTER = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
 # Pinned upstream sources fetched at build time (repository, commit)
 SPIRV_CROSS = ('https://github.com/KhronosGroup/SPIRV-Cross.git', 'aa217aeb6c9f0ace7a0ab233b28807edf45eb165')
 # The spirv-cross program: the sources and flags of SPIRV-Cross's own CMake Release build of it, so no cmake is needed
@@ -113,7 +116,9 @@ def prerequisites(args):
 def git_fetch(url, commit, dst, log):
     if (dst / '.git').is_dir() and subprocess.run(['git', '-C', dst, 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip() == commit:
         return
-    if dst.exists():
+    if dst.is_symlink():
+        dst.unlink()   # replace only the cache link, never its external target
+    elif dst.exists():
         shutil.rmtree(dst)
     dst.mkdir(parents=True)
     run(['git', '-C', dst, 'init', '-q'], log)
@@ -135,11 +140,20 @@ def prepare_work(work, py, logs):
     extracted/, rewritten/, build/ and analysis/ next to themselves); its tooling/ points at the fetched sources."""
     tree = work / 'totk'
     tree.mkdir(parents=True, exist_ok=True)
-    run(['rsync', '-a', f'{GAME}/', f'{tree}/'], logs / 'sources.log')
+    # Match both directories AND symlinks to directories. A trailing slash
+    # allows rsync -a to copy a tooling symlink from a development checkout.
+    excludes = [f'--exclude=/{name}' for name in ('extracted', 'rewritten', 'build', 'analysis', '.venv', 'tooling', 'user-data')]
+    run(['rsync', '-a', *excludes, f'{GAME}/', f'{tree}/'], logs / 'sources.log')
+    tooling = tree / 'tooling'
+    # Migrate a work folder made by the old copier before writing child links:
+    # link(tooling/spirv-cross, ...) must not traverse into a shared checkout.
+    if tooling.is_symlink():
+        tooling.unlink()
+    tooling.mkdir(exist_ok=True)
     src = work / 'src'
     say('fetching the pinned SPIRV-Cross sources')
     git_fetch(*SPIRV_CROSS, src / 'SPIRV-Cross', logs / 'fetch-spirv-cross.log')
-    link(tree / 'tooling/spirv-cross', src / 'SPIRV-Cross')
+    link(tooling / 'spirv-cross', src / 'SPIRV-Cross')
     venv = work / 'venv'
     if not (venv / 'bin/python').exists():
         say('Python environment for the build tools')
@@ -155,11 +169,11 @@ def prepare_work(work, py, logs):
 def input_kind(game):
     with game.open('rb') as f:
         if f.read(4) == b'PFS0':
-            return 'nsp'
+            return 'nsz' if game.suffix.lower() == '.nsz' else 'nsp'
         f.seek(0x100)
         if f.read(4) == b'HEAD':
             return 'xci'
-    raise BuildError('expected an XCI or NSP (PFS0) game file; compressed NSZ/XCZ files are unsupported')
+    raise BuildError('expected an XCI or NSP (PFS0) game file, or a supported NSZ update')
 
 
 def source_matches(manifest, game):
@@ -170,6 +184,62 @@ def source_matches(manifest, game):
                 and data['source_mtime_ns'] == stat.st_mtime_ns)
     except (OSError, ValueError, KeyError):
         return False
+
+
+def prepare_update_container(tree, game, keys, logs):
+    """Expand and cache a compressed update using NSZ's hash-verified NCA conversion."""
+    if game.suffix.lower() != '.nsz':
+        return game
+    folder = tree / 'extracted/containers'
+    output = folder / f'{game.stem}.nsp'
+    manifest = folder / f'{game.stem}.json'
+    if source_matches(manifest, game) and output.is_file():
+        return output
+    folder.mkdir(parents=True, exist_ok=True)
+    if output.exists():
+        output.unlink()
+    if manifest.exists():
+        manifest.unlink()
+    say('1/4 code: decompressing the NSZ update and verifying its NCA hashes')
+    run([tree / '.venv/bin/nsz', '-D', '--keys', keys, '-o', folder, game],
+        logs / f'decompress-{game.stem}.log', cwd=tree)
+    generated = folder / f'{game.stem}.nsp'
+    if not generated.is_file():
+        raise BuildError(f'NSZ decompressor did not produce an NSP: {generated}')
+    if generated != output:
+        generated.replace(output)
+    stat = game.stat()
+    manifest.write_text(json.dumps(dict(source=str(game.resolve()), source_size=stat.st_size,
+                                        source_mtime_ns=stat.st_mtime_ns), indent=2) + '\n')
+    return output
+
+
+def identify_update(tree, game, keys, logs):
+    """Choose the runtime by verified module bytes, never by the package filename."""
+    source = prepare_update_container(tree, game, keys, logs)
+    for version in ('v112', 'v143'):
+        exefs = tree / f'extracted/{version}/exefs'
+        if source_matches(exefs.parent / 'extraction-manifest.json', source) and all(
+                (exefs / name).is_file() and sha256(exefs / name) == digest
+                for name, digest in VERSIONS[version]['exefs_sha256'].items()):
+            return version, source
+    staging = tree / 'extracted/update-detection'
+    if staging.exists(): shutil.rmtree(staging)
+    run([tree / '.venv/bin/python', 'scripts/extract_exefs.py', source, '--keys', keys,
+         '--update', '--output', staging / 'exefs'], logs / 'identify-update.log', cwd=tree)
+    actual = {path.name: sha256(path) for path in (staging / 'exefs').iterdir()}
+    version = next((version for version in ('v112', 'v143')
+                    if actual == VERSIONS[version]['exefs_sha256']), None)
+    if version is None:
+        raise BuildError('unsupported update module hashes; expected 1.1.2 or 1.4.3 (the file name is not used to choose a version)')
+    target = tree / f'extracted/{version}'
+    target.mkdir(parents=True, exist_ok=True)
+    if (target / 'exefs').exists(): shutil.rmtree(target / 'exefs')
+    (staging / 'exefs').rename(target / 'exefs')
+    (staging / 'extraction-manifest.json').replace(target / 'extraction-manifest.json')
+    staging.rmdir()
+    say(f'update identified by verified ExeFS hashes: {VERSIONS[version]["display_version"]}')
+    return version, source
 
 
 def font_report(folder):
@@ -207,7 +277,7 @@ def fonts_valid(folder):
 
 
 def step_code(tree, game, keys, env, logs, *, version="v0"):
-    expected = EXPECTED if version == "v0" else UPDATED
+    expected = VERSIONS[version]
     update_args = [] if version == "v0" else ["--update"]
     py = tree / '.venv/bin/python'
     exefs = tree / f'extracted/{version}/exefs'
@@ -217,11 +287,12 @@ def step_code(tree, game, keys, env, logs, *, version="v0"):
         say('1/4 code: extracting the ExeFS from the game file')
         if exefs.exists():
             shutil.rmtree(exefs)
-        run([py, 'scripts/extract_exefs.py', game, '--keys', keys, '--output', exefs, *update_args], logs / f'extract_exefs-{version}.log', cwd=tree)
-        for n, h in want.items():
-            if not (exefs / n).is_file():
-                raise BuildError(f'ExeFS {n} is missing; not the supported version')
-            check(f'ExeFS {n}', sha256(exefs / n), h)
+        source = prepare_update_container(tree, game, keys, logs) if update_args else game
+        run([py, 'scripts/extract_exefs.py', source, '--keys', keys, '--output', exefs, *update_args], logs / f'extract_exefs-{version}.log', cwd=tree)
+    for n, h in want.items():
+        if not (exefs / n).is_file():
+            raise BuildError(f'ExeFS {n} is missing; not the supported version')
+        check(f'ExeFS {n}', sha256(exefs / n), h)
     if not (tree / f'extracted/{version}/elf/main-inventory.json').exists():
         run([py, 'scripts/prepare_modules.py', exefs, '--output', tree / f'extracted/{version}/elf'], logs / 'prepare_modules.log', cwd=tree)
     out = tree / f'rewritten/{version}'
@@ -239,7 +310,7 @@ def step_code(tree, game, keys, env, logs, *, version="v0"):
     report = dict(format=1, status='pass', rom_version=version, scope=f'hash match with verified {expected["display_version"]} rewrite',
                   module_file_sha256={**{f'extracted/{version}/exefs/{n}': want[n] for n in ('main', 'sdk', 'subsdk0')},
                                       **{f'rewritten/{version}/{n}.patched.bin': expected['rewritten_sha256'][f'{n}.patched.bin'] for n in ('main', 'sdk', 'subsdk0')}})
-    report_path = tree / ('analysis/phase12-validation.json' if version == 'v0' else 'analysis/v112-port/phase12-validation.json')
+    report_path = tree / ('analysis/phase12-validation.json' if version == 'v0' else f'analysis/{version}-port/phase12-validation.json')
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2) + '\n')
 
@@ -301,6 +372,86 @@ def build_hactool(tree, logs):
         if text.count(old) != 1:
             raise BuildError('pinned hactool title-key hook changed')
         main.write_text(text.replace(old, new))
+    # Expose only the bounded Program NCA inside the original XCI/NSP as a
+    # seekable FILE. This avoids a second 17 GB base copy during BKTR merging.
+    text = main.read_text()
+    if '#define _DARWIN_C_SOURCE 1' not in text:
+        text = '#define _DARWIN_C_SOURCE 1\n' + text
+        main.write_text(text)
+    hook = 'static FILE *mng_open_base(const char *path)'
+    if hook not in text:
+        helper = r'''
+typedef struct { FILE *file; off_t start, size, position; } mng_base_range;
+static int mng_base_read(void *cookie, char *buffer, int count) {
+    mng_base_range *range = cookie;
+    off_t left = range->size - range->position;
+    if (left < count) count = (int)left;
+    if (!count) return 0;
+    if (fseeko(range->file, range->start + range->position, SEEK_SET)) return -1;
+    int got = (int)fread(buffer, 1, count, range->file);
+    if (!got && ferror(range->file)) return -1;
+    range->position += got;
+    return got;
+}
+static fpos_t mng_base_seek(void *cookie, fpos_t offset, int whence) {
+    mng_base_range *range = cookie;
+    off_t base = whence == SEEK_SET ? 0 : whence == SEEK_CUR ? range->position : whence == SEEK_END ? range->size : -1;
+    if (base < 0 || offset < -base || offset > range->size - base) return (fpos_t)-1;
+    return (fpos_t)(range->position = base + offset);
+}
+static int mng_base_close(void *cookie) {
+    mng_base_range *range = cookie;
+    int result = fclose(range->file); free(range); return result;
+}
+static FILE *mng_open_base(const char *path) {
+    const char *start = getenv("MNG_BASE_RANGE_OFFSET"), *size = getenv("MNG_BASE_RANGE_SIZE");
+    if (!start && !size) return fopen(path, "rb");
+    if (!start || !size) return NULL;
+    char *end1, *end2;
+    unsigned long long a = strtoull(start, &end1, 10), n = strtoull(size, &end2, 10);
+    if (!*start || !*size || *end1 || *end2 || a > INT64_MAX || !n || n > INT64_MAX - a) return NULL;
+    mng_base_range *range = calloc(1, sizeof(*range));
+    if (!range) return NULL;
+    range->file = fopen(path, "rb"); range->start = (off_t)a; range->size = (off_t)n;
+    if (!range->file) { free(range); return NULL; }
+    if (fseeko(range->file, 0, SEEK_END) || ftello(range->file) < (off_t)(a + n)) { mng_base_close(range); return NULL; }
+    FILE *view = funopen(range, mng_base_read, NULL, mng_base_seek, mng_base_close);
+    if (!view) mng_base_close(range);
+    return view;
+}
+'''
+        marker = 'int main(int argc, char **argv)'
+        if text.count(marker) != 1 or text.count('nca_ctx.tool_ctx->base_file = fopen(optarg, "rb")') != 2:
+            raise BuildError('pinned hactool bounded base-file hook changed')
+        text = text.replace(marker, helper + '\n' + marker)
+        text = text.replace('nca_ctx.tool_ctx->base_file = fopen(optarg, "rb")',
+                            'nca_ctx.tool_ctx->base_file = mng_open_base(optarg)')
+        main.write_text(text)
+    # Some newer cumulative update NCAs leave sector-aligned padding after the
+    # BKTR subsection table. The relocation and subsection tables still have to
+    # be contiguous and remain inside the section; IVFC verification below
+    # validates the reconstructed RomFS data. Keep hactool's strict default for
+    # the table boundary and permit only this unused trailing section space.
+    nca = source/'nca.c'
+    text = nca.read_text()
+    old = ('sb->relocation_header.offset + sb->relocation_header.size != sb->subsection_header.offset ||\n'
+           '            sb->subsection_header.offset + sb->subsection_header.size != ctx->size')
+    new = ('sb->relocation_header.offset + sb->relocation_header.size != sb->subsection_header.offset ||\n'
+           '            sb->subsection_header.offset + sb->subsection_header.size > ctx->size ||\n'
+           '            (ctx->size - (sb->subsection_header.offset + sb->subsection_header.size)) % 0x200 != 0')
+    if new not in text:
+        if text.count(old) != 1:
+            raise BuildError('pinned hactool BKTR layout check changed')
+        nca.write_text(text.replace(old, new))
+    text = nca.read_text()
+    old = 'if (ctx->bktr_ctx.subsection_block->total_size != sb->subsection_header.offset) {'
+    new = ('if (ctx->bktr_ctx.subsection_block->total_size != sb->subsection_header.offset &&\n'
+           '            (sb->relocation_header.size > sb->subsection_header.offset ||\n'
+           '             ctx->bktr_ctx.subsection_block->total_size != sb->subsection_header.offset - sb->relocation_header.size)) {')
+    if new not in text:
+        if text.count(old) != 1:
+            raise BuildError('pinned hactool BKTR total-size check changed')
+        nca.write_text(text.replace(old, new))
     config = source/'config.mk'
     if not config.exists():
         shutil.copy2(source/'config.mk.template', config)
@@ -308,30 +459,31 @@ def build_hactool(tree, logs):
     return source/'hactool'
 
 
-def step_update_data(tree, game, update, keys, logs):
-    folder = tree/'extracted/v112/romfs'
+def step_update_data(tree, game, update, keys, logs, *, version='v112'):
+    expected = VERSIONS[version]
+    folder = tree/f'extracted/{version}/romfs'
     index = folder/'index.json'
     valid = False
     if index.is_file() and (folder/'romfs.bin').is_file():
         try:
             report = json.loads(index.read_text())
-            valid = (report.get('status') == 'pass' and report['romfs_sha256'] == UPDATED['romfs']['sha256']
-                     and (folder/'romfs.bin').stat().st_size == UPDATED['romfs']['size'])
+            valid = (report.get('status') == 'pass' and report['romfs_sha256'] == expected['romfs']['sha256']
+                     and (folder/'romfs.bin').stat().st_size == expected['romfs']['size'])
         except (ValueError, KeyError):
             pass
     if not valid:
         hactool = build_hactool(tree, logs)
         if folder.exists():
             shutil.rmtree(folder)
-        say('2/4 update: merging base + 1.1.2 and verifying all IVFC levels')
+        say(f'2/4 update: merging base + {expected["display_version"]} and verifying all IVFC levels')
         run([tree/'.venv/bin/python', 'scripts/extract_update_romfs.py', game, update,
              '--keys', keys, '--hactool', hactool, '--output', folder], logs/'update-romfs.log', cwd=tree)
         report = json.loads(index.read_text())
-        check('1.1.2 RomFS', report['romfs_sha256'], UPDATED['romfs']['sha256'])
-        check('1.1.2 RomFS size', report['romfs_size'], UPDATED['romfs']['size'])
+        check(f'{expected["display_version"]} RomFS', report['romfs_sha256'], expected['romfs']['sha256'])
+        check(f'{expected["display_version"]} RomFS size', report['romfs_size'], expected['romfs']['size'])
     for script, arguments in [('make_romfs_patches.py', []), ('make_output_res_overlay.py', ['2560x1440'])]:
-        run([tree/'.venv/bin/python', 'scripts/'+script, *arguments, '--version', 'v112'],
-            logs/('v112-'+script+'.log'), cwd=tree)
+        run([tree/'.venv/bin/python', 'scripts/'+script, *arguments, '--version', version],
+            logs/(version+'-'+script+'.log'), cwd=tree)
 
 
 def build_spirv_cross(tree, logs):
@@ -363,8 +515,8 @@ def step_shaders(tree, logs):
 
 def step_binary(tree, game, keys, env, logs, *, version="v0"):
     say('4/4 app: building the game binary and the launcher')
-    run(['make', 'runtime' if version == 'v0' else 'runtime-v112'], logs / 'runtime.log', cwd=tree, env=env)
-    run(['xcrun', 'clang', '-fobjc-arc', '-O2', '-Wall', '-Ithird_party/d2r_gfx/gfx/nvn', '-Iruntime', *([] if version == 'v0' else ['-DTOTK_GAME_V112=1']), 'app/launcher.m', '-framework', 'AppKit',
+    run(['make', 'runtime' if version == 'v0' else f'runtime-{version}'], logs / 'runtime.log', cwd=tree, env=env)
+    run(['xcrun', 'clang', '-fobjc-arc', '-O2', '-Wall', '-Ithird_party/d2r_gfx/gfx/nvn', '-Iruntime', *([] if version == 'v0' else [f'-DTOTK_GAME_{version.upper()}=1']), 'app/launcher.m', '-framework', 'AppKit',
          '-o', 'build/app-launcher'], logs / 'launcher.log', cwd=tree, env=env)
     if not (tree / 'build/AppIcon.icns').exists():   # the game's own icon from its control data; optional
         try:
@@ -387,13 +539,20 @@ def copy_tree(src, dst):
             clone(p, dst / p.relative_to(src))
 
 
+def sign_app(app, logs):
+    # Seal the bundle, including Info.plist and game resources. Copied helper
+    # executables keep their existing signatures and byte identity.
+    run(['codesign', '--force', '--sign', '-', app], logs / 'sign-app.log')
+    run(['codesign', '--verify', '--deep', '--strict', app], logs / 'verify-app-signature.log')
+
+
 def step_app(tree, out, logs, *, version="v0"):
-    expected = EXPECTED if version == "v0" else UPDATED
+    expected = VERSIONS[version]
     tmp = out.with_name(out.name + '.partial')
     if tmp.exists():
         shutil.rmtree(tmp)
     res = tmp / 'Contents/Resources/totk'
-    clone(tree / ('build/totk-native' if version == 'v0' else 'build/totk-native-v112'), res/'build/totk-native')
+    clone(tree / ('build/totk-native' if version == 'v0' else f'build/totk-native-{version}'), res/'build/totk-native')
     for rel in ('build/pso_manifest.tsv', 'build/spirv-cross/spirv-cross',
                 f'rewritten/{version}/main.patched.bin', f'rewritten/{version}/sdk.patched.bin',
                 f'rewritten/{version}/subsdk0.patched.bin', f'extracted/{version}/romfs/romfs.bin', f'extracted/{version}/romfs/runtime-index.bin'):
@@ -414,16 +573,17 @@ def step_app(tree, out, logs, *, version="v0"):
     import plistlib
     (tmp / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
     (tmp / 'Contents/PkgInfo').write_bytes(b'APPL????')
+    sign_app(tmp, logs)  # A failed seal must not remove the previous working app.
     if out.exists():
         shutil.rmtree(out)
     tmp.rename(out)
 
 
 def parse_args(argv):
-    ap = argparse.ArgumentParser(description='Build one native macOS app from TOTK base 1.0.0 (XCI/NSP), optionally with the separate 1.1.2 update.',
+    ap = argparse.ArgumentParser(description='Build one native macOS app from TOTK base 1.0.0 (XCI/NSP), optionally with the separate 1.1.2 or 1.4.3 update.',
                                  epilog='example: python3 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys')
     ap.add_argument('game', type=Path, help='the game file (.xci or .nsp), base game 1.0.0')
-    ap.add_argument('--update', type=Path, help='separate cumulative 1.1.2 update NSP; outputs the same single app')
+    ap.add_argument('--update', type=Path, help='separate supported cumulative update NSP/NSZ; outputs the same single app')
     ap.add_argument('-k', '--keys', type=Path, required=True, help='your prod.keys')
     ap.add_argument('-o', '--out', type=Path, help=f'the app to write (default: "{APP_NAME}.app" next to the game file)')
     ap.add_argument('--work', type=Path, help='work folder (default: TOTK_build next to the game file)')
@@ -445,10 +605,12 @@ def main(argv):
     if out.suffix != '.app':
         raise BuildError(f'the output must end in .app: {out}')
     kind = input_kind(game)
+    if kind not in ('xci', 'nsp'):
+        raise BuildError('the base game must be an uncompressed XCI or NSP; NSZ is supported for update packages')
     update = args.update.expanduser().resolve() if args.update else None
-    if update and (not update.is_file() or input_kind(update) != 'nsp'):
-        raise BuildError('--update must be a separate 1.1.2 NSP')
-    version = 'v112' if update else 'v0'
+    if update and (not update.is_file() or input_kind(update) not in ('nsp', 'nsz')):
+        raise BuildError('--update must be a separate cumulative NSP or NSZ')
+    version = 'v0'
     firmware = args.firmware.expanduser().resolve() if args.firmware else None
     shared_fonts = args.shared_fonts.expanduser().resolve() if args.shared_fonts else None
     if firmware and not firmware.is_dir():
@@ -461,24 +623,29 @@ def main(argv):
     py = prerequisites(args)
     free = shutil.disk_usage(work.parent if work.parent.exists() else game.parent).free / 2**30
     say(f'work folder {work} ({free:.0f} GB free on its volume)')
-    if update and free < 60 and not (work / 'totk/extracted/v0/romfs/romfs.bin').exists():
-        raise BuildError('needs about 60 GB free for a fresh base + update build (35 GB extra with base data cached)')
+    if update and free < 40 and not (work / 'totk/extracted/v0/romfs/romfs.bin').exists():
+        raise BuildError('needs about 40 GB free for a fresh base + update build (19 GB extra with base data cached)')
     if free < 25 and not (work / 'totk/extracted/v0/romfs/romfs.bin').exists():
         raise BuildError('needs about 25 GB free for the work folder (the app itself is an APFS clone of it when on the same volume)')
     logs = work / 'logs'
     env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
     t0 = time.time()
     tree = prepare_work(work, py, logs)
+    if update:
+        version, update = identify_update(tree, update, keys, logs)
     step_code(tree, game, keys, env, logs)
     if update:
-        step_code(tree, update, keys, env, logs, version='v112')
+        step_code(tree, update, keys, env, logs, version=version)
     step_data(tree, game, keys, logs, firmware=firmware, shared_fonts=shared_fonts)
     if update:
-        step_update_data(tree, game, update, keys, logs)
+        step_update_data(tree, game, update, keys, logs, version=version)
     step_shaders(tree, logs)
     step_binary(tree, game, keys, env, logs, version=version)
     say(f'4/4 app: assembling {out}')
     step_app(tree, out, logs, version=version)
+    # Refresh an existing app's version, executable and signing identity before
+    # the next Finder launch; the desktop alias keeps pointing to this bundle.
+    run([LSREGISTER, '-f', out], logs / 'register-app.log')
     # macOS scans a new app the first time it runs (minutes for 16 GB, with nothing on screen): run it once here, in its
     # check-only mode, so the player's first start is immediate.
     say('4/4 app: macOS checks the new app once (a few minutes for the 16 GB bundle)')

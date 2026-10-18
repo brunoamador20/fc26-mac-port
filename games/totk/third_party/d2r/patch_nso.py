@@ -25,6 +25,7 @@ from itertools import combinations
 import lz4.block
 from capstone import *
 from call_window import BLR_X18, BLR_X30, prepare_call
+from relr import decode_relr
 
 src, outdir, NAME = sys.argv[1], sys.argv[2], sys.argv[3]
 d = open(src, 'rb').read()
@@ -459,13 +460,93 @@ def find_windows(insl):
     out = []
     for i, ins in enumerate(insl):
         if ins.mnemonic not in EXCL_LD: continue
-        j = i
-        while j < len(insl) and insl[j].mnemonic not in EXCL_ST: j += 1
-        if j >= len(insl) or j - i >= 16: continue
+        j = i + 1
+        while j < len(insl) and insl[j].mnemonic not in EXCL_ST + EXCL_LD: j += 1
+        if j >= len(insl) or j - i >= 16 or insl[j].mnemonic not in EXCL_ST: continue
         if j + 1 < len(insl) and insl[j + 1].mnemonic in ('cbz', 'cbnz'): j += 1
         seg = insl[i:j + 1]
         if any(has18(x) for x in seg): out.append(seg)
     return out
+
+def linked_windows(insl, windows):
+    """Move an out-of-line LDXR retry together with the STXR it re-enters.
+
+    The TSD/scratch prologue must precede LDXR. Entering a suffix trampoline
+    between LDXR and STXR would insert stores into the reservation interval
+    and can prevent the retry from making progress on real hardware.
+    """
+    groups = {}
+    edges = set()
+    original = list(windows)
+    for j, ins in enumerate(insl):
+        if not (ins.mnemonic in ('cbz', 'cbnz', 'tbz', 'tbnz') or ins.mnemonic.startswith('b.')):
+            continue
+        target = ins.operands[-1].imm
+        owner = next((seg for seg in original if seg[0].address < target <= seg[-1].address), None)
+        if owner is None or owner[0].address <= ins.address <= owner[-1].address:
+            continue
+        k = j
+        while k >= max(0, j - 15) and insl[k].mnemonic not in EXCL_LD:
+            k -= 1
+        assert k >= max(0, j - 15), f'exclusive alternate entry lacks LDXR: {ins.address:x}'
+        retry = insl[k:j + 1]
+        assert all(x.mnemonic not in EXCL_ST and not x.mnemonic.startswith(('st', 'bl'))
+                   and x.mnemonic not in ('b', 'br', 'ret')
+                   and not x.mnemonic.startswith('b.') for x in retry[:-1]), f'unsafe exclusive retry: {ins.address:x}'
+        assert all(not any(seg[0].address <= x.address <= seg[-1].address for seg in original)
+                   for x in retry), f'overlapping exclusive retry: {ins.address:x}'
+        group = groups.setdefault(owner[0].address, [owner])
+        if not any(seg[0].address == retry[0].address for seg in group):
+            group.append(retry); windows.append(retry)
+        edges.add((ins.address, target))
+    return list(groups.values()), edges
+
+def site_window_group(segments):
+    used = set()
+    for seg in segments:
+        for ins in seg: used |= regs_in(ins)
+    S, T = pick(used)
+    entries = {}; entry_branches = []
+    for seg in segments:
+        entries[seg[0].address] = here()
+        emit(STP(S, T, 31, -16)); emit(MRS_TPIDRRO(T)); emit_slot_addr(T, S, 'K18'); emit(LDRX(S, T))
+        entry_branches.append((len(patch), seg[0].address)); emit(NOP)
+    copied = {}; cursor = here()
+    for seg in segments:
+        for ins in seg: copied[ins.address] = cursor; cursor += 4
+        cursor += 4  # explicit fallthrough from each fragment
+    exits = []
+    for seg in segments:
+        exits.append(seg[-1].address + 4)
+        for ins in seg:
+            if ins.mnemonic in ('b', 'cbz', 'cbnz', 'tbz', 'tbnz') or ins.mnemonic.startswith('b.'):
+                target = ins.operands[-1].imm
+                if target not in copied and target not in exits: exits.append(target)
+    exits = list(dict.fromkeys(exits))
+    exit_addresses = {target: cursor + 16 * i for i, target in enumerate(exits)}
+    for offset, target in entry_branches:
+        struct.pack_into('<I', patch, offset, B(PATCH_OFF + offset, copied[target]))
+    for seg in segments:
+        for ins in seg:
+            assert here() == copied[ins.address]
+            word = subst(ins, S) if has18(ins) else struct.unpack('<I', ins.bytes)[0]
+            mnemonic = ins.mnemonic
+            if mnemonic in ('b', 'cbz', 'cbnz', 'tbz', 'tbnz') or mnemonic.startswith('b.'):
+                target = ins.operands[-1].imm
+                destination = copied.get(target, exit_addresses.get(target))
+                delta = (destination - here()) >> 2
+                if mnemonic == 'b': word = B(here(), destination)
+                elif mnemonic in ('tbz', 'tbnz'): word = (word & 0xFFF8001F) | ((delta & 0x3FFF) << 5)
+                else: word = (word & 0xFF00001F) | ((delta & 0x7FFFF) << 5)
+                assert dis(word, here()).operands[-1].imm == destination
+            else:
+                assert mnemonic not in ('adr', 'adrp', 'bl', 'br', 'blr', 'ret') and not (mnemonic == 'ldr' and '[' not in ins.op_str)
+            emit(word)
+        emit(B(here(), copied.get(seg[-1].address + 4, exit_addresses[seg[-1].address + 4])))
+    for target in exits:
+        assert here() == exit_addresses[target]
+        emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(B(here(), target)); emit(NOP)
+    return entries
 
 def site_window(seg):
     used = set()
@@ -543,11 +624,23 @@ import bisect
 def func_of(a):
     i = bisect.bisect_right(starts, a) - 1
     return (starts[i], starts[i + 1] if i + 1 < len(starts) else TEXT_END) if i >= 0 else (a, a + 4)
-done = set(); windows = []; jumps = {}; calls = {}
+done = set(); windows = []; window_groups = []; jumps = {}; calls = {}
+# Signed 32-bit offset tables added in TOTK 1.4.3. Validate both the dispatch
+# instructions and every table entry before using a bounded landing-pad span.
+# Each tuple is (ADR base, table address, expected offsets, dispatch bytes).
+SIGNED_TABLES = {'277178b7dba1b6d4949a84778d4abc58': {
+    0x393bb0: (0x393ba0, 0x2d8626c, (764,260,248,20,80,1028), '12000010217aa0b85202018b2001271e40021fd6'),
+    0x596d30: (0x596d20, 0x2d89154, (536,544,20,552,560,568,576,-3136,-3304), '12000010207ab0b85202008bfe3740f940021fd6'),
+    0x598ef4: (0x598ee4, 0x2d89038, (680,688,20,696,704,712,720,-5688,-2640), '12000010207ab0b85202008bdef747f940021fd6'),
+    0x5f2a9c: (0x5f2a90, 0x2d892e0, (884,892,16,900,-6516), 'f0030f2a12000010207ab0b85202008b40021fd6'),
+    0x6397d8: (0x6397cc, 0x2d88e7c, (1376,1384,16,1392,1400,1408,-7264), 'fb0301aa12000010207ab0b85202008b40021fd6'),
+}}
 funcs = sorted({func_of(a) for a, (k, _) in kinds.items() if k == 'x18'})
 for fa, fb in funcs:
     insl = list(md.disasm(bytes(IMG[fa:fb]), fa))
     ws = find_windows(insl)
+    groups, linked_edges = linked_windows(insl, ws)
+    window_groups.extend(groups)
     for wseg in ws:
         windows.append(wseg); done |= {x.address for x in wseg}
     for j, ins in enumerate(insl):
@@ -564,6 +657,13 @@ for fa, fb in funcs:
                         if q.mnemonic in ('ldrh', 'ldrsh') and num(q.reg_name(q.operands[0].reg)) == idx: width = 65536
                         if width: break
                     break
+            if not width and ins.address in SIGNED_TABLES.get(BUILD_ID, {}):
+                adrbase, table, offsets, dispatch = SIGNED_TABLES[BUILD_ID][ins.address]
+                assert IMG[ins.address - 16:ins.address + 4].hex() == dispatch, f'signed-table dispatch {ins.address:x}'
+                assert struct.unpack_from('<' + 'i' * len(offsets), IMG, table) == offsets, f'signed-table entries {ins.address:x}'
+                targets = [adrbase + offset for offset in offsets]
+                assert all(0 <= target < TEXT_END and target % 4 == 0 for target in targets)
+                base, width = min(targets), (max(targets) - min(targets)) // 4 + 1
             assert base and width, f'jump table {ins.address:x}'
             jumps[ins.address] = (base, width)
         if ins.mnemonic == 'blr' and ins.op_str == 'x18':
@@ -577,7 +677,7 @@ for fa, fb in funcs:
     for x in insl:
         if x.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or x.mnemonic.startswith('b.'):
             t = x.operands[-1].imm
-            assert not (t in inwin and t not in heads), f'branch into window {x.address:x}'
+            assert not (t in inwin and t not in heads and (x.address, t) not in linked_edges), f'branch into window {x.address:x}'
 
 # A call must always execute its preparation word; reject known alternate entry.
 if calls:
@@ -603,6 +703,8 @@ if calls:
         if tag == 0: break
         tags[tag] = value
     count = struct.unpack_from('<I', IMG, tags[4] + 4)[0]
+    for where, addend in decode_relr(IMG, tags, DATA_OFF, KEY_PAGE_OFF):
+        assert addend not in call_targets, f'RELR pointer enters unprepared call: {where:x}'
     for i in range(count):
         _, _, _, section, value, _ = struct.unpack_from('<IBBHQQ', IMG, tags[6] + 24 * i)
         assert not section or value not in call_targets, 'dynamic symbol enters unprepared call'
@@ -613,7 +715,12 @@ if calls:
                 assert info & 0xFFFFFFFF != 1027 or addend not in call_targets, 'relative pointer enters unprepared call'
 
 def put_branch(at, to): struct.pack_into('<I', IMG, at, B(at, to))
+grouped_heads = set()
+for group in window_groups:
+    for head, entry in site_window_group(group).items():
+        grouped_heads.add(head); put_branch(head, entry); stat('window')
 for wseg in windows:
+    if wseg[0].address in grouped_heads: continue
     st, lo, hi = site_window(wseg); stat('window'); put_branch(lo, st)
 for prefix, (call, word) in sorted(calls.items()):
     st = here()

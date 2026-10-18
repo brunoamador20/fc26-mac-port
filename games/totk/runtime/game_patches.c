@@ -305,8 +305,8 @@ static void patch_output_res(Module *m) {
     fprintf(stderr, "[totk] output resolution patch: swapchain %ux%u (main+0xe996ac), the game's output %s from the data page (main+0xc630a4); texture heap and Graphics +%llu KiB (HeapDef overlay)\n",
             w, h, output_full_at_start ? "at that size" : "1920x1080 for now", (unsigned long long)(runtime_output_res_extra_bytes() >> 10));
 }
-/* Key 3 (runtime/input.c, 2026-10-17 user request: "3 switches between true 2K and the 2K output"): the game's output goes
-   between the largest size and 1920x1080; the renderer lays out again at the next frame (see patch_output_res). */
+/* Two-state output-size helper retained for internal use: switch between the largest size and 1920x1080. The renderer
+   lays out again at the next frame (see patch_output_res). */
 int runtime_output_res_toggle(void) {
     if (!output_page) { fprintf(stderr, "[totk] key 3: switching the output size needs a 2K-capable start (TOTK_OUTPUT_RES auto with the HeapDef overlay, or <w>x<h>)\n"); return 0; }
     _Atomic uint64_t *size = (_Atomic uint64_t *)(void *)(output_page + DP_OUTPUT_SIZE);
@@ -322,6 +322,28 @@ int runtime_output_res_toggle(void) {
     fprintf(stderr, "[totk] key 3: the game's output %ux%u (%s)%s%s\n", full ? output_w : 1920u, full ? output_h : 1080u,
             full ? "true 2K: the canvas and the UI at that size" : "the 2K output: 1080p canvas, MetalFX scales it at present",
             renderer ? " from the next layout" : "; the game has not laid out its displays yet, it takes this size when it does", before);
+    return 1;
+}
+/* Key 3: cycle the active 2K presentation path. The normal startup is 1080p game output with the MetalFX output scaler
+   enabled; native 2K switches the game's canvas/UI to 2560x1440; off returns to 1080p and disables the output scaler. */
+int runtime_output_mode_cycle(void) {
+    if (!output_page) {
+        fprintf(stderr, "[totk] key 3: 2K mode cycling needs a 2K-capable start (TOTK_OUTPUT_RES=auto with the HeapDef overlay, or <w>x<h>)\n");
+        return 0;
+    }
+    _Atomic uint64_t *size = (_Atomic uint64_t *)(void *)(output_page + DP_OUTPUT_SIZE);
+    int full = atomic_load(size) == pack_size(output_w, output_h);
+    extern int mfxup_output_enabled(void);
+    extern void dm_gfx_set_flag(const char *name, int value);
+    int next_full, next_mfx;
+    const char *name;
+    if (full) { next_full = 0; next_mfx = 0; name = "关闭 2K"; }
+    else if (mfxup_output_enabled()) { next_full = 1; next_mfx = 0; name = "原生 2K"; }
+    else { next_full = 0; next_mfx = 1; name = "MetalFX 2K"; }
+    if (full != next_full) runtime_output_res_toggle();
+    dm_gfx_set_flag("mfx_output", next_mfx);
+    dm_gfx_set_flag("mfx_upscale", next_mfx);
+    fprintf(stderr, "[totk] key 3: %s\n", name);
     return 1;
 }
 

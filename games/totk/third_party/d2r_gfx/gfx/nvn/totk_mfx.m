@@ -53,6 +53,34 @@ static struct {
     double last_prepare_s, dt;      // time of the previous game frame's prepare; this pair's interval (MetalFX deltaTime)
 } g;
 
+/* Reconstructing identical MetalFX interpolators repeatedly grows device
+ * allocations on the tested Mac, even after the old Objective-C object dies.
+ * Keep a bounded set of exact configurations without eviction/rebuild churn.
+ * In-flight frames retain their own resource payload independently of the
+ * cache. Once full, new configurations use the previous uncached path. This does not establish or
+ * fix every source of long-session memory growth. Diagnostic opt-out below. */
+#define MFX_FI_CACHE 4
+static id<MTL4FXFrameInterpolator> g_fi_cache[MFX_FI_CACHE];
+static unsigned g_fi_cache_count;
+static int fi_cache_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("TOTK_MFX_FI_CACHE"); on = !e || strcmp(e, "0"); }
+    return on;
+}
+static id<MTL4FXFrameInterpolator> fi_cached(NSUInteger iw, NSUInteger ih) {
+    if (!fi_cache_on()) return nil;
+    for (unsigned i = 0; i < g_fi_cache_count; i++) {
+        id<MTL4FXFrameInterpolator> fi = g_fi_cache[i];
+        if (fi.inputWidth == iw && fi.inputHeight == ih && fi.outputWidth == g.out_w &&
+            fi.outputHeight == g.out_h && fi.colorTextureFormat == g.scene_fmt) {
+            MLOG("reuse cached interpolator %u: %lux%lu -> %lux%lu; reset history", i,
+                 (unsigned long)iw, (unsigned long)ih, (unsigned long)g.out_w, (unsigned long)g.out_h);
+            return fi;
+        }
+    }
+    return nil;
+}
+
 /* g_on: the mode of this game frame (read by the replay, the present path and the pacing in hle_nvn.c); g_req: what the
    user asked for (key 2 / flag mfx_interp), taken over at the next present. */
 static _Atomic int g_on, g_req;
@@ -132,15 +160,20 @@ void mfx_note_camera(const float *c, int n) {
 
 static void ensure_fi(NSUInteger iw, NSUInteger ih) {
     if (g.fi && g.in_w == iw && g.in_h == ih && g.fi.colorTextureFormat == g.scene_fmt && g.fi.outputWidth == g.out_w && g.fi.outputHeight == g.out_h) return;
-    MTLFXFrameInterpolatorDescriptor *d = [MTLFXFrameInterpolatorDescriptor new];
-    d.colorTextureFormat = g.scene_fmt; d.outputTextureFormat = MTLPixelFormatRGBA8Unorm_sRGB;
-    d.depthTextureFormat = MTLPixelFormatDepth32Float; d.motionTextureFormat = MTLPixelFormatRG16Float; d.uiTextureFormat = MTLPixelFormatRGBA16Float;
-    d.inputWidth = iw; d.inputHeight = ih; d.outputWidth = g.out_w; d.outputHeight = g.out_h;
-    NSError *e = nil; id<MTL4Compiler> comp = [g.dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&e];
-    if (!comp) MDIE("MTL4 compiler: %s", e.localizedDescription.UTF8String);
-    if (![MTLFXFrameInterpolatorDescriptor supportsMetal4FX:g.dev]) MDIE("this GPU has no Metal 4 MetalFX frame interpolation");
-    g.fi = [d newFrameInterpolatorWithDevice:g.dev compiler:comp];
-    if (!g.fi) MDIE("frame interpolator %lux%lu -> %lux%lu not created", (unsigned long)iw, (unsigned long)ih, (unsigned long)g.out_w, (unsigned long)g.out_h);
+    NSError *e = nil;
+    g.fi = fi_cached(iw, ih);
+    if (!g.fi) {
+        MTLFXFrameInterpolatorDescriptor *d = [MTLFXFrameInterpolatorDescriptor new];
+        d.colorTextureFormat = g.scene_fmt; d.outputTextureFormat = MTLPixelFormatRGBA8Unorm_sRGB;
+        d.depthTextureFormat = MTLPixelFormatDepth32Float; d.motionTextureFormat = MTLPixelFormatRG16Float; d.uiTextureFormat = MTLPixelFormatRGBA16Float;
+        d.inputWidth = iw; d.inputHeight = ih; d.outputWidth = g.out_w; d.outputHeight = g.out_h;
+        id<MTL4Compiler> comp = [g.dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&e];
+        if (!comp) MDIE("MTL4 compiler: %s", e.localizedDescription.UTF8String);
+        if (![MTLFXFrameInterpolatorDescriptor supportsMetal4FX:g.dev]) MDIE("this GPU has no Metal 4 MetalFX frame interpolation");
+        g.fi = [d newFrameInterpolatorWithDevice:g.dev compiler:comp];
+        if (!g.fi) MDIE("frame interpolator %lux%lu -> %lux%lu not created", (unsigned long)iw, (unsigned long)ih, (unsigned long)g.out_w, (unsigned long)g.out_h);
+        if (fi_cache_on() && g_fi_cache_count < MFX_FI_CACHE) g_fi_cache[g_fi_cache_count++] = g.fi;
+    }
     drop(&g.mv); g.mv = mk(MTLPixelFormatRG16Float, iw, ih, MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead);
     if (!g.mv_ps) {
         static const char *src =
@@ -231,7 +264,7 @@ int mfx_frame_prepare(double frame_s) {
     return s;
 }
 void mfx_frame_abort(void) { g.enc_depth = nil; g.prev_ok = g.hist_ok = 0; g.skip_busy++; }
-void mfx_frame_encode(id<MTL4CommandBuffer> cb, int s, id<MTL4CounterHeap> heap, NSUInteger stamp) {
+NSArray *mfx_frame_encode(id<MTL4CommandBuffer> cb, int s, id<MTL4CounterHeap> heap, NSUInteger stamp) {
     id<MTLTexture> depth = g.enc_depth; g.enc_depth = nil; g.last_depth = depth; g.last_slot = s;
     [g.mv_args[s] setTexture:depth.gpuResourceID atIndex:0]; [g.mv_args[s] setTexture:g.mv.gpuResourceID atIndex:1]; [g.mv_args[s] setAddress:g.mv_par[s].gpuAddress atIndex:0];
     id<MTL4ComputeCommandEncoder> e = [cb computeCommandEncoder];
@@ -249,9 +282,17 @@ void mfx_frame_encode(id<MTL4CommandBuffer> cb, int s, id<MTL4CounterHeap> heap,
     fi.fieldOfView = (float)(g.cam[70] * 180.0 / M_PI); fi.aspectRatio = (float)g.cam[62]; fi.depthReversed = NO;
     fi.shouldResetHistory = !g.hist_ok;
     [fi encodeToCommandBuffer:cb];
+    // Metal 4 work needs explicit resource lifetime. Hold this exact frame's
+    // bindings through completion, while the configuration cache retains only
+    // the interpolator, not old scene/pool textures between configurations.
+    NSArray *resources = @[fi, fi.colorTexture, fi.prevColorTexture, depth,
+                           g.mv, g.ui, g.out[s], g.mv_par[s]];
+    fi.colorTexture = nil; fi.prevColorTexture = nil; fi.depthTexture = nil;
+    fi.motionTexture = nil; fi.uiTexture = nil; fi.outputTexture = nil;
     if (heap) [cb writeTimestampIntoHeap:heap atIndex:stamp + 1];
     g.mv_prev_yaw = atan2(g.prev_cam[2], g.prev_cam[0]) * 180 / M_PI;   // yaw of the previous frame, for mfx_mv_log
     memcpy(g.prev_cam, g.cam, sizeof g.cam); g.cur ^= 1; g.hist_ok = 1; g.made++;
+    return resources;
 }
 /* TOTK_MFX_MVLOG=<every n frames>: read the motion texture back after the interpolation and log its median and the
    camera step (diagnostic; waits for the GPU). */

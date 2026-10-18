@@ -32,14 +32,14 @@ def gate(command, output, environment):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--version', choices=('v0','v112'), default='v0')
+    parser.add_argument('--version', choices=('v0','v112','v143'), default='v0')
     parser.add_argument('--collect-existing', action='store_true')
     parser.add_argument('--jobs', type=int, default=2)
     args = parser.parse_args()
     if args.jobs < 1:
         parser.error('--jobs must be positive')
     version = args.version
-    analysis = ROOT / ('analysis' if version == 'v0' else 'analysis/v112-port')
+    analysis = ROOT / ('analysis' if version == 'v0' else f'analysis/{version}-port')
     analysis.mkdir(parents=True, exist_ok=True)
     vendor = ROOT / 'third_party/d2r'
     outputs = ROOT / f'rewritten/{version}'
@@ -83,21 +83,31 @@ def main():
     atomic_json = analysis / 'exclusive-window-tests.json'
     if not args.collect_existing:
         gate([sys.executable, str(ROOT / 'scripts/test_call_window.py')], call_log, environment)
-        gate([sys.executable, str(ROOT / 'scripts/test_exclusive_windows.py'), str(outputs), str(inputs[0]), "--version", version], atomic_json, environment)
+        if version == 'v143':
+            gate([sys.executable, str(ROOT / 'scripts/test_v143_atomics.py')], atomic_json, environment)
+        else:
+            gate([sys.executable, str(ROOT / 'scripts/test_exclusive_windows.py'), str(outputs), str(inputs[0]), "--version", version], atomic_json, environment)
         gate(['make', 'probe-call'], analysis / 'native-call-build.log', environment)
     if not re.search(r'^OK$', call_log.read_text(), re.M):
         raise RuntimeError('Prepared-call differential tests did not pass')
     atomic = json.loads(atomic_json.read_text())
     native = json.loads((ROOT / 'analysis/native-call-probe.json').read_text())
-    if atomic['status'] != 'pass' or atomic['wrong_exit_negative_controls_detected'] != 2:
+    if version == 'v143':
+        if (atomic['status'] != 'pass' or atomic['negative_controls_detected'] != 1
+                or sum(case['increments'] for case in atomic['cases']) != 320000
+                or any(case['status'] != 'pass' or case['threads'] != 8 for case in atomic['cases'])
+                or atomic['source_sha256'] != digest(ROOT / 'scripts/native_exclusive_probe.c')):
+            raise RuntimeError('Native 1.4.3 atomic-window checks did not pass')
+    elif atomic['status'] != 'pass' or atomic['wrong_exit_negative_controls_detected'] != 2:
         raise RuntimeError('Atomic-window regression tests did not pass')
     if native['status'] != 'pass' or native['completed_calls'] != 20000 or native['errors'] != 0:
         raise RuntimeError('Native prepared-call hardware test did not pass')
     for path in inputs + binaries:
         if fingerprints[str(path.relative_to(ROOT))] != digest(path):
             raise RuntimeError(f'Input/output changed during verification: {path}')
-    source_files = [vendor / name for name in ['patch_nso.py', 'call_window.py', 'structck.py', 'equiv.py', 'nsoimg.py']]
+    source_files = [vendor / name for name in ['patch_nso.py', 'call_window.py', 'structck.py', 'equiv.py', 'nsoimg.py', 'relr.py']]
     source_files += [ROOT / 'scripts' / name for name in ['test_call_window.py', 'test_exclusive_windows.py', 'native_call_probe.c', 'emit_native_call_fixture.py', 'verify_rewrites.py']]
+    if version == 'v143': source_files += [ROOT / 'scripts' / name for name in ['test_v143_atomics.py', 'native_exclusive_probe.c']]
     summary = {
         'format': 'totk-native-phase12-validation-v1', 'status': 'pass',
         'recorded_at': datetime.now(timezone.utc).isoformat(), 'rom_version': version,
@@ -106,7 +116,7 @@ def main():
         'extraction_manifest_sha256': digest(extraction_manifest),
         'native_fixture_sha256': digest(ROOT / 'build/native-call-fixture.bin'),
         'native_probe_executable_sha256': digest(ROOT / 'build/native_call_probe'),
-        'call_window': {'differential_cases': 408, 'negative_controls': 4, 'native': native},
+        'call_window': {'differential_cases': 536, 'negative_controls': 4, 'native': native},
         'exclusive_windows': atomic,
         'totals': {key: sum(m[key] for m in modules.values()) for key in
                    ['structural_sites', 'semantic_sites', 'trials', 'effective_trials', 'both_fault_trials', 'detected_negative_controls']},

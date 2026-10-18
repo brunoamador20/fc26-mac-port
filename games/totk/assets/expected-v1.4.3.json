@@ -1,0 +1,30 @@
+{
+  "_comment": "Verified 1.4.3 source/rewrite bytes and cumulative RomFS. Runtime validation is recorded separately.",
+  "title_id": "0100F2C0115B6000",
+  "version": 720896,
+  "display_version": "1.4.3",
+  "exefs_sha256": {
+    "main": "e84a90d551fed0824b4b74933b9c6d043c458521363a7cea58b2faca1822dc9e",
+    "main.npdm": "7e0158af046ccaacc5c00ea6236520718213ad668d647925a49afadeda634457",
+    "rtld": "49308064fddb52dfe9140c11a32cc6333a0917546c871967d013dcb076402817",
+    "sdk": "1d187f29784cd0af46e9e123fc2a62c77b3b07c5a39c8633d90d6c80de64e4ad",
+    "subsdk0": "767c35bcd7d23e78f9063c69b638290b8b83f91e839beb10799e6576960179b1"
+  },
+  "rewritten_sha256": {
+    "main.patched.bin": "4d69b6437a704f9271dc88ba5be9547f8215ecf8dfe6100f986982c739318b1b",
+    "sdk.patched.bin": "4d625d9baaebe60d38a00de1b8023fde7fb856d460a08433809670179483ca24",
+    "subsdk0.patched.bin": "0322958960fb205a8e108476f9e6b344e90cd5526f3e2c83503b3261ff2518e2"
+  },
+  "romfs": {
+    "size": 17052625232,
+    "sha256": "797e66f2efa5b99bdafe4af2d6e778a5ef2f2ca5dc3b45136dd601daea419e9b"
+  },
+  "shared_fonts_sha256": {
+    "standard": "823913c9d80807979381e327846466f561f31ba1842cea8f7fedc5ad7d45d2ad",
+    "chinese-simplified": "7e95d45f43c6f35ee0c7bd8ea446675d8ab0390e18fd2844abcac11d2bff7389",
+    "chinese-simplified-extension": "0f90d45b741e9da7700c416eb2b51996b458c3e4fb3c3291740b758c298e7a25",
+    "chinese-traditional": "9d59b74e59a2dc92296d6bebad7cce791ba94688bd436304aaae174a58bd7457",
+    "korean": "5a4e694782ead5ddcbc0a226aab24362e2d641ca33bac7bdf8cda36ff157c9e8",
+    "nintendo-extension": "f9f62e025c9bbe0e9ae25a54ba5011202b1e3a3f3c33b2d876c40aff6174af68"
+  }
+}

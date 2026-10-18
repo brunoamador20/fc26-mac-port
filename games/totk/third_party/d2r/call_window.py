@@ -1,6 +1,6 @@
 """BLR x18 preparation without changing callee entry registers or return PC.
 
-The preceding, movable stack store is replayed first. A borrowed register is
+The preceding, movable stack access is replayed first. A borrowed register is
 saved/restored in the Apple red zone, then x30 receives virtual x18. Returning
 to BLR x30 at the ORIGINAL call address preserves its architectural link value.
 Precondition: no alternate entry into the second word of this two-word window.
@@ -24,11 +24,12 @@ def movable_store(word, address):
     decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
     decoder.detail = True
     ins = next(decoder.disasm(struct.pack('<I', word), address), None)
-    if ins is None or ins.mnemonic not in ('str', 'stp', 'stur') or ins.writeback:
-        raise ValueError(f'Call prefix must be a non-writeback stack store: {address:#x}')
+    if ins is None or ins.mnemonic not in ('str', 'stp', 'stur', 'ldr', 'ldp', 'ldur') or ins.writeback:
+        raise ValueError(f'Call prefix must be a non-writeback stack access: {address:#x}')
     mem = ins.operands[-1].mem
-    if ins.reg_name(mem.base) != 'sp' or mem.index or mem.disp < 0:
-        raise ValueError(f'Call prefix must store above SP: {address:#x}')
+    base = ins.reg_name(mem.base)
+    if base not in ('sp', 'fp') or mem.index or (base == 'sp' and mem.disp < 0):
+        raise ValueError(f'Call prefix must access the SP/FP stack frame: {address:#x}')
     if re.search(r'\b[xw]18\b', ins.op_str):
         raise ValueError(f'Call prefix also uses virtual x18: {address:#x}')
 

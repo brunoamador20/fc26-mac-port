@@ -89,7 +89,7 @@ static void chunk_proofs(RomfsProof *out) {
 }
 static void verify_chunks(const char *dir) {
  RomfsProof want[MAX_CHUNKS],saved[MAX_CHUNKS],after[MAX_CHUNKS];size_t bytes=nchunks*sizeof(RomfsProof);chunk_proofs(want);
- const char *pdir=getenv("TOTK_ROMFS_PROOF_DIR");if(pdir)dir=pdir;   /* iOS: directories devicectl creates belong to root */
+ const char *pdir=getenv("TOTK_ROMFS_PROOF_DIR");if(pdir&&*pdir)dir=pdir;   /* iOS: directories devicectl creates belong to root */
  char path[4096],tmp[4096];need(snprintf(path,sizeof(path),"%s/.romfs-verified-parts-v1",dir)<(int)sizeof(path),"RomFS proof path");
  int force=getenv("TOTK_ROMFS_VERIFY")&&!strcmp(getenv("TOTK_ROMFS_VERIFY"),"full");
  int proof_fd=open(path,O_RDONLY|O_NOFOLLOW);
@@ -115,6 +115,7 @@ static void open_chunks(const char *dir) {
 }
 static void verify_image(int fd,const char *dir) {
  if(nchunks){verify_chunks(dir);return;}
+ const char *pdir=getenv("TOTK_ROMFS_PROOF_DIR");if(pdir&&*pdir)dir=pdir;
  struct stat before,after;need(fstat(fd,&before)==0&&S_ISREG(before.st_mode),"RomFS image stat");
  RomfsProof want=proof_for(&before),saved;
  char path[4096],tmp[4096];need(snprintf(path,sizeof(path),"%s/.romfs-verified-v1",dir)<(int)sizeof(path),"RomFS proof path");

@@ -1,9 +1,17 @@
-/* Version-specific main offsets. v1.1.2 sites matched against original NSO code;
-   instruction guards remain mandatory. SDK/subsdk0 are byte-identical across these versions. */
+/* Version-specific main offsets matched against original NSO code.
+   Instruction guards remain mandatory; 1.4.3 also has new SDK modules. */
 #pragma once
 #define GAME_ADDR_JOIN(x) GAME_ADDR_##x
 #define GAME_ADDR(x) GAME_ADDR_JOIN(x)
-#ifdef TOTK_GAME_V112
+#if defined(TOTK_GAME_V143)
+#define TOTK_GAME_VERSION "1.4.3"
+#define TOTK_GAME_DIR "v143"
+#define GAME_ADDR_0x15ecb0c 0x1bd01c4
+#define GAME_ADDR_0x8f6cbc 0x2db2ec
+#define GAME_ADDR_0xe995c4 0xbdb48c
+#define GAME_ADDR_0x2aa4fa0 0x2bb79f0
+#define GAME_ADDR_0x453f648 0x398b348
+#elif defined(TOTK_GAME_V112)
 #define TOTK_GAME_VERSION "1.1.2"
 #define TOTK_GAME_DIR "v112"
 #define GAME_ACTOR_NAME 0x218

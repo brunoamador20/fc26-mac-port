@@ -69,6 +69,40 @@ class Updates(unittest.TestCase):
             build_app.step_code(tree, self.update, self.keys, os.environ, self.root/'logs', version='v112')
         self.assertFalse((tree/'rewritten').exists())
 
+    def test_nsz_conversion_is_cached_by_source_identity(self):
+        tree = self.root/'tree'; tree.mkdir()
+        source = self.root/'update.nsz'; source.write_bytes(b'NSZ test input')
+        logs = self.root/'logs'
+        calls = []
+        def fake_run(cmd, log, cwd=None, env=None, quiet=True):
+            calls.append(cmd)
+            out = Path(cmd[cmd.index('-o') + 1]) / f'{source.stem}.nsp'
+            out.write_bytes(b'verified NSP payload')
+        with patch.object(build_app, 'run', side_effect=fake_run):
+            first = build_app.prepare_update_container(tree, source, self.keys, logs)
+            second = build_app.prepare_update_container(tree, source, self.keys, logs)
+        self.assertEqual(first, second)
+        self.assertEqual(first.read_bytes(), b'verified NSP payload')
+        self.assertEqual(len(calls), 1)
+        self.assertIn('--keys', calls[0])
+
+    def test_v143_identified_by_content_and_cached(self):
+        import hashlib
+        tree = self.root/'tree'; tree.mkdir()
+        (tree/'scripts').symlink_to(SCRIPTS, target_is_directory=True)
+        (tree/'.venv').symlink_to(sys.prefix, target_is_directory=True)
+        # Deliberately misleading filename: selection must use the module bytes.
+        source = self.root/'1.1.2.nsp'; source.write_bytes(self.update.read_bytes())
+        expected = {name: hashlib.sha256(data).hexdigest() for name, data in (('main', b'synthetic main'), ('main.npdm', b'synthetic metadata'))}
+        with patch.dict(build_app.UPDATED143, {'exefs_sha256': expected}):
+            version, normalized = build_app.identify_update(tree, source, self.keys, self.root/'logs')
+            self.assertEqual(version, 'v143')
+            self.assertEqual(normalized, source)
+            self.assertEqual((tree/'extracted/v143/exefs/main').read_bytes(), b'synthetic main')
+            with patch.object(build_app, 'run', side_effect=AssertionError('cache must avoid extraction')):
+                self.assertEqual(build_app.identify_update(tree, source, self.keys, self.root/'logs'), (version, source))
+        self.assertFalse((tree/'rewritten').exists())
+
     def test_merge_ticket_privacy_and_failure_cleanup(self):
         # A mock hactool verifies plumbing, not BKTR cryptography (covered by the real local build).
         space = patch('extract_update_romfs.shutil.disk_usage')
@@ -80,7 +114,10 @@ class Updates(unittest.TestCase):
             'key=pathlib.Path(os.environ["MNG_TITLE_KEYS"])\n'
             'assert stat.S_IMODE(key.stat().st_mode)==0o600\n'
             'assert key.read_text() and not any("--titlekey=" in s for s in sys.argv)\n'
-            'assert len(list(key.parent.glob("*.nca")))==2\n'
+            'assert len(list(key.parent.glob("*.nca")))==1\n'
+            'base=pathlib.Path(next(s.split("=",1)[1] for s in sys.argv if s.startswith("--basenca=")))\n'
+            'offset=int(os.environ["MNG_BASE_RANGE_OFFSET"]); size=int(os.environ["MNG_BASE_RANGE_SIZE"])\n'
+            'assert base.suffix in (".xci",".nsp") and offset>=0 and size>0 and offset+size<=base.stat().st_size\n'
             'if os.environ.get("MNG_MOCK_FAIL"): raise SystemExit(1)\n'
             'out=pathlib.Path(next(s.split("=",1)[1] for s in sys.argv if s.startswith("--section")))\n'
             f'out.write_bytes({romfs()!r})\n'
@@ -98,20 +135,37 @@ class Updates(unittest.TestCase):
         self.assertFalse(list(self.root.glob('update-merge-*')))
 
     def test_bundle_contains_only_selected_game_version(self):
-        tree=self.root/'tree';out=self.root/'Tears of the Kingdom.app'
-        files=['build/totk-native-v112','build/pso_manifest.tsv','build/spirv-cross/spirv-cross',
-               'prebuilt/macos-arm64/totk_xlate','build/app-launcher','extracted/v112/romfs/romfs.bin',
-               'extracted/v112/romfs/runtime-index.bin']+[f'rewritten/v112/{n}.patched.bin' for n in ('main','sdk','subsdk0')]
-        for rel in files:
-            p=tree/rel;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(b'test')
-        build_app.step_app(tree,out,self.root/'logs',version='v112')
-        info=plistlib.loads((out/'Contents/Info.plist').read_bytes())
-        self.assertEqual(info['CFBundleShortVersionString'],'1.1.2')
-        res=out/'Contents/Resources/totk'
-        self.assertFalse((res/'rewritten/v0').exists())
-        self.assertFalse((res/'build/totk-native-v112').exists())
-        self.assertTrue((res/'build/totk-native').exists())
-        self.assertTrue((res/'rewritten/v112/main.patched.bin').exists())
+        for version, display in (('v112', '1.1.2'), ('v143', '1.4.3')):
+            with self.subTest(version=version):
+                tree=self.root/version;out=self.root/f'{version}.app'
+                files=[f'build/totk-native-{version}','build/pso_manifest.tsv','build/spirv-cross/spirv-cross',
+                       'prebuilt/macos-arm64/totk_xlate','build/app-launcher',f'extracted/{version}/romfs/romfs.bin',
+                       f'extracted/{version}/romfs/runtime-index.bin']+[f'rewritten/{version}/{n}.patched.bin' for n in ('main','sdk','subsdk0')]
+                for rel in files:
+                    p=tree/rel;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(b'test')
+                with patch.object(build_app, 'sign_app') as signing:
+                    build_app.step_app(tree,out,self.root/'logs',version=version)
+                signing.assert_called_once_with(out.with_name(out.name+'.partial'),self.root/'logs')
+                info=plistlib.loads((out/'Contents/Info.plist').read_bytes())
+                self.assertEqual(info['CFBundleShortVersionString'],display)
+                res=out/'Contents/Resources/totk'
+                self.assertFalse((res/'build'/f'totk-native-{version}').exists())
+                self.assertTrue((res/'build/totk-native').exists())
+                self.assertTrue((res/f'rewritten/{version}/main.patched.bin').exists())
+                self.assertEqual([p.name for p in (res/'rewritten').iterdir()], [version])
+
+    def test_failed_bundle_seal_preserves_previous_app(self):
+        tree=self.root/'tree';out=self.root/'existing.app';out.mkdir()
+        (out/'keep.txt').write_text('previous working app')
+        def fake_clone(_source, target):
+            target.parent.mkdir(parents=True,exist_ok=True)
+            target.write_bytes(b'synthetic payload')
+        with patch.object(build_app,'clone',side_effect=fake_clone), \
+             patch.object(build_app,'sign_app',side_effect=build_app.BuildError('seal rejected')):
+            with self.assertRaisesRegex(build_app.BuildError,'seal rejected'):
+                build_app.step_app(tree,out,self.root/'logs',version='v143')
+        self.assertEqual((out/'keep.txt').read_text(),'previous working app')
+
 
 
 if __name__=='__main__': unittest.main()

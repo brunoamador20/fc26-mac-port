@@ -52,7 +52,7 @@ int mfxup_enabled(void) {
     int v = atomic_load_explicit(&g_on, memory_order_relaxed);
     if (v < 0) {
         const char *e = getenv("TOTK_MFX_UPSCALE");
-        v = !(e && !strcmp(e, "0"));
+        v = e ? strcmp(e, "0") != 0 : 0;
         atomic_store(&g_on, v);
         ULOG("MetalFX spatial upscaling (TOTK_MFX_UPSCALE): %s", v ? "on" : "off");
     }
@@ -62,7 +62,7 @@ void mfxup_set(int on) { atomic_store(&g_on, on != 0); ULOG("[flag] mfx_upscale 
 static _Atomic int g_out_on = -1;
 int mfxup_output_enabled(void) {
     int v = atomic_load_explicit(&g_out_on, memory_order_relaxed);
-    if (v < 0) { const char *e = getenv("TOTK_MFX_OUTPUT"); v = !(e && !strcmp(e, "0")); atomic_store(&g_out_on, v); ULOG("MetalFX output upscaling (TOTK_MFX_OUTPUT, the 2K output): %s", v ? "on" : "off"); }
+    if (v < 0) { const char *e = getenv("TOTK_MFX_OUTPUT"); v = e ? strcmp(e, "0") != 0 : 0; atomic_store(&g_out_on, v); ULOG("MetalFX output upscaling (TOTK_MFX_OUTPUT, the window output stage): %s", v ? "on" : "off"); }
     return v;
 }
 void mfxup_output_set(int on) { atomic_store(&g_out_on, on != 0); ULOG("[flag] mfx_output = %d", on != 0); }

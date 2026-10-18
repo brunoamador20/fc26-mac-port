@@ -2,6 +2,35 @@
 # NSO → memory image (same decoding as patch_nso.py); shared by the verification tools.
 import struct
 import lz4.block
+from relr import decode_relr
+
+
+def direct_target(word, address):
+    if word & 0x7c000000 == 0x14000000:
+        return address + 4 * (((word & 0x3ffffff) ^ 0x2000000) - 0x2000000)
+    if word & 0xff000010 == 0x54000000 or word & 0x7e000000 == 0x34000000:
+        return address + 4 * ((((word >> 5) & 0x7ffff) ^ 0x40000) - 0x40000)
+    if word & 0x7e000000 == 0x36000000:
+        return address + 4 * ((((word >> 5) & 0x3fff) ^ 0x2000) - 0x2000)
+    return None
+
+
+def exclusive_groups(image, windows):
+    """Independently connect original atomic fragments by their direct edges."""
+    parents = {lo: lo for lo, _ in windows}
+    def find(node):
+        while parents[node] != node:
+            parents[node] = parents[parents[node]]; node = parents[node]
+        return node
+    for lo, hi in windows:
+        for address in range(lo, hi, 4):
+            target = direct_target(struct.unpack_from('<I', image, address)[0], address)
+            if target is None: continue
+            other = next((a for a, b in windows if a <= target < b), None)
+            if other is not None: parents[find(other)] = find(lo)
+    groups = {}
+    for lo, hi in windows: groups.setdefault(find(lo), []).append((lo, hi))
+    return {lo: group for group in groups.values() for lo, _ in group}
 
 def load(path):
     d = open(path, 'rb').read()
@@ -63,7 +92,7 @@ def relocs(img):
         d[tag] = val
     def cstr(p):
         e = img.index(b'\0', p); return img[p:e].decode('latin1')
-    out = []
+    out = [(where, 1027, None, None, addend) for where, addend in decode_relr(img, d, 0, len(img))]
     for tab, sz in ((d.get(7), d.get(8, 0)), (d.get(23), d.get(2, 0))):
         if not tab: continue
         for i in range(sz // 24):

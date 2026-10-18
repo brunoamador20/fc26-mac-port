@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Execute the production output veneer and the original display-scale path.
+
+Native screenshots/pass dumps still verify actual GPU allocation separately.
+No game entry point, graphics or user saves are used by this check.
+"""
+import hashlib
+import json
+import os
+from pathlib import Path
+import struct
+import subprocess
+
+from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM
+from unicorn.arm64_const import (
+    UC_ARM64_REG_PC, UC_ARM64_REG_X3, UC_ARM64_REG_X4,
+    UC_ARM64_REG_X8, UC_ARM64_REG_X9, UC_ARM64_REG_X19,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def main():
+    os.chdir(ROOT)
+    out = ROOT / 'analysis/v143-port'
+    raw = (ROOT / 'rewritten/v143/main.patched.bin').read_bytes()
+    expected = json.loads((ROOT / 'assets/expected-v1.4.3.json').read_text())
+    assert hashlib.sha256(raw).hexdigest() == expected['rewritten_sha256']['main.patched.bin']
+    layout = json.loads((out / 'runtime-layout.json').read_text())[0]['layout']
+    subprocess.run([
+        'xcrun', 'clang', '-std=c11', '-O1', '-Wall', '-Wextra', '-Werror',
+        '-Iruntime', 'scripts/v143_timing_fixture.c', 'runtime/game_patches_v143.c',
+        '-o', 'build/v143-output-fixture',
+    ], check=True)
+    target = out / 'main-output-fixture.bin'
+    run = subprocess.run([
+        'build/v143-output-fixture', 'rewritten/v143/main.patched.bin', str(target),
+        str(layout['TEXT_END']),
+    ], capture_output=True, text=True, check=True,
+        env=os.environ | {'TOTK_REALTIME': '1', 'TOTK_FPS60': '1', 'TOTK_OUTPUT_RES': '2560x1440'})
+    (out / 'output-fixture.log').write_text(run.stdout + run.stderr)
+    patched = target.read_bytes()
+    data = (len(raw) + 0x3fff) & ~0x3fff
+    stub = ((len(raw) + 15) & ~15) + 32
+    changes = {p for p in range(0, len(raw), 4) if raw[p:p+4] != patched[p:p+4]}
+    assert changes == {
+        0xbdb578, 0xbdb584, 0x3dcb28,
+        0x2db204, 0x2db208, 0x2db22c, 0x2db360, 0x2db36c, 0x2db340, 0x2db34c,
+        0x3e5658, 0x2daa54, 0x2daa58, 0x2daa6c, 0x2daa70, 0x2daa74, 0x2daa78,
+    }, changes
+
+    def execute(w, h, scale, apply):
+        mu = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+        mu.mem_map(0, len(patched))
+        mu.mem_write(0, patched if apply else raw)
+        config = 0x10000000
+        mu.mem_map(config, 0x4000)
+        mu.mem_write(config, bytes([0xa5]) * 0x600)
+        mu.mem_write(config + 0x10, struct.pack('<II', 1920, 1080))
+        mu.mem_write(config + 0x0c, struct.pack('<I', 0))
+        mu.mem_write(config + 0x520, struct.pack('<ff', *scale))
+        mu.mem_write(data + 32, struct.pack('<II', w, h))
+        mu.mem_write(data + 40, bytes(8))
+        mu.reg_write(UC_ARM64_REG_X19, config)
+        mu.reg_write(UC_ARM64_REG_X8, 0)
+        mu.reg_write(UC_ARM64_REG_X9, 1 << 21)
+        mu.reg_write(UC_ARM64_REG_X3, (1080 << 32) | 1920)
+        mu.emu_start(0x3dca48, 0x3dcb30, count=100)
+        assert mu.reg_read(UC_ARM64_REG_PC) == 0x3dcb30
+        assert mu.reg_read(UC_ARM64_REG_X19) == config
+        canvas = struct.unpack('<II', mu.mem_read(config + 0x10, 8))
+        crop = struct.unpack('<II', mu.mem_read(config + 0x508, 8))
+        assert struct.unpack('<ff', mu.mem_read(config + 0x528, 8)) == scale
+        assert bytes(mu.mem_read(config + 0x518, 8)) == bytes([0xa5]) * 8
+        if apply:
+            assert canvas == crop == (w, h), (canvas, crop)
+            assert mu.reg_read(UC_ARM64_REG_X4) == h
+            assert struct.unpack('<Q', mu.mem_read(data + 40, 8))[0] == config
+        return dict(canvas=canvas, crop=crop, scale=scale)
+
+    cases = []
+    for w, h in [(1920, 1080), (2560, 1440), (1920, 1080)]:
+        for scale in [(1.0, 1.0), (0.5, 0.75)]:
+            cases.append(execute(w, h, scale, True))
+    negative = execute(2560, 1440, (1.0, 1.0), False)
+    assert negative['canvas'] == negative['crop'] == (1920, 1080)
+    report = dict(status='pass', version='v143', cases=cases,
+                  negative_control=negative, veneer_offset=hex(stub),
+                  changed_original_words=len(changes),
+                  scope='production C patch, original scale selection, canvas/crop publication; GPU allocations tested separately')
+    (out / 'output-validation.json').write_text(json.dumps(report, indent=2) + '\n')
+    print(json.dumps(report))
+
+
+if __name__ == '__main__':
+    main()

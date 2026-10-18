@@ -12,8 +12,8 @@ enum {
 /* Colour processing modes: the values of MTLFXSpatialScalerColorProcessingMode, without importing MetalFX here. */
 enum { MFXUP_PERCEPTUAL = 0, MFXUP_LINEAR = 1, MFXUP_HDR = 2 };
 
-int mfxup_enabled(void);   // TOTK_MFX_UPSCALE: default on (iOS since 2026-10-16 noon, Mac since 2026-10-16 night); =0 off; key 1 toggles every MetalFX upscale
-int mfxup_output_enabled(void);   // TOTK_MFX_OUTPUT (default on; =0 keeps the bilinear stretch of the present): the 2K output stage on its own
+int mfxup_enabled(void);   // TOTK_MFX_UPSCALE: default off; key 3 enables it in the manual MetalFX picture mode
+int mfxup_output_enabled(void);   // TOTK_MFX_OUTPUT: default off; key 3 enables the window output stage in the manual MetalFX picture mode
 void mfxup_output_set(int on);    // runtime: "flag mfx_output 0|1" (the output stage alone, for A/B)
 void mfxup_set(int on);    // runtime: "flag mfx_upscale 0|1"
 /* Encodes a MetalFX spatial upscale of the top-left in_w x in_h region of src into cb (Metal 4; the caller has ended its

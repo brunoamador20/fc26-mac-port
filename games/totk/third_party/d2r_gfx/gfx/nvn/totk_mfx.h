@@ -27,7 +27,9 @@ id<MTLResidencySet> mfx_residency(void);   // our textures; the queue adds it on
 // the pacing period (two display refreshes; 0 in unpaced measurement runs). encode: motion vectors and the interpolation into cb (Metal 4, own command buffer, GPU order after this
 // frame). abort: a prepared frame that cannot be encoded (no free command buffer); drops the history.
 int mfx_frame_prepare(double frame_s);
-void mfx_frame_encode(id<MTL4CommandBuffer> cb, int slot, id<MTL4CounterHeap> heap, NSUInteger stamp);   // heap: timestamps at stamp / stamp+1 around MetalFX (may be nil)
+// Keep the returned resources alive until this command buffer's GPU completion.
+// Cached interpolators drop their public texture bindings after encoding.
+NSArray *mfx_frame_encode(id<MTL4CommandBuffer> cb, int slot, id<MTL4CounterHeap> heap, NSUInteger stamp);   // heap: timestamps at stamp / stamp+1 around MetalFX (may be nil)
 void mfx_note_gpu(double ms);   // GPU time of one interpolation, for the statistics line
 void mfx_frame_abort(void);
 id<MTLTexture> mfx_output(int slot);   // RGBA8Unorm view of the sRGB output, like the swapchain textures

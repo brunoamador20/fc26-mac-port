@@ -7,13 +7,15 @@
    deliberately not shown (user, 2026-10-16). The game image itself (frame screenshots, texture dumps) never contains it. TOTK_FPS_OVERLAY=0 hides it. */
 enum { FPS_OVERLAY_TEX_W = 768, FPS_OVERLAY_TEX_H = 64, FPS_OVERLAY_MAX_SCALE = 5 };
 
-/* fps / screen size < 0 / 0: not known yet ("--"). mfx: MetalFX upscaled the picture in the last frames -> " MFX" after
-   the size (2026-10-16 night: the user toggles it with key 1 and wants to see which one is on). gen > 0: MetalFX frame
-   interpolation shows that many generated frames a second besides the game's fps frames -> "FPS 50+50" (key 2). big: the
-   game itself outputs more than 1920x1080 (true 2K, key 3; 2026-10-17) -> " 2K" at the end. */
+/* fps / screen size < 0 / 0: not known yet ("--"). mfx: MetalFX upscaled the picture in the last frames. gen > 0: MetalFX
+   frame interpolation shows that many generated frames a second besides the game's fps frames -> "FPS 50+50" (key 2).
+   big: the game itself outputs more than 1920x1080 (true 2K) -> " 2K" at the end. */
 typedef struct { int fps, screen_w, screen_h, mfx, gen, big; } fps_overlay_info;
 
 int fps_overlay_enabled(void);
+/* Shared user toggle for every in-picture HUD layer: FPS, shader collection and load telemetry. */
+int fps_overlay_hints_enabled(void);
+int fps_overlay_toggle_hints(void);   /* atomically toggles all HUD layers and returns the new visibility */
 /* Pixel scale (1..FPS_OVERLAY_MAX_SCALE) for a game picture view_h pixels tall: one text line is about 3% of its height. */
 int fps_overlay_scale(double view_h);
 /* The line in a 5x7 pixel font on a dark box, as BGRA8 pixels in out (FPS_OVERLAY_TEX_W x FPS_OVERLAY_TEX_H,

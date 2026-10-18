@@ -161,12 +161,11 @@ probe-gpu-pool-retire probe-gpu-tex-slots probe-gpu-arg-epoch probe-gpu-vertex-s
 probe-game-slot: runtime
 	python3 scripts/dev/test_game_slot.py build/totk-native | tee analysis/game-slot-probe.log
 # The Finder launcher (tools/desktop_launcher.m) starts the game as the user: it goes ahead of agents' tests.
-# The launcher runs the game of the checkout it is built in (TOTK_PROJECT_DIR): build it in the main checkout.
+# One desktop alias opens the packaged app, with its standard user-data folder.
 DESKTOP_APP ?= $(HOME)/Desktop/Tears of the Kingdom  Mac.app
-TOTK_PROJECT_DIR ?= $(CURDIR)
+DESKTOP_TARGET ?= ../../out/Tears of the Kingdom.app
 desktop-launcher:
-	xcrun clang -fobjc-arc -O2 -Wall -Wextra -Werror '-DTOTK_PROJECT_DIR="$(TOTK_PROJECT_DIR)"' tools/desktop_launcher.m -framework AppKit -o build/desktop-launcher
-	test -d "$(DESKTOP_APP)/Contents/MacOS" && cp build/desktop-launcher "$(DESKTOP_APP)/Contents/MacOS/launcher"
+	"$(PY)" tools/install_desktop_entry.py --app "$(DESKTOP_TARGET)" --desktop "$(DESKTOP_APP)"
 .PHONY: probe-fps60 probe-realtime probe-fp64-fallback probe-fps-overlay
 # 60 FPS: emulate the patched present-interval controller (main+0x8f6bec) against the shipping one.
 probe-fps60:
@@ -338,3 +337,13 @@ build/v112/romfs_config.h: scripts/prepare_romfs_backend.py extracted/v112/romfs
 build/totk-native-v112: $(wildcard runtime/*.[ch] runtime/*.m runtime/*.S) build/v112/runtime_tables.h build/v112/romfs_config.h build/shared_fonts_config.h $(GFX_OBJECTS) Makefile
 	xcrun clang -std=c11 $(NATIVE_OPT) -g -Wall -Wextra -Werror -Wno-deprecated-declarations -Ithird_party/d2r_gfx/gfx/nvn/include -DTOTK_GAME_V112=1 -Ibuild/v112 -Ibuild -I/opt/homebrew/opt/opus/include/opus -I/opt/homebrew/opt/libvpx/include runtime/loader.c runtime/game_patches.c runtime/world_survey.c runtime/game_slot.c runtime/services.c runtime/romfs.c runtime/threads.c runtime/gate.S runtime/hle_stack.S runtime/hle_stack.c runtime/thread_enter.S runtime/gfx_bridge.c runtime/frontend.m runtime/account.c runtime/input.c runtime/hid_feedback.c runtime/motion_fusion.c runtime/autoload.c runtime/gamepad.m runtime/gamepad_feedback.m runtime/gfx_probe.c runtime/vpool_probe.m runtime/gpu_path_probe.m runtime/memory_probe.c runtime/shared_font.c runtime/ipc.c runtime/audio_renderer.c runtime/audio_mixer.c runtime/audio_reverb.c runtime/fs_host.c runtime/opus_codec.c runtime/movie_host.c runtime/time_host.c runtime/applet_host.c runtime/swkbd_host.c $(GFX_OBJECTS) /opt/homebrew/opt/opus/lib/libopus.a /opt/homebrew/opt/libvpx/lib/libvpx.a -framework Metal -framework MetalFX -framework Foundation -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework CoreText -framework UniformTypeIdentifiers -fobjc-arc -framework Cocoa -framework CoreVideo -framework CoreFoundation -framework AudioToolbox -framework GameController -framework CoreHaptics -framework IOKit -o "$@"
 runtime-v112: build/totk-native-v112 build/pso_manifest.tsv
+
+# Isolated 1.4.3 build; never replace the validated v0 executable or generated headers.
+.PHONY: runtime-v143
+build/v143/runtime_tables.h: scripts/prepare_runtime.py analysis/v143-port/phase12-validation.json
+	"$(PY)" scripts/prepare_runtime.py --version v143
+build/v143/romfs_config.h: scripts/prepare_romfs_backend.py extracted/v143/romfs/index.json
+	"$(PY)" scripts/prepare_romfs_backend.py --version v143
+build/totk-native-v143: $(wildcard runtime/*.[ch] runtime/*.m runtime/*.S) build/v143/runtime_tables.h build/v143/romfs_config.h build/shared_fonts_config.h $(GFX_OBJECTS) Makefile
+	xcrun clang -std=c11 $(NATIVE_OPT) -g -Wall -Wextra -Werror -Wno-deprecated-declarations -Ithird_party/d2r_gfx/gfx/nvn/include -DTOTK_GAME_V143=1 -Ibuild/v143 -Ibuild -I/opt/homebrew/opt/opus/include/opus -I/opt/homebrew/opt/libvpx/include runtime/loader.c runtime/game_patches_v143.c runtime/world_survey.c runtime/game_slot.c runtime/services.c runtime/romfs.c runtime/threads.c runtime/gate.S runtime/hle_stack.S runtime/hle_stack.c runtime/thread_enter.S runtime/gfx_bridge.c runtime/frontend.m runtime/account.c runtime/input.c runtime/hid_feedback.c runtime/motion_fusion.c runtime/autoload.c runtime/gamepad.m runtime/gamepad_feedback.m runtime/gfx_probe.c runtime/vpool_probe.m runtime/gpu_path_probe.m runtime/memory_probe.c runtime/shared_font.c runtime/ipc.c runtime/audio_renderer.c runtime/audio_mixer.c runtime/audio_reverb.c runtime/fs_host.c runtime/opus_codec.c runtime/movie_host.c runtime/time_host.c runtime/applet_host.c runtime/swkbd_host.c $(GFX_OBJECTS) /opt/homebrew/opt/opus/lib/libopus.a /opt/homebrew/opt/libvpx/lib/libvpx.a -framework Metal -framework MetalFX -framework Foundation -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework CoreText -framework UniformTypeIdentifiers -fobjc-arc -framework Cocoa -framework CoreVideo -framework CoreFoundation -framework AudioToolbox -framework GameController -framework CoreHaptics -framework IOKit -o "$@"
+runtime-v143: build/totk-native-v143 build/pso_manifest.tsv

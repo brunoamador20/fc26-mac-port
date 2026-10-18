@@ -6,6 +6,7 @@
 
 typedef struct {
     AudrenVoiceIn in;
+    AudrenBiquadFloat float_biquads[2]; uint8_t use_float_biquads;
     AudrenWaveBuffer buffers[4]; uint8_t valid[4];
     uint8_t pending[4];            /* sent while the voice was not playing: valid once it plays (the DSP's IsSendToAudioProcessor) */
     uint8_t state;                 /* server play state (SV_*): the client's Start / Stop / Pause, plus Stopping until the next render frame */

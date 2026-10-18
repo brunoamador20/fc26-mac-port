@@ -15,6 +15,8 @@ Play your own copy of **The Legend of Zelda: Tears of the Kingdom** natively on 
 
 Tested on **MacBook Air M4 and Mac mini M4**. Local testing has collected **8,582 shaders**, with performance at approximately **90 FPS after shader warm-up, reaching 120 FPS in menus**.
 
+Those are earlier local observations, not a stable frame-rate promise for every version or scene. Version 1.4.3 measurements and compilation stalls are recorded separately in [the test notes](docs/v1.4.3-port.md).
+
 Shaders are automatically collected, compiled and cached as you play. Returning to previously visited scenes typically brings noticeable improvements in frame rates and smoothness because cached shaders can be reused. **8,582 is the number collected so far in local testing, not the game's total shader count or a collection limit**; the cache continues to grow as you explore.
 
 **Shader prewarming:** The app automatically prewarms the compatible entries in its bundled PSO manifest at startup; no manual setup is needed. Playing adds newly encountered shaders and pipelines to your local `pso_collected.tsv`, which is reused on later launches. To share your collected list, send `~/Library/Application Support/MacNativeGames/TOTK/shader-cache/rt-totk-native-v4-unverified/pso_collected.tsv`. It contains shader and pipeline identifiers, not game saves or compiled shader binaries. Lists are tied to the matching translation-chain version.
@@ -27,7 +29,7 @@ Shaders are automatically collected, compiled and cached as you play. Returning 
 
 - A Mac with Apple silicon and **macOS 26** or later (the graphics use Metal 4). 16 GB of memory or more is recommended.
 - About **25 GB** of free disk space for the work folder, in addition to your game file. Keep the output app on the **same APFS volume** to share the large data files through cloning. If cloning is unavailable or the app is on another volume, allow roughly **17 GB more** for the app copy.
-- Your Tears of the Kingdom **base game 1.0.0** (`0100F2C0115B6000`) as an **XCI or NSP**, and your `prod.keys`. To build **1.1.2**, supply its separate cumulative update as NSP or NSZ with `--update`; no intermediate 1.1.0 update is required. NSZ is decompressed and its NCA hashes are verified before extraction. **1.4.3 is recognized and its ExeFS hashes are verified, but its runtime code rewrites and address tables are not yet supported**, so the build stops safely. DLC and combined packages are unsupported.
+- Your Tears of the Kingdom **base game 1.0.0** (`0100F2C0115B6000`) as an **XCI or NSP**, and your `prod.keys`. To build **1.1.2 or 1.4.3**, supply its separate cumulative update as NSP or NSZ with `--update`; no intermediate update is required. NSZ is decompressed and its NCA hashes are verified before extraction. DLC and combined packages are unsupported.
 - For NSP: its common ticket must be included unless the NCAs are rights-free. NSPs do not contain system shared fonts: supply an unpacked firmware NCA directory with `--firmware`, or previously extracted fonts with `--shared-fonts`. The six fonts must match this project’s verified hashes; valid fonts already in the work folder are reused.
 
 ## Build the app
@@ -57,27 +59,41 @@ python3.14 build_app.py ~/Games/totk.nsp -k ~/keys/prod.keys --shared-fonts /pat
 
 The app appears next to the game file (`Tears of the Kingdom.app`; `-o` chooses another place). A local clean base-1.0.0 build took about 6 minutes on an M4 Mac mini (hardware, disk and network conditions affect the time): about a minute each to rewrite the main code module and to decrypt the 17 GB of game data, and two to three minutes for macOS to check the finished app once. Building needs no .NET and no cmake, and the finished game needs no Python: its shader translator is a native program that comes with this repository (`games/totk/prebuilt`). Every intermediate file is in a work folder next to the game file (`TOTK_build`, or `--work`); running the script again reuses what is already done.
 
-The extracted code modules, rewritten modules, RomFS and shared fonts are checked against `games/totk/assets/expected-v1.0.0.json` or `expected-v1.1.2.json` for the selected version; the prebuilt shader translator has its own SHA-256 check. A mismatch stops the build. Key values are never printed.
+The extracted code modules, rewritten modules, RomFS and shared fonts are checked against the selected version's `games/totk/assets/expected-v1.0.0.json`, `expected-v1.1.2.json` or `expected-v1.4.3.json`; the prebuilt shader translator has its own SHA-256 check. A mismatch stops the build. Key values are never printed.
+
+Signing and verifying a large updated app can add several minutes. Keep the build running while it continues to report progress.
 
 **3. Play:** open the app from Finder. The build starts the launcher in `--check` mode, which checks that the game executable exists and allows macOS to perform its first-launch checks; it does not run a gameplay test. You can keep the app where it was built or move it to `/Applications`. Copying it to a different volume can use additional disk space and trigger another macOS check, during which no window may appear. The first game launch verifies the game data (about 20 seconds in local testing). Newly encountered shaders can cause stutters; cached shaders reduce this work on later visits.
 
 
-### Build version 1.1.2
+### Build version 1.1.2 or 1.4.3
 
 ```sh
 python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.1.2.nsp
 # NSZ updates are also accepted:
 python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.1.2.nsz
+# Or build 1.4.3 directly from the same base:
+python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.4.3.nsz
 # With a base NSP, keep --firmware or --shared-fonts as described above.
 ```
 
-This produces the same **Tears of the Kingdom.app**, containing only the selected version. Quit the running game, then rebuild to the same `-o` path to replace the old app; there is no second game entry or version-selection menu. The window title shows **Ver. 1.1.2**. Without `--update`, the script still builds 1.0.0.
+This produces the same **Tears of the Kingdom.app**, containing only the selected version. Quit the running game, then rebuild to the same `-o` path to replace the old app; there is no second game entry or version-selection menu. The window title shows the selected version, such as **Ver. 1.4.3**. Without `--update`, the script still builds 1.0.0.
 
-Allow about **60 GB free for a fresh update build**, or **35 GB extra** when the base data is already cached. The merge temporarily copies the base/update NCAs and verifies every IVFC level. It fetches a pinned [hactool](https://github.com/SciresM/hactool) source and builds it with clang/make. Temporary ticket files are private and removed after the merge; key values are not passed on the command line or printed.
+Allow about **40 GB free for a fresh update build**, or **19 GB extra** when the base data is already cached, with the app on the same APFS volume. The merge reads the base NCA through a bounded range of the original container, temporarily extracts the much smaller update NCA, and verifies every IVFC level. It fetches a pinned [hactool](https://github.com/SciresM/hactool) source and builds it with clang/make. Temporary ticket files are private and removed after the merge; key values are not passed on the command line or printed.
 
-Saves stay in the same profile folder. Before the first 1.1.2 launch, the app makes a complete `profile-before-1.1.2` backup beside it; failure stops startup. Keep this backup if you need to return to 1.0.0—do not assume an updated save is backward compatible.
+Saves stay in the same profile folder. Before the first updated launch, the app makes a complete backup beside it, such as `profile-before-1.1.2` or `profile-before-1.4.3`; failure stops startup. Keep this backup if you need to return to an older version—do not assume an updated save is backward compatible.
+
+To keep one desktop entry, link the packaged app with the optional installer:
+
+```sh
+python3.14 games/totk/tools/install_desktop_entry.py --app "/path/to/Tears of the Kingdom.app"
+```
+
+When replacing the older development launcher, the installer copies and verifies its saves into the standard user profile listed below and creates an upgrade backup. It preserves the original profile and archives the old launcher without adding another app entry. An existing, different standard profile is never overwritten.
 
 The source runtime passed basic Mac checks: load, movement/jumps, menus/map, 2K, save/reload and death retry. Full-map, long-session and fair 1.0/1.1.2 performance comparisons remain pending; the earlier FPS observations are not a promise of 1.1.2 performance. Packaging validation is recorded in [the build notes](docs/how-it-works.md#112-validation).
+
+The 1.4.3 port has separately passed scene loading, movement/jumps, menus/map, save/reload, native 2K canvas switching and MetalFX upscaling/interpolation on an M4 Mac. The single packaged app has been tested, including save/reload, death/retry and shrine entry/exit. A three-hour earlier build and a 30-minute final-build run are recorded separately; first-use compilation stalls, long-session memory growth and audio underruns remain under investigation. See [the 1.4.3 test record](docs/v1.4.3-port.md) for the scope and follow-ups; this is not full-game or stable-FPS certification.
 
 ## Controls
 
@@ -94,6 +110,8 @@ Controllers recognized by macOS (such as DualSense and Xbox controllers) are map
 
 Extra keys: **1** show or hide all on-screen overlays (shortcut reminder, FPS, shader count and system-load readings), **2** frame interpolation (off → 30+30 → half the refresh rate → unlimited), **3** cycle picture mode (MetalFX 2K → native 2K → off). MetalFX is off by default and only starts when you select its mode with **3**; resizing the window never enables it automatically. Text entry (naming a horse) uses the Mac keyboard.
 
+Native 2K changes the game's composition canvas and UI to 2560×1440. The 3D scene still follows the game's separate render scaling; this does not force every internal render target to 1440p. The manual MetalFX mode also works in smaller windows and scales to the actual output size, including 4K.
+
 ## Where things are
 
 - Saves: `~/Library/Application Support/MacNativeGames/TOTK/profile`
@@ -102,14 +120,16 @@ Extra keys: **1** show or hide all on-screen overlays (shortcut reminder, FPS, s
 
 ## Known issues
 
-- Supports base 1.0.0, or base plus the separate 1.1.2 update NSP. Other versions, DLC, combined packages, compressed NSZ/XCZ and personalized tickets remain unsupported. Mac only.
+- Supports base 1.0.0, or base plus the separate 1.1.2 or 1.4.3 update NSP/NSZ. Other versions, DLC, combined packages, compressed base games (NSZ/XCZ) and personalized tickets remain unsupported. Mac only.
 - No online features, no amiibo.
 - New shaders can cause compilation stutters. Cache reuse reduces these, but does not guarantee stutter-free gameplay.
-- Container/update validation now covers 16 automated tests and a complete Mac build from a local XCI-derived NSP fixture with a generated common ticket. An independent retail base NSP and gameplay from that input have not yet been tested.
+- The 31 automated tests cover generated container/update fixtures, relocation formats, work-folder isolation, packaging and desktop migration. A complete Mac build also passed with a local XCI-derived NSP fixture and generated common ticket. An independent retail base NSP and gameplay from that input have not yet been tested.
 
 ## How it works
 
 See [docs/how-it-works.md](docs/how-it-works.md).
+
+Recorded performance experiments, remaining work and comparison methods: [Mac performance follow-ups](docs/performance-followups.md).
 
 ## Acknowledgements
 
@@ -142,6 +162,8 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 
 已在 **MacBook Air M4 和 Mac mini M4** 上测试。本机测试已收集 **8,582 个着色器**，着色器预热后约 **90 帧/秒，菜单中可达 120 帧/秒**。
 
+以上是此前本机观察，不代表所有版本和场景都能稳定达到该帧率。1.4.3 的场景测量及首次编译卡顿另见[测试记录](docs/v1.4.3-port.md)。
+
 着色器会在游玩过程中自动收集、编译并缓存。再次进入已经去过的场景时，可以复用已有缓存，帧数和流畅度通常会明显改善。**8,582 只是本机测试目前收集到的数量，不是游戏的着色器总数，也不是收集上限**；随着探索更多场景，缓存还会继续增加。
 
 **着色器预热：** App 启动时会自动预热内置 PSO 清单中兼容的项目，无需手动设置。游玩时新遇到的着色器和管线会写入本机的 `pso_collected.tsv`，下次启动时继续预热。如需分享自己收集的清单，请提供 `~/Library/Application Support/MacNativeGames/TOTK/shader-cache/rt-totk-native-v4-unverified/pso_collected.tsv`。它只包含着色器和管线标识，不含游戏存档或编译后的着色器文件。清单与对应的着色器转换链版本绑定。
@@ -154,7 +176,7 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 
 - Apple 芯片的 Mac，**macOS 26** 或更高（图形用 Metal 4）。建议使用 16 GB 或更多内存。
 - 除游戏文件外，为工作目录预留约 **25 GB** 空闲空间。成品 App 与工作目录放在**同一个 APFS 卷**上时，大型数据文件可通过克隆共享磁盘空间；无法克隆或输出到其他卷时，还需为 App 副本另留约 **17 GB**。
-- 你的《王国之泪》**本体 1.0.0**（`0100F2C0115B6000`），格式为 **XCI 或 NSP**，以及你的 `prod.keys`。构建 **1.1.2** 时，通过 `--update` 提供单独的累计更新 NSP 或 NSZ；无需先安装 1.1.0。NSZ 会先解压并校验其中的 NCA 哈希。**1.4.3 已能识别并验证 ExeFS 哈希，但尚无对应的安全代码改写和运行时地址表，因此构建会安全停止。**DLC 和合并包不支持。
+- 你的《王国之泪》**本体 1.0.0**（`0100F2C0115B6000`），格式为 **XCI 或 NSP**，以及你的 `prod.keys`。构建 **1.1.2 或 1.4.3** 时，通过 `--update` 提供单独的累计更新 NSP 或 NSZ；无需先安装中间版本。NSZ 会先解压并校验其中的 NCA 哈希。DLC 和合并包不支持。
 - 使用 NSP 时：除不依赖票据的 NCA 外，包内必须包含通用票据。NSP 不含系统共享字体，需要通过 `--firmware` 指定已解包的固件 NCA 目录，或通过 `--shared-fonts` 提供以前提取的字体。六个字体必须符合本项目已验证的哈希；工作目录中已有且校验通过的字体会自动复用。
 
 ## 打包 App
@@ -184,27 +206,41 @@ python3.14 build_app.py ~/Games/totk.nsp -k ~/keys/prod.keys --shared-fonts /pat
 
 App 出现在游戏文件旁边（`Tears of the Kingdom.app`；`-o` 指定别处）。本地一次本体 1.0.0 全新构建在 M4 Mac mini 上约 6 分钟（耗时受硬件、磁盘和网络影响）：改写主代码模块、解密 17 GB 的游戏数据各约 1 分钟，macOS 把做好的 App 检查一遍要 2–3 分钟。打包不需要 .NET 和 cmake，做好的游戏运行时也不需要 Python：着色器翻译器是本仓库自带的原生程序（`games/totk/prebuilt`）。所有中间文件都在游戏文件旁边的工作目录里（`TOTK_build`，或用 `--work` 指定），再运行一次会复用已经做好的部分。
 
-提取的程序模块、改写后的模块、RomFS 和共享字体会与所选版本的 `games/totk/assets/expected-v1.0.0.json` 或 `expected-v1.1.2.json` 中的哈希核对；预编译着色器翻译器另有 SHA-256 校验。不匹配时停止构建。密钥的值不会被打印。
+提取的程序模块、改写后的模块、RomFS 和共享字体会与所选版本的 `games/totk/assets/expected-v1.0.0.json`、`expected-v1.1.2.json` 或 `expected-v1.4.3.json` 中的哈希核对；预编译着色器翻译器另有 SHA-256 校验。不匹配时停止构建。密钥的值不会被打印。
+
+大型更新版 App 的完整签名和校验还可能多用几分钟；日志持续报告进度时，请等待构建完成。
 
 **3. 游玩：** 在访达里打开 App。构建结束时会以 `--check` 模式启动启动器，检查游戏可执行文件是否存在，并让 macOS 执行首次启动检查；这一步不进行游戏游玩测试。App 可以留在原位置，也可以移到 `/Applications`。拷贝到另一个卷可能额外占用磁盘空间，并触发 macOS 再次检查，期间可能没有窗口。第一次进入游戏会校验游戏数据（本地测试约 20 秒）。首次遇到的着色器可能造成编译卡顿，缓存可减少后续访问时的重复工作。
 
 
-### 构建 1.1.2
+### 构建 1.1.2 或 1.4.3
 
 ```sh
 python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.1.2.nsp
 # 也可以使用 NSZ 更新包：
 python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.1.2.nsz
+# 也可从同一本体直接构建 1.4.3：
+python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.4.3.nsz
 # 本体为 NSP 时，继续提供上文的 --firmware 或 --shared-fonts。
 ```
 
-仍然只生成同一个 **Tears of the Kingdom.app**，包内只含选定版本。先退出正在运行的游戏，再用相同 `-o` 路径重新构建即可替换旧 App，不增加第二个游戏入口或版本选择菜单。窗口标题显示 **Ver. 1.1.2**。不加 `--update` 时仍构建 1.0.0。
+仍然只生成同一个 **Tears of the Kingdom.app**，包内只含选定版本。先退出正在运行的游戏，再用相同 `-o` 路径重新构建即可替换旧 App，不增加第二个游戏入口或版本选择菜单。窗口标题显示选定版本，例如 **Ver. 1.4.3**。不加 `--update` 时仍构建 1.0.0。
 
-首次完整更新构建建议预留约 **60 GB**，已缓存本体数据时还需约 **35 GB** 临时空间。合并时临时复制本体 / 更新 NCA，并校验全部 IVFC 层；工具会获取固定提交的 [hactool](https://github.com/SciresM/hactool)，用 clang / make 编译。临时票据文件仅当前用户可读，合并结束即清理；密钥值不进入命令行或日志。
+首次完整更新构建建议预留约 **40 GB**，已缓存本体数据时还需约 **19 GB** 空间，App 需放在同一 APFS 卷。合并时通过原始容器的限定区间读取本体 NCA，只临时提取较小的更新 NCA，并校验全部 IVFC 层；工具会获取固定提交的 [hactool](https://github.com/SciresM/hactool)，用 clang / make 编译。临时票据文件仅当前用户可读，合并结束即清理；密钥值不进入命令行或日志。
 
-存档继续保存在原 profile 目录。首次启动 1.1.2 前，App 会在旁边完整备份为 `profile-before-1.1.2`；备份失败就不启动。需要回退 1.0.0 时保留并使用这份备份，不能假定新版存档向下兼容。
+存档继续保存在原 profile 目录。首次启动更新版前，App 会在旁边完整备份为 `profile-before-1.1.2` 或 `profile-before-1.4.3`；备份失败就不启动。需要回退旧版本时保留并使用这份备份，不能假定新版存档向下兼容。
+
+如需保留唯一桌面入口，可用附带的安装脚本建立 App 链接：
+
+```sh
+python3.14 games/totk/tools/install_desktop_entry.py --app "/路径/Tears of the Kingdom.app"
+```
+
+替换旧开发启动器时，脚本会将旧存档完整复制并校验到下列标准用户目录，同时建立升级备份；原存档保留，旧启动器归档后不再作为第二个 App 入口。已有且内容不同的标准存档不会被覆盖。
 
 来源运行时已通过 Mac 基础检查：读档、移动 / 跳跃、菜单 / 地图、2K、保存重读及死亡重试。全地图、长局与 1.0 / 1.1.2 公平性能对比仍待测试；前面的帧率观察不是对 1.1.2 的性能承诺。打包验证范围见[构建记录](docs/how-it-works.md#112-validation)。
+
+1.4.3 另行通过了 M4 Mac 的场景读档、移动 / 跳跃、菜单 / 地图、保存重读、原生 2K 画布切换和 MetalFX 放大 / 补帧。唯一打包 App 已实际验证，另覆盖死亡重试和神庙进出。旧构建三小时及最终版约 30 分钟分开记录；首次编译卡顿、长局内存增长与音频欠载仍待排查，不能视为全游戏或稳定帧率认证。结果、测试方法和后续项见 [1.4.3 适配记录](docs/v1.4.3-port.md)。
 
 ## 操作
 
@@ -221,6 +257,8 @@ macOS 能识别的手柄（如 DualSense、Xbox 手柄）会映射为 Switch Pro
 
 额外按键：**1** 同时隐藏或重新显示所有屏幕提示（快捷键说明、FPS、着色器计数和系统负载）；**2** 补帧（关 → 30+30 → 刷新率一半 → 不限帧），**3** 循环切换画质（MetalFX 2K → 原生 2K → 关闭）。MetalFX 默认关闭，只有按 **3** 手动切换到该模式才会启用；放大窗口不会自动开启。文字输入（给马取名）直接用 Mac 键盘。
 
+原生 2K 将游戏合成画布和 UI 改为 2560×1440，3D 场景仍由游戏独立的渲染比例控制，并非强制所有内部通道以 1440p 渲染。手动 MetalFX 在较小窗口中也可使用，输出放大会跟随实际窗口尺寸，包括 4K。
+
 ## 文件位置
 
 - 存档：`~/Library/Application Support/MacNativeGames/TOTK/profile`
@@ -229,14 +267,16 @@ macOS 能识别的手柄（如 DualSense、Xbox 手柄）会映射为 Switch Pro
 
 ## 已知问题
 
-- 支持本体 1.0.0，或本体加单独的 1.1.2 更新（NSP/NSZ）。1.4.3 包可识别并验证，但尚不支持构建可运行版本。其他版本、DLC、合并包、XCZ 和个性化票据仍不支持。平台仅限 Mac。
+- 支持本体 1.0.0，或本体加单独的 1.1.2 / 1.4.3 更新（NSP/NSZ）。其他版本、DLC、合并包、压缩本体（NSZ/XCZ）和个性化票据仍不支持。平台仅限 Mac。
 - 没有联网功能，没有 amiibo。
 - 首次遇到新着色器可能出现编译卡顿，缓存能减少重复编译，但不保证完全没有卡顿。
-- 容器 / 更新当前验证范围：16 项自动测试，以及使用本地 XCI 构造、附带生成通用票据的 NSP 测试副本完成完整 Mac 打包。尚未验证独立的零售本体 NSP，也未测试从该类输入构建后的实际游玩。
+- 31 项自动测试覆盖生成的容器 / 更新样本、重定位格式、工作目录隔离、打包及桌面入口迁移；另使用本地 XCI 构造、附带生成通用票据的 NSP 测试副本完成完整 Mac 打包。尚未验证独立的零售本体 NSP，也未测试从该类输入构建后的实际游玩。
 
 ## 工作原理
 
 见 [docs/how-it-works.md](docs/how-it-works.md)。
+
+已做的性能实验、待办与对比方法见 [Mac 性能待做](docs/performance-followups.md)。
 
 ## 致谢
 

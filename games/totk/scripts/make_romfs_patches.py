@@ -30,7 +30,7 @@ root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--output-dir', type=Path, default=root / 'extracted/v0/romfs-patches')
 parser.add_argument('--capture-frame', type=float, default=0.0)
-parser.add_argument('--version', choices=('v0','v112'), default='v0')
+parser.add_argument('--version', choices=('v0','v112','v143'), default='v0')
 args = parser.parse_args()
 version = args.version
 if args.output_dir == root / 'extracted/v0/romfs-patches': args.output_dir = root / f'extracted/{version}/romfs-patches'
@@ -77,7 +77,7 @@ def flvi_keys(data, base):
         pos += size
     return out
 
-ARCHIVE = 'UI/LayoutArchive/Common.Product.' + ('110' if version == 'v112' else '100') + '.Nin_NX_NVN.blarc.zs'
+ARCHIVE = 'UI/LayoutArchive/Common.Product.' + {'v0':'100','v112':'110','v143':'140'}[version] + '.Nin_NX_NVN.blarc.zs'
 MEMBERS = {
     'anim/ShortCutBG_00_In.bflan': ('C_CaptureBG_00', 'C_CaptureClearBG_00', 'P_CaptureClearBG_00'),
     'anim/AutoBuilder_00_In.bflan': ('C_CaptureBG_00',),

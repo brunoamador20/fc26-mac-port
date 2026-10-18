@@ -72,6 +72,7 @@ for l in open(f'{DIR}/{MOD}.sites.tsv'):
     elif f[1] == 'J': brinfo[a] = (int(f[2], 16), int(f[3]))
     elif f[1] in ('svc', 'cntpct', 'cntvct'): ngate += 1      # 宿主门：语义由宿主定，只做结构核对 | Host gate: semantics are defined by the host, only a structural check is done
     else: sites.append(a)
+atomic_groups = nsoimg.exclusive_groups(orig, [(lo, hi) for lo, hi in winend.items() if lo not in callinfo])
 
 def btarget(b, o):
     w = struct.unpack_from('<I', b, o)[0]; imm = w & 0x3FFFFFF
@@ -124,8 +125,15 @@ def mk(image, arena0):
     st = {'w': [], 'fault': None, 'arena': arena0}
     def wr(uc, acc, addr, size, val, d): st['w'].append((addr, size, val & ((1 << (8 * size)) - 1)))
     def bad(uc, acc, addr, size, val, d): st['fault'] = (acc, addr); return False
+    # Keep one code hook for the emulator's lifetime. Repeatedly adding/removing
+    # hooks lets cached Unicorn translation blocks run past a new stop boundary
+    # (1.4.3 main+0x1590c); a fresh emulator does not reproduce that discrepancy.
+    def code(uc, address, size, data):
+        callback = st.get('code_hook')
+        if callback is not None: callback(uc, address, size, data)
     u.hook_add(UC_HOOK_MEM_WRITE, wr)
     u.hook_add(UC_HOOK_MEM_INVALID, bad)
+    u.hook_add(UC_HOOK_CODE, code)
     return u, st
 
 def restore(u, st):
@@ -167,22 +175,26 @@ def run(u, st, start, patched, init):
             elif seen['patch']:
                 if start - IB in callinfo and start <= addr < IB + winend[start - IB]:
                     return
+                if any(IB + lo <= addr < IB + hi for lo, hi in atomic_groups.get(start - IB, [])):
+                    return
                 end['pc'] = addr; uc.emu_stop()
-        h = u.hook_add(UC_HOOK_CODE, hk)
+        st['code_hook'] = hk
         try: u.emu_start(start, IB + 0x7FFFFFFF, count=400)
         except UcError: pass
-        u.hook_del(h)
+        st['code_hook'] = None
         if end['pc'] is None and st['fault'] is None: end['pc'] = 'NOEXIT'
     elif start - IB in winend:
         lo, hi = start, IB + winend[start - IB]
+        group = atomic_groups.get(start - IB, [(lo - IB, hi - IB)])
         def hk2(uc, addr, size, d):
-            if not (lo <= addr < hi): end['pc'] = addr; uc.emu_stop()
-        h = u.hook_add(UC_HOOK_CODE, hk2)
+            if not any(IB + a <= addr < IB + b for a, b in group): end['pc'] = addr; uc.emu_stop()
+        st['code_hook'] = hk2
         try: u.emu_start(start, IB + 0x7FFFFFFF, count=400)
         except UcError: pass
-        u.hook_del(h)
+        st['code_hook'] = None
         if end['pc'] is None and st['fault'] is None: end['pc'] = 'NOEXIT'
     else:
+        st['code_hook'] = None
         try: u.emu_start(start, IB + 0x7FFFFFFF, count=1)
         except UcError: pass
         end['pc'] = u.reg_read(UC_ARM64_REG_PC) if st['fault'] is None else None

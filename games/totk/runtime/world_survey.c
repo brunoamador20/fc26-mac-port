@@ -14,6 +14,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(TOTK_GAME_V143)
+_Atomic int runtime_survey_pending;
+void runtime_survey_init(Module *m) {
+    (void)m;
+    if (getenv("TOTK_SURVEY")) runtime_fail("1.4.3 survey diagnostic offsets have not been enabled");
+}
+int runtime_survey_command(const char *line) { (void)line; return 0; }
+void runtime_survey_tick(uint64_t frame) { (void)frame; }
+void runtime_survey_cancel_user(void) { }
+#else
 enum { SCENE_SLOT = GAME_ADDR(0x4663f08), FORCE_MATRIX = GAME_ADDR(0x69a18c), ACTOR_POS = GAME_ACTOR_POS, ACTOR_ROT = GAME_ACTOR_ROT };
 static uintptr_t survey_main;
 static void (*survey_force)(void *, const float *, uint32_t);
@@ -166,3 +176,4 @@ void runtime_survey_tick(uint64_t frame) {
     pthread_mutex_unlock(&survey_lock);
     in_tick = 0;
 }
+#endif

@@ -205,7 +205,10 @@ static void preempt_holder(void) {
 
 static void slot_dir_init(void) {
     char def[PATH_MAX] = "", exe[PROC_PIDPATHINFO_MAXSIZE];
-    if (proc_pidpath(getpid(), exe, sizeof exe) > 0) {   /* <native-port>/build/totk-native -> <native-port>/analysis */
+    const char *env = getenv("TOTK_GAME_SLOT_DIR");
+    /* Packaged launchers always supply an external slot. Do not create even
+       an empty analysis directory inside a sealed or read-only app bundle. */
+    if ((!env || !*env) && proc_pidpath(getpid(), exe, sizeof exe) > 0) {   /* <native-port>/build/totk-native -> <native-port>/analysis */
         char *s = strrchr(exe, '/'); if (s) *s = 0;
         s = strrchr(exe, '/'); if (s) *s = 0;
         char analysis[PATH_MAX], real[PATH_MAX];
@@ -214,7 +217,6 @@ static void slot_dir_init(void) {
         if (!realpath(analysis, real)) slot_fail("cannot resolve", analysis);
         snprintf(def, sizeof def, "%s/game-slot", real);
     }
-    const char *env = getenv("TOTK_GAME_SLOT_DIR");
     const char *want = env && *env ? env : def;
     if (!*want) runtime_fail("game slot: no slot directory (set TOTK_GAME_SLOT_DIR)");
     if (mkdir(want, 0755) && errno != EEXIST) slot_fail("cannot create", want);

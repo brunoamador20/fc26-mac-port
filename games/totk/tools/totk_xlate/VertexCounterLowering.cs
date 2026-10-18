@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Security.Cryptography;
 
-// TOTK 1.1.2 visibility counter: each vertex whose s0[8304 + vertex_id*4] == 1
+// TOTK 1.1.2 / 1.4.3 visibility counter: each invocation passing its input test
 // participates in a ballot; the highest active lane adds popcount(ballot) to s1[0].
 // The atomic's return value is unused and no other invocation observes it here.
 // Singleton groups therefore preserve the final modulo-2^32 sum exactly. Metal's
@@ -11,10 +11,16 @@ using System.Security.Cryptography;
 // subgroup fallback (shuffle, vote-dependent output, and atomic allocation differ).
 static class VertexCounterLowering
 {
-    const string CodeHash = "EABE9FDD6FC737B8414E94CC3E14EC0031AB3A156511953ABE5E3A04128524AD";
+    const string VertexCodeHash = "EABE9FDD6FC737B8414E94CC3E14EC0031AB3A156511953ABE5E3A04128524AD";
+    // 1.4.3 reads s0[114 + (instance_id - base_instance)*4] instead of
+    // 1.1.2's s0[8304 + vertex_id*4]. The guarded ballot/popcount/atomic tail
+    // has the same reduction: one increment for every passing invocation.
+    const string InstanceCodeHash = "F5F4D23149565ACD852F6B7091F64CC8CB3AA019CCB33BA3F88CED62C6D1FF7B";
     internal static byte[] Apply(byte[] code, string stage, byte[] spirv, List<string> notes)
     {
-        if (stage != "vs" || Convert.ToHexString(SHA256.HashData(code)) != CodeHash) return spirv;
+        if (stage != "vs") return spirv;
+        string codeHash=Convert.ToHexString(SHA256.HashData(code));
+        if(codeHash!=VertexCodeHash&&codeHash!=InstanceCodeHash)return spirv;
         uint[] w = new uint[spirv.Length / 4]; Buffer.BlockCopy(spirv, 0, w, 0, spirv.Length);
         uint lane = 0, uintType = 0, vectorType = 0, trueId = 0;
         int ballots = 0, loads = 0;

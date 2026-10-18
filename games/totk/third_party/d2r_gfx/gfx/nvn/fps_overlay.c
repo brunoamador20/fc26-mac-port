@@ -36,6 +36,10 @@ static const Glyph FONT[] = {
     {' ', {0, 0, 0, 0, 0, 0, 0}},
 };
 
+static _Atomic int g_hints_visible = 1;
+int fps_overlay_hints_enabled(void) { return atomic_load_explicit(&g_hints_visible, memory_order_relaxed); }
+int fps_overlay_toggle_hints(void) { return !atomic_fetch_xor_explicit(&g_hints_visible, 1, memory_order_relaxed); }
+
 int fps_overlay_enabled(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("TOTK_FPS_OVERLAY"); on = !(e && !strcmp(e, "0")); }
@@ -144,7 +148,7 @@ void fps_overlay_raster(const fps_overlay_info *info, int scale, uint8_t *out, i
     size_text(ss, sizeof ss, info->screen_w, info->screen_h);
     char gen[8] = "";
     if (info->gen > 0 && info->fps >= 0) snprintf(gen, sizeof gen, "+%d", info->gen > 999 ? 999 : info->gen);   // interpolated frames a second (key 2)
-    // MetalFX did the upscale in the last frames (key 1 toggles; user 2026-10-17: the full name, not "MFX"); 2K: true 2K (key 3).
+    // MetalFX did the upscale in the last frames (key 3 selects the manual MetalFX mode); 2K: true 2K output.
     // The whole line in the system font, so switching MetalFX does not switch the font.
     snprintf(text, sizeof text, "FPS %s%s  %s%s%s", fps, gen, ss, info->mfx ? "  MetalFX已开启" : "", info->big ? "  2K" : "");
     raster_line_ct(text, 0, scale, out, FPS_OVERLAY_TEX_W, FPS_OVERLAY_TEX_H, box_w, box_h);
