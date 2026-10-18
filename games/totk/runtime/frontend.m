@@ -143,6 +143,14 @@ static void note_occlusion(const char *when){int v=(window.occlusionState&NSWind
 static TOTKWindowDelegate *windowDelegate;
 int runtime_front_window_visible(void){return atomic_load(&windowVisible);}
 void runtime_front_request_close(void){dispatch_async(dispatch_get_main_queue(), ^{[window performClose:nil];});}
+/* Use the window-close path, not terminate:, so Command-Q also waits for active saves. */
+static void front_install_menu(void){
+ NSMenu *menu=[NSMenu new],*appMenu=[NSMenu new];
+ NSMenuItem *appItem=[NSMenuItem new];appItem.submenu=appMenu;[menu addItem:appItem];
+ NSMenuItem *quit=[[NSMenuItem alloc] initWithTitle:@"Quit Tears of the Kingdom" action:@selector(performClose:) keyEquivalent:@"q"];
+ quit.keyEquivalentModifierMask=NSEventModifierFlagCommand;quit.target=window;
+ [appMenu addItem:quit];NSApp.mainMenu=menu;
+}
 static void *guest_main(void *callback){@autoreleasepool{((void(*)(void))callback)();}return NULL;}
 void runtime_front_run(void(*callback)(void)){
  @autoreleasepool{
@@ -160,6 +168,7 @@ void runtime_front_run(void(*callback)(void)){
   const char *owner=getenv("TOTK_SLOT_OWNER"),*purpose=getenv("TOTK_SLOT_PURPOSE");
   window.title=owner&&*owner&&strcmp(owner,"user")?[NSString stringWithFormat:@"测试局（%s）Ver. %s：%s — 存档副本，进度不会存进你的存档，脚本会自己关闭",owner,TOTK_GAME_VERSION,purpose&&*purpose?purpose:"代理测试"]:[NSString stringWithFormat:@"Tears of the Kingdom  Mac — Ver. %s",TOTK_GAME_VERSION];
   windowDelegate=[TOTKWindowDelegate new];window.delegate=windowDelegate;
+  front_install_menu();
   window.collectionBehavior|=NSWindowCollectionBehaviorFullScreenPrimary;
   window.contentView=[[TOTKInputView alloc] initWithFrame:NSMakeRect(0,0,ww,wh)];
   metalLayer=[CAMetalLayer layer];metalLayer.device=MTLCreateSystemDefaultDevice();metalLayer.pixelFormat=MTLPixelFormatBGRA8Unorm;metalLayer.drawableSize=CGSizeMake(ww,wh);
