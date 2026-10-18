@@ -26,6 +26,8 @@ and the writable shader cache in the app's Documents container.
 Needs for Mac: macOS 26 or later on Apple silicon, the Xcode command line tools, Homebrew with
     brew install opus libvpx python@3.14
 For iPhone/iPad: Xcode 26+ with iOS/Metal toolchains, plus xcodegen, CMake and Ninja.
+Optional: Xcode's Metal toolchain (xcodebuild -downloadComponent MetalToolchain) compiles the startup shaders into the
+app, so moving or rebuilding it does not repeat that work at launch.
 """
 import argparse, concurrent.futures, hashlib, json, os, platform, shutil, subprocess, sys, threading, time
 from pathlib import Path
@@ -522,6 +524,62 @@ def step_shaders(tree, logs, *, version='v0'):
          '--version', version], logs/'prepare-shader-seed.log', cwd=tree)
 
 
+def metal_compiler():
+    """Apple's offline shader compiler, or None: it comes with Xcode's optional Metal toolchain, not the command line tools."""
+    found = subprocess.run(['xcrun', '--find', 'metal'], capture_output=True, text=True)
+    metal = found.stdout.strip()
+    if found.returncode or not metal:
+        return None
+    version = subprocess.run([metal, '--version'], capture_output=True, text=True)
+    return (metal, version.stdout.splitlines()[0]) if not version.returncode and version.stdout else None
+
+
+# The options of totk_precise_opts() in nvn_mtl.m: the translated shaders need exactly rounded float arithmetic.
+METAL_FLAGS = ['-fmetal-math-mode=safe']
+
+
+def step_shader_libs(tree, logs, *, version='v0'):
+    """Compile the startup shaders ahead of time. Metal's own cache of shaders compiled at launch starts over when the
+    app is moved or rebuilt; these files go inside the app. Each is named by the SHA-256 of its source, so the game
+    loads only an exact match, and a rebuild reuses every shader that did not change."""
+    sources = sorted((tree/f'build/shader-seed/{version}').glob('*.metal'))
+    found = metal_compiler()
+    if not found:
+        say('3/4 shaders: no Metal toolchain (xcodebuild -downloadComponent MetalToolchain), so the startup shaders are '
+            'compiled on the first launch, and again after the app is moved or rebuilt')
+        return
+    metal, compiler = found
+    libs = tree/'build/shader-libs'
+    stamp = libs/'compiler.txt'
+    identity = ' '.join([compiler, *METAL_FLAGS])
+    if stamp.is_file() and stamp.read_text() != identity:
+        shutil.rmtree(libs)
+    libs.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(identity)
+    todo = {}
+    for src in sources:
+        digest = sha256(src)
+        if not (libs/f'{digest}.metallib').is_file():
+            todo.setdefault(digest, src)
+    say(f'3/4 shaders: compiling {len(todo)} of {len(sources)} startup shaders ahead of time')
+
+    def compile_one(item):
+        digest, src = item
+        partial = libs/f'{digest}.partial'
+        r = subprocess.run([metal, *METAL_FLAGS, '-o', partial, src], capture_output=True, text=True)
+        if r.returncode:
+            partial.unlink(missing_ok=True)
+            return f'{src.name}\n{r.stdout}{r.stderr}'
+        partial.replace(libs/f'{digest}.metallib')
+    with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 4) as pool:
+        failed = [f for f in pool.map(compile_one, todo.items()) if f]
+    log = logs/'shader-libs.log'
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text('\n'.join(failed))
+    if failed:   # the game compiles these from source at launch, as before
+        say(f'   {len(failed)} shaders did not compile ahead of time; they are compiled at launch ({log})')
+
+
 def step_binary(tree, game, keys, env, logs, *, version="v0"):
     say('4/4 app: building the game binary and the launcher')
     run(['make', 'runtime' if version == 'v0' else f'runtime-{version}'], logs / 'runtime.log', cwd=tree, env=env)
@@ -584,6 +642,10 @@ def step_app(tree, out, logs, *, version="v0"):
     except (ValueError, KeyError, OSError, TypeError) as error:
         raise BuildError(f'invalid prepared startup shader seed: {error}') from None
     copy_tree(seed, res/'build/shader-seed')
+    for src in sorted(seed.glob('*.metal')):
+        lib = tree/f'build/shader-libs/{sha256(src)}.metallib'
+        if lib.is_file():
+            clone(lib, res/'build/shader-libs'/lib.name)
     clone(tree / 'build/app-launcher', tmp / 'Contents/MacOS/TOTK')
     info = dict(CFBundleDevelopmentRegion='en', CFBundleExecutable='TOTK', CFBundleIdentifier=BUNDLE_ID, CFBundleName=APP_NAME,
                 CFBundleDisplayName=APP_NAME, CFBundlePackageType='APPL', CFBundleShortVersionString=expected['display_version'],
@@ -664,6 +726,10 @@ def step_warm_metal(tree, out, logs):
     seed = build / 'shader-seed'
     tool = build / 'warm-metal-cache'   # next to the game binary: Metal matches the length of the program's folder path
     tool.unlink(missing_ok=True)        # left by an interrupted build
+    sources = sorted(seed.glob('*_b.metal'))
+    if sources and all((build / 'shader-libs' / f'{sha256(src)}.metallib').is_file() for src in sources):
+        say('4/4 app: the startup shaders are compiled into the app (step_shader_libs), so Metal\'s cache needs no warming')
+        return
     users = metal_cache_users()
     if users or subprocess.run(['pgrep', '-q', 'totk-native']).returncode == 0:
         who = ', '.join(users) if users else 'a game'
@@ -780,6 +846,7 @@ def main(argv):
     if update:
         step_update_data(tree, game, update, keys, logs, version=version)
     step_shaders(tree, logs, version=version)
+    step_shader_libs(tree, logs, version=version)
     step_binary(tree, game, keys, env, logs, version=version)
     say(f'4/4 app: assembling {out}')
     if args.platform=='ios':
