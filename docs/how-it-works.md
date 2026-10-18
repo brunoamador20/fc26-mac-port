@@ -24,6 +24,13 @@ audio renderer with its effects, mixed and played through Core Audio), the softw
 the movie decoder (VP9 through libvpx). A small number of fixed patches change the game itself, each checked against
 the original instructions first: frame timing by real time, the 60 FPS present interval, the output resolution.
 
+Guest memory must lie below 2^39 (the SDK encodes IPC buffer addresses in 39 bits). On macOS 26 the host reserves the
+64 GiB alias region at `0x70_0000_0000` and the 6 GiB stack and heap below it. macOS 27 no longer leaves room for
+either: the shared cache fills `0x1_8000_0000..0xF_C000_0000`, and the system reserves about 24 GiB at a randomized
+place in `0x70_0000_0000..2^39`. When the fixed layout does not fit, the host places stack, heap and alias region side
+by side in one free hole (as the iOS layout does) and shrinks the alias region in 4 GiB steps, down to 8 GiB, until it
+fits; the game uses less than 3 GiB of it. The `guest layout` log line shows the result. macOS 26 keeps the fixed layout.
+
 ## The graphics (games/totk/third_party/d2r_gfx/gfx/nvn)
 
 The game records NVN commands (Nintendo's graphics API) into command buffers. The NVN layer implements the API on the
