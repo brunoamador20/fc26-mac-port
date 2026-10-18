@@ -13,7 +13,8 @@ static NSString *totk_seed_hash(NSData *data) {
     return s;
 }
 
-static NSDictionary *totk_seed_import(NSString *source, NSString *cache, NSError **error) {
+// marker: a receipt in the cache that skips re-importing the same manifest; nil imports every time (fill packs).
+static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NSString *marker, NSError **error) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *manifestPath = [source stringByAppendingPathComponent:@"seed-manifest.json"];
     if (![fm fileExistsAtPath:manifestPath]) return @{@"available": @NO}; // development/older bundles
@@ -26,13 +27,12 @@ static NSDictionary *totk_seed_import(NSString *source, NSString *cache, NSError
     if (problem) goto fail;
     {
         NSString *fingerprint = totk_seed_hash(raw);
-        NSString *marker = [cache stringByAppendingPathComponent:@"seed-installed.json"];
-        NSData *oldData = [NSData dataWithContentsOfFile:marker];
+        NSData *oldData = marker ? [NSData dataWithContentsOfFile:marker] : nil;
         NSDictionary *old = oldData ? [NSJSONSerialization JSONObjectWithData:oldData options:0 error:nil] : nil;
         NSDictionary *files = m[@"files"];
         NSArray<NSString *> *names = [files.allKeys sortedArrayUsingSelector:@selector(compare:)];
         NSRegularExpression *safe = [NSRegularExpression regularExpressionWithPattern:
-            @"^(?:[0-9a-f]{64}\\.variants|[0-9a-f]{64}-[0-9a-f]{12}_b\\.(?:metal|json)|pso_manifest\\.tsv)$" options:0 error:nil];
+            @"^(?:[0-9a-f]{64}\\.variants|[0-9a-f]{64}-[0-9a-f]{12}_b\\.(?:metal|json|metallib)|pso_manifest\\.tsv)$" options:0 error:nil];
         BOOL installed = [old isKindOfClass:NSDictionary.class] && [old[@"manifest_sha256"] isEqual:fingerprint];
         for (id name in names) {
             if (![name isKindOfClass:NSString.class] || ![safe numberOfMatchesInString:name options:0 range:NSMakeRange(0, [name length])]) {
@@ -79,11 +79,34 @@ static NSDictionary *totk_seed_import(NSString *source, NSString *cache, NSError
             imported++;
         }
         NSData *receipt = [NSJSONSerialization dataWithJSONObject:@{@"manifest_sha256": fingerprint} options:0 error:error];
-        if (!receipt || ![receipt writeToFile:marker options:NSDataWritingAtomic error:error]) return nil;
+        if (marker && (!receipt || ![receipt writeToFile:marker options:NSDataWritingAtomic error:error])) return nil;
         return @{@"available": @YES, @"shaders": m[@"shaders"], @"imported_files": @(imported)};
     }
 fail:
     if (error) *error = [NSError errorWithDomain:@"MacNativeGames.ShaderSeed" code:1
         userInfo:@{NSLocalizedDescriptionKey: problem ?: @"Cannot import startup shaders"}];
     return nil;
+}
+
+static NSDictionary *totk_seed_import(NSString *source, NSString *cache, NSError **error) {
+    return totk_seed_import_into(source, cache, [cache stringByAppendingPathComponent:@"seed-installed.json"], error);
+}
+
+// iOS has no translator: ios/tools/fill_shaders.py translates the variants a device missed and pushes them as packs
+// (directories in the seed format) under root. Each pack is checked and merged like the seed, then deleted; a rejected
+// one (an interrupted push) is deleted too, and its variants stay requested until the tool runs again.
+static NSDictionary *totk_fill_import(NSString *root, NSString *cache) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSArray<NSString *> *packs = [[fm contentsOfDirectoryAtPath:root error:nil] ?: @[] sortedArrayUsingSelector:@selector(compare:)];
+    NSUInteger merged = 0, imported = 0; NSMutableArray<NSString *> *rejected = [NSMutableArray array];
+    for (NSString *name in packs) {
+        NSString *pack = [root stringByAppendingPathComponent:name]; BOOL dir = NO;
+        if (![fm fileExistsAtPath:pack isDirectory:&dir] || !dir) continue;
+        NSError *error = nil;
+        NSDictionary *r = totk_seed_import_into(pack, cache, nil, &error);
+        if (r && [r[@"available"] boolValue]) { merged++; imported += [r[@"imported_files"] unsignedIntegerValue]; }
+        else [rejected addObject:[NSString stringWithFormat:@"%@: %@", name, error ? error.localizedDescription : @"no manifest"]];
+        [fm removeItemAtPath:pack error:nil];
+    }
+    return @{@"packs": @(merged), @"imported_files": @(imported), @"rejected": rejected};
 }
