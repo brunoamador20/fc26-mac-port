@@ -37,6 +37,26 @@ service that turns each request into the MSL and its reflection file), compiled 
 ships ready-made in `games/totk/prebuilt/macos-arm64`, so neither building nor playing needs .NET, and playing needs no Python. Building still requires Python 3.14. The build also prepares a selected-version startup shader seed from the local RomFS: MSL, reflection and dependency indexes, not GPU-specific compiled binaries. The first launch imports it into the user cache and warms it before releasing the first frame. A pipeline identifier list alone cannot do this when its shaders are absent. New binding-dependent variants still use runtime translation. MetalFX upscales the game's 1600x900 scene into its
 1080p or 1440p canvas and can generate in-between frames.
 
+## Texture storage layout
+
+Automatic block height follows NVN's integer rounding: truncate `height_in_blocks * 1.5 / 8` before choosing the GOB power of two. The deko3d heuristic rounds that division up, which differs at several dimension boundaries. For the shrine warp pad's 160×160 BC3-sRGB texture, the wrong H3 layout reads padding as black texels; NVN uses H2. The allocation size is 57,344 bytes in both cases, so a size check alone cannot catch this error. Explicit packaged layouts continue to override the automatic choice.
+
+The correction was compared against the original SDK's CPU metadata functions for 40 uncompressed/BC3 boundary cases, including every mip's offset and block height: 16 mismatches before, none after. The asset's base mip and the running 1.1.2 shrine scene also confirmed the correction. These scoped checks do not establish whole-game rendering correctness. Run the game-data-free regression with `make -C games/totk probe-texture-auto-layout`; its expected sizes and block heights are independent SDK query results.
+
+The same regression was reproduced and corrected in TOTK 1.4.3 on Apple M4 Pro against upstream `41e1e0c`: the baseline leaves half of the blue warp pad black, while the patched layout restores its complete pattern. Both runtimes used the same original save copy and camera input, upstream picture settings, and the same minimal host address-layout compatibility fix (not included in this rendering change). Startup prewarming was disabled equally for this pixel comparison; it is not a performance benchmark. Capture times and weather animation differ.
+
+Historical TOTK 1.1.2 shrine captures and the fresh 1.4.3 pair are hosted as [separate evidence attachments](https://github.com/huahuahuahuahuahuahuahua/MacNativeGames/releases/tag/rendering-evidence-20261018), with visual comparisons in [PR #3](https://github.com/ly05010419/MacNativeGames/pull/3). Screenshot files are excluded from the code commits. This targeted comparison does not imply whole-game rendering coverage.
+
+## Depth classification clears
+
+The skill effects classify pixels into a D16 depth attachment and select their colour passes with an EQUAL depth test. On the tested Apple GPU, a load-clear of `0.5` becomes 32767 while a fragment writing `0.5` becomes 32768. The difference exposes the 64-pixel classification tiles as coloured squares when using Ultrahand or Recall. D16 attachment and texture load-clears now select the nearest 16-bit value, then provide a value inside both its truncation and rounding bins. A quarter-unit margin also avoids rounding below the intended integer when Metal converts the descriptor to float. Other depth formats retain their original clear values; fragment-based masked clears already use the fragment conversion.
+
+`make -C games/totk probe-depth16-clear` takes the shared game slot and compares load-clears with an independent fragment-depth reference through both Metal 3 and Metal 4. The game-free fixture covers 777 values, including all 256 skill classification encodings, endpoints, nearby floating-point values and a deterministic random sample. On the local M4, each API had 292 mismatches before the correction and none after.
+
+The live TOTK 1.4.3 comparison on Apple M4 Pro also reproduced the grid with Recall and removed it with this correction, using the same save and camera sequence described above. This is a targeted Recall check, not a claim that every skill or area was tested.
+
+Historical 1.1.2 Ultrahand captures and the current 1.4.3 Recall pair are hosted in the same [separate evidence attachments](https://github.com/huahuahuahuahuahuahuahua/MacNativeGames/releases/tag/rendering-evidence-20261018) and linked from PR #3. No screenshots, game binaries, extracted assets or saves are included in the code commits.
+
 ## The build (build_app.py)
 
 1. Detect XCI (HFS0 secure partition) or NSP (PFS0) by its header. Read the base Program NCA in place, extract ExeFS,
