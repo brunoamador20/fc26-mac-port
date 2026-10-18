@@ -1,10 +1,10 @@
 // NVN 贴图的存储尺寸 / 对齐 / 各级偏移（Tegra X1 块线性布局）。
-// 算法移植自 deko3d source/dk_image.cpp（zlib 许可，Copyright (C) 2018-2020 fincs）：
+// 基于 deko3d source/dk_image.cpp（zlib 许可，Copyright (C) 2018-2020 fincs），自动块高按 NVN SDK 的整除规则修正：
 //   一个 GOB = 64 字节 × 8 行 = 512 字节；块高（tileH，单位 GOB）按「高度×1.5」挑；各级按块对齐累加。
 // 游戏的预排布贴图（SetPackagedTextureLayout）带 8 字节布局参数：第 0 字节 = 块高 log2（真游戏 16 例对照得出，
 // 其中 4 例与自动算法不同），有它时以它为准。
 // Storage size / alignment / per-level offsets of NVN textures (Tegra X1 block-linear layout).
-// The algorithm is ported from deko3d source/dk_image.cpp (zlib license, Copyright (C) 2018-2020 fincs):
+// Based on deko3d source/dk_image.cpp (zlib license, Copyright (C) 2018-2020 fincs), with NVN SDK integer rounding for automatic tile height:
 //   one GOB = 64 bytes × 8 rows = 512 bytes; the block height (tileH, in GOBs) is picked by 'height×1.5'; levels are accumulated with block alignment.
 // The game's packaged textures (SetPackagedTextureLayout) carry 8 bytes of layout parameters: byte 0 = log2 of the block height (derived by comparing 16 cases from the real game,
 // 4 of which differ from the automatic algorithm); when present it takes precedence.
@@ -126,7 +126,10 @@ void nvn_tex_layout(const nvn_texdesc *d, nvn_texlayout *o) {
         return;
     }
     unsigned tileH = 0, tileD = 0;
-    if (dpl == 2) { uint32_t ah = blk(h * sy, t.bh); tileH = d->pkg_block_h ? (unsigned)d->pkg_block_h - 1 : pick_tile((ah + ah / 2 + 7) / 8); }
+    /* NVN truncates height*1.5 to whole GOB rows before choosing the power of
+       two. Rounding up here changes e.g. 40 BC rows from H2 to H3 even when
+       the total allocation size is unchanged, so padding becomes black texels. */
+    if (dpl == 2) { uint32_t ah = blk(h * sy, t.bh); tileH = d->pkg_block_h ? (unsigned)d->pkg_block_h - 1 : pick_tile((ah + ah / 2) / 8); }
     else if (dpl == 3) tileD = pick_tile(z + z / 2);
     uint64_t ls = layer_bytes(d, dpl, layered, w, h, z, tileH, tileD, t);
     if ((d->flags & 0x200) && !d->pkg_block_h && minimal_layout_on()) {
