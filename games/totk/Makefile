@@ -356,3 +356,10 @@ $(RENDER_PROBE_DIR)/texture-auto-layout-probe: tests/texture_auto_layout/probe.c
 	xcrun clang -std=c11 -O2 -Wall -Wextra -Werror -Ithird_party/d2r_gfx/gfx/nvn -Ithird_party/d2r_gfx/gfx/tex tests/texture_auto_layout/probe.c third_party/d2r_gfx/gfx/nvn/nvn_tex.c third_party/d2r_gfx/gfx/tex/nvn_deswizzle.c -o "$@"
 probe-texture-auto-layout: $(RENDER_PROBE_DIR)/texture-auto-layout-probe
 	"$(RENDER_PROBE_DIR)/texture-auto-layout-probe"
+
+.PHONY: probe-depth16-clear
+$(RENDER_PROBE_DIR)/depth16-clear-probe: tests/depth16_clear/probe.m third_party/d2r_gfx/gfx/nvn/nvn_depth_clear.h
+	@mkdir -p "$(RENDER_PROBE_DIR)"
+	xcrun clang -std=c11 -O2 -Wall -Wextra -Werror -fobjc-arc -Ithird_party/d2r_gfx/gfx/nvn tests/depth16_clear/probe.m -framework Metal -framework Foundation -o "$@"
+probe-depth16-clear: $(RENDER_PROBE_DIR)/depth16-clear-probe
+	$(GAME_SLOT_RUN) "$(RENDER_PROBE_DIR)/depth16-clear-probe"

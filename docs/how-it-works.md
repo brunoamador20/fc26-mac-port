@@ -47,6 +47,16 @@ The same regression was reproduced and corrected in TOTK 1.4.3 on Apple M4 Pro a
 
 Historical TOTK 1.1.2 shrine captures and the fresh 1.4.3 pair are hosted as [separate evidence attachments](https://github.com/huahuahuahuahuahuahuahua/MacNativeGames/releases/tag/rendering-evidence-20261018), with visual comparisons in [PR #3](https://github.com/ly05010419/MacNativeGames/pull/3). Screenshot files are excluded from the code commits. This targeted comparison does not imply whole-game rendering coverage.
 
+## Depth classification clears
+
+The skill effects classify pixels into a D16 depth attachment and select their colour passes with an EQUAL depth test. On the tested Apple GPU, a load-clear of `0.5` becomes 32767 while a fragment writing `0.5` becomes 32768. The difference exposes the 64-pixel classification tiles as coloured squares when using Ultrahand or Recall. D16 attachment and texture load-clears now select the nearest 16-bit value, then provide a value inside both its truncation and rounding bins. A quarter-unit margin also avoids rounding below the intended integer when Metal converts the descriptor to float. Other depth formats retain their original clear values; fragment-based masked clears already use the fragment conversion.
+
+`make -C games/totk probe-depth16-clear` takes the shared game slot and compares load-clears with an independent fragment-depth reference through both Metal 3 and Metal 4. The game-free fixture covers 777 values, including all 256 skill classification encodings, endpoints, nearby floating-point values and a deterministic random sample. On the local M4, each API had 292 mismatches before the correction and none after.
+
+The live TOTK 1.4.3 comparison on Apple M4 Pro also reproduced the grid with Recall and removed it with this correction, using the same save and camera sequence described above. This is a targeted Recall check, not a claim that every skill or area was tested.
+
+Historical 1.1.2 Ultrahand captures and the current 1.4.3 Recall pair are hosted in the same [separate evidence attachments](https://github.com/huahuahuahuahuahuahuahua/MacNativeGames/releases/tag/rendering-evidence-20261018) and linked from PR #3. No screenshots, game binaries, extracted assets or saves are included in the code commits.
+
 ## The build (build_app.py)
 
 1. Detect XCI (HFS0 secure partition) or NSP (PFS0) by its header. Read the base Program NCA in place, extract ExeFS,
