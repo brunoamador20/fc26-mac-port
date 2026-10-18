@@ -3,6 +3,7 @@
 #include "romfs_config.h"
 #include "game_version.h"
 #include "fs_host.h"
+#include "romfs_path.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -187,10 +188,9 @@ void runtime_fs_init(void) {
  overlay_init();
  fprintf(stderr,"[totk] native read-only RomFS ready: %llu files\n",(unsigned long long)file_count);
 }
-static int path_ok(const char *p) {if(!p||!*p||*p=='/'||strchr(p,'\\'))return 0;const char *q=p;while(*q){const char *e=strchr(q,'/');size_t n=e?(size_t)(e-q):strlen(q);if(!n||(n==1&&q[0]=='.')||(n==2&&q[0]=='.'&&q[1]=='.'))return 0;if(!e)break;q=e+1;}return 1;}
+static int path_ok(const char *p) {return romfs_path_valid_relative(p);}
 static const char *rom_path(const char *path) {
- size_t n=strlen(mount_name);if(!n||!path||strncmp(path,mount_name,n)||path[n]!=':'||path[n+1]!='/')return NULL;
- path+=n+2;return path_ok(path)?path:NULL;
+ return romfs_path_relative(mount_name,path);
 }
 static uint64_t lower(const char *name) {uint64_t lo=0,hi=file_count;while(lo<hi){uint64_t m=lo+(hi-lo)/2;if(strcmp(entry_name(entry(m)),name)<0)lo=m+1;else hi=m;}return lo;}
 static unsigned mount_rom(const char *name,void *cache,uint64_t size) {
@@ -244,6 +244,22 @@ void *runtime_fs_override(const char *name) {
 }
 void runtime_fs_probe(void) {
  runtime_fs_init();need(mount_rom("rom",NULL,0)==0,"mount RomFS");unsigned count=0;uint8_t buffer[257];uint64_t sum=0;
+ /* Audio stream paths include an extra slash after the mount root. Verify
+    actual resource lookup and bytes, while still rejecting path traversal. */
+ {
+  const char *name="Sound/Resource/Stream/Dm_OP_0001.bwav";
+  char path[256];uint8_t expected[257],actual[257];uint64_t h,n;
+  snprintf(path,sizeof path,"rom:/%s",name);
+  need(!runtime_romfs_open(&h,path,1),"open normal audio path");
+  need(!runtime_romfs_read(&n,h,0,expected,sizeof expected)&&n==sizeof expected,"read normal audio path");runtime_romfs_close(h);
+  for(int slashes=2;slashes<=3;slashes++){
+   snprintf(path,sizeof path,slashes==2?"rom://%s":"rom:///%s",name);
+   int type=-1;need(!runtime_romfs_entry_type(&type,path)&&type==1,"normalized audio entry type");
+   need(!runtime_romfs_open(&h,path,1),"open normalized audio stream path");
+   need(!runtime_romfs_read(&n,h,0,actual,sizeof actual)&&n==sizeof actual&&!memcmp(actual,expected,sizeof actual),"normalized audio stream bytes");runtime_romfs_close(h);
+  }
+  need(runtime_romfs_open(&h,"rom://../Sound/Resource/Stream/Dm_OP_0001.bwav",1)!=0,"reject traversal after repeated root separator");
+ }
  for(uint64_t i=0;i<file_count;i+=file_count/64){Entry e=entry(i);char p[4096];need(snprintf(p,sizeof(p),"rom:/%s",entry_name(e))<(int)sizeof(p),"probe path");uint64_t h=0,n=0;int64_t size;need(!runtime_romfs_open(&h,p,1)&&!runtime_romfs_size(&size,h)&&(uint64_t)size==e.size,"probe open/size");need(!runtime_romfs_read(&n,h,0,buffer,sizeof(buffer)),"probe partial read");for(uint64_t j=0;j<n;j++)sum=sum*131+buffer[j];need(!runtime_romfs_read(&n,h,size,buffer,1)&&n==0,"probe EOF");runtime_romfs_close(h);count++;}
  for(unsigned k=0;k<noverlay;k++){Entry e=entry(overlays[k].index);char p[4096];need(snprintf(p,sizeof(p),"rom:/%s",entry_name(e))<(int)sizeof(p),"probe overlay path");uint64_t oh=0,n=0;int64_t size=0;uint8_t a[64],b[64];
   need(!runtime_romfs_open(&oh,p,1)&&!runtime_romfs_size(&size,oh)&&(uint64_t)size==overlays[k].size,"probe overlay size");need(!runtime_romfs_read(&n,oh,size-64,a,64)&&n==64&&pread(overlays[k].fd,b,64,(off_t)(size-64))==64&&!memcmp(a,b,64),"probe overlay bytes");runtime_romfs_close(oh);}
