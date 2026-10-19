@@ -1,5 +1,6 @@
 /* 1.4.3 has a new compiler and frame-controller layout. Every adapted game-code
    site below is checked before any write; older versions use game_patches.c. */
+#include "aspect_patch.h"
 #include "game_patches.h"
 #include "game_version.h"
 #include <stdio.h>
@@ -110,6 +111,9 @@ void runtime_game_patches(Module *m) {
     patch_realtime(m);
     patch_output_res(m);
     patch_render_res(m);
+    { static const uint64_t sites[] = {0x628c74, 0xb43460, 0x1ff04f4, 0x253fbb0};   /* camera update and setup, viewport x2 */
+      aspect_install(m, "1.4.3", sites, 4, ((m->text_end + 15) & ~15ULL) + 48,   /* after the two veneers above */
+                     (m->file_size + 0x3fff) & ~0x3fffULL); }
     const char *enabled = getenv("TOTK_FPS60");
     if (enabled && !strcmp(enabled, "0")) {
         fprintf(stderr, "[totk] 1.4.3 shipping frame controller (TOTK_FPS60=0)\n");

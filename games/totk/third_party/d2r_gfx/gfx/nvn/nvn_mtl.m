@@ -11097,12 +11097,13 @@ static void outup_note_gpu(int slot) {   // the present command buffer of this s
              (unsigned long long)g_outup_n, a[256], a[486], (unsigned long long)g_outup_skip[0], (unsigned long long)g_outup_skip[1], (unsigned long long)g_outup_skip[2]);
     }
 }
-// TOTK_STRETCH=1: fill the window whatever its shape, like an emulator's "Stretch to Window" (aspect-ratio mods such as
+// TOTK_STRETCH=1, or the ultrawide ratio of key 4 / TOTK_ASPECT: fill the window whatever its shape, like an emulator's "Stretch to Window" (aspect-ratio mods such as
 // TOTK-Ultrawide draw a horizontally squeezed picture for it). Off: the game picture keeps its shape, centred.
+extern float runtime_aspect_now(void) __attribute__((weak_import));   // runtime/aspect_patch.h (Mac game binaries)
 static int present_stretch(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("TOTK_STRETCH"); on = e && !strcmp(e, "1"); }
-    return on;
+    return on || (runtime_aspect_now && runtime_aspect_now() > 0);   // key 4 / TOTK_ASPECT: runtime/aspect_patch.h
 }
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int fps_overlay) {
     NSUInteger cx = 0, cy = 0, cw = src.width, ch = src.height;

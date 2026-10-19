@@ -1,4 +1,5 @@
 #include "game_patches.h"
+#include "aspect_patch.h"
 #include "game_version.h"
 #include "world_survey.h"
 #include <TargetConditionals.h>
@@ -443,6 +444,12 @@ void runtime_game_patches(Module *m) {
     patch_render_res(m);
     patch_output_res(m);
     patch_trap(m);
+#if defined(TOTK_GAME_V121)
+    { static const uint64_t sites[] = {0xcb4b10, 0x12521cc, 0x19b36f0, 0x1ecdf68};   /* camera x2, viewport x2 (aspect_patch.h) */
+      aspect_install(m, "1.2.1", sites, 4, (m->text_end + 15) & ~15ULL, (m->file_size + 0x3fff) & ~0x3fffULL); }
+#else
+    if (aspect_requested()) runtime_fail("TOTK_ASPECT: only 1.2.1 and 1.4.3 so far");
+#endif
     if (!fps60_enabled()) {
         fprintf(stderr, "[totk] 60 FPS patch off (TOTK_FPS60=0): shipping present interval range 2..3\n");
         return;
