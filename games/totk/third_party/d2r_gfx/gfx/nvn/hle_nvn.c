@@ -150,7 +150,11 @@ NVN(nvnDeviceGetProcAddress, PFNNVNGENERICFUNCPTRPROC, const NVNdevice *d, const
 // 设备属性：Tegra X1 实测值（nnheaders nvn_DeviceConstantsNX.h，在 SMO 上逐项调 nvnDeviceGetInteger 得到）
 // Device properties: values measured on Tegra X1 (nnheaders nvn_DeviceConstantsNX.h, obtained by calling nvnDeviceGetInteger item by item on SMO)
 static const int g_devinfo[] = {
+#ifdef GAME_BOTW
+    [0x00] = 53, [0x01] = 311,  // Breath of the Wild 1.6.0 main+0xe55304 requires major 53, minor >= 311 (botw.md).
+#else
     [0x00] = 55, [0x01] = 15,   // Experimental ABI target: TOTK main+e9d614 requires major 55, minor >= 15. Unsupported functions stop.
+#endif
     [0x02] = 14, [0x03] = 65536, [0x04] = 256, [0x05] = 8, [0x06] = 16, [0x07] = 4, [0x08] = 16, [0x09] = 32,
     [0x0A] = 16, [0x0B] = 4, [0x0C] = 4, [0x0D] = 4, [0x0E] = 16, [0x0F] = 32, [0x10] = 32, [0x11] = 256, [0x12] = 256,
     [0x13] = 4, [0x14] = 8, [0x15] = 512, [0x16] = 256, [0x17] = 2, [0x18] = 256, [0x19] = 4096, [0x1A] = 131072,
@@ -2191,6 +2195,16 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     totk_tl(TL_ACQ_OUT, (uint64_t)*idx, 0);
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
+#ifdef GAME_BOTW
+/* NVN 53 (Breath of the Wild 1.6.0, botw.md): the queue-side acquire. The same wait as nvnWindowAcquireTexture without a
+   sync: it returns once the texture may be drawn into, and every later GPU use of it is ordered after the present copy on
+   the one Metal queue. */
+NVN(nvnQueueAcquireTexture, NVNqueueAcquireTextureResult, NVNqueue *q, NVNwindow *w, int *idx) {
+    (void)q;
+    return h_nvnWindowAcquireTexture(w, NULL, idx) == NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS
+        ? NVN_QUEUE_ACQUIRE_TEXTURE_RESULT_SUCCESS : NVN_QUEUE_ACQUIRE_TEXTURE_RESULT_NATIVE_ERROR;
+}
+#endif
 
 // 帧边界：每次出图打印 / 落盘本帧各 NVN 函数调用次数
 // Frame boundary: on each present, print / write to disk the call count of each NVN function for this frame

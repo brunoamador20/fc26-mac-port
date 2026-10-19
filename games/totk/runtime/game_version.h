@@ -4,7 +4,19 @@
 #pragma once
 #define GAME_ADDR_JOIN(x) GAME_ADDR_##x
 #define GAME_ADDR(x) GAME_ADDR_JOIN(x)
-#if defined(TOTK_GAME_V143)
+#if defined(GAME_BOTW160)
+/* The Legend of Zelda: Breath of the Wild 1.6.0 (botw.md). The TOTK patch sites do not exist here: game_patches_botw.c replaces
+   game_patches.c, and the shared code that uses TOTK addresses is compiled out with GAME_BOTW. */
+#ifndef GAME_BOTW
+#define GAME_BOTW 1
+#endif
+#define TOTK_GAME_VERSION "1.6.0"
+#define GAME_NAME "Breath of the Wild"
+#define TOTK_GAME_DIR "botw160"
+#define GAME_ADDR_0xe995c4 0xe53f8c   /* return address of nnMain's only call to nn::oe::SetFocusHandlingMode */
+#define GAME_ADDR_0x2aa4fa0 0x2128690 /* nn::swkbd::ShowKeyboard: main's PLT stub */
+#define GAME_ADDR_0x453f648 0x2c7ef90 /* nn::swkbd::ShowKeyboard: main's GOT slot */
+#elif defined(TOTK_GAME_V143)
 #define TOTK_GAME_VERSION "1.4.3"
 #define TOTK_GAME_DIR "v143"
 #define GAME_ADDR_0x15ecb0c 0x1bd01c4
@@ -130,4 +142,7 @@
 #define GAME_ADDR_0x453f648 0x453f648
 #define GAME_ADDR_0x8f6cbc 0x8f6cbc
 #define GAME_OUTPUT_CALL_WORD 0x94000082u
+#endif
+#ifndef GAME_NAME
+#define GAME_NAME "Tears of the Kingdom"   /* window title and menu (game_version.h is per binary) */
 #endif

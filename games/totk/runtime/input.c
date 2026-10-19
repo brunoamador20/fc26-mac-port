@@ -88,6 +88,18 @@ static uint32_t show_controller_support(ControllerSupportResult *out,const void 
  return 0;
 }
 /* Vibration devices and the six-axis sensor: runtime/hid_feedback.c (none unless TOTK_RUMBLE=1 / TOTK_GYRO=1). */
+#ifdef GAME_BOTW
+/* SDK 7 (Breath of the Wild 1.6.0, botw.md). The console's own seven-axis sensor (Labo VR) is absent on a Mac: it starts and
+   stops without states. Gyroscope zero-drift mode and the dual Joy-Con assignment change nothing for the host controller.
+   The one-argument controller applet returns at once, as the two-argument one does (one player). */
+static uint32_t seven_axis_init(void *work,unsigned long size){(void)work;(void)size;fprintf(stderr,"[botw] seven-axis sensor: not present\n");return 0;}
+static uint32_t seven_axis_ok(void){return 0;}
+static void seven_axis_reset(void){}
+static int seven_axis_states(void *out,int count){(void)out;(void)count;return 0;}
+static void zero_drift_mode(const void *handle,const int *mode){(void)handle;(void)mode;}
+static void joy_dual(const uint32_t *id){(void)id;}
+static uint32_t show_controller_support_v1(const void *arg){return show_controller_support(NULL,arg);}
+#endif
 void *runtime_input_override(const char *name){
  void *feedback=runtime_hid_feedback_override(name);if(feedback)return feedback;
  static const struct{const char *name;void *fn;} entries[]={
@@ -98,7 +110,17 @@ void *runtime_input_override(const char *name){
  {"_ZN2nn3hid18SetNpadJoyHoldTypeENS0_15NpadJoyHoldTypeE",hold_type},{"_ZN2nn3hid14DisconnectNpadERKj",disconnect},
  {"_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE",show_controller_support},
  {"_ZN2nn3hid15InitializeMouseEv",initialize_mouse},{"_ZN2nn3hid18InitializeKeyboardEv",initialize_keyboard},
- {"_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi",mouse_states},{"_ZN2nn3hid16GetKeyboardStateEPNS0_13KeyboardStateE",keyboard_state}};
+ {"_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi",mouse_states},{"_ZN2nn3hid16GetKeyboardStateEPNS0_13KeyboardStateE",keyboard_state}
+#ifdef GAME_BOTW
+ ,{"_ZN2nn3hid28InitializeSevenSixAxisSensorEPvm",seven_axis_init},{"_ZN2nn3hid26FinalizeSevenSixAxisSensorEv",seven_axis_ok},
+ {"_ZN2nn3hid23StartSevenSixAxisSensorEv",seven_axis_ok},{"_ZN2nn3hid22StopSevenSixAxisSensorEv",seven_axis_ok},
+ {"_ZN2nn3hid32ResetSevenSixAxisSensorTimestampEv",seven_axis_reset},
+ {"_ZN2nn3hid27GetSevenSixAxisSensorStatesEPNS0_23SevenSixAxisSensorStateEi",seven_axis_states},
+ {"_ZN2nn3hid25SetGyroscopeZeroDriftModeERKNS0_19SixAxisSensorHandleERKNS0_22GyroscopeZeroDriftModeE",zero_drift_mode},
+ {"_ZN2nn3hid28SetNpadJoyAssignmentModeDualERKj",joy_dual},
+ {"_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE",show_controller_support_v1}
+#endif
+ };
  for(unsigned i=0;i<sizeof(entries)/sizeof(*entries);i++)if(!strcmp(name,entries[i].name))return entries[i].fn;return NULL;
 }
 

@@ -14,7 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(TOTK_GAME_V143)
+#if defined(TOTK_GAME_V143) || defined(GAME_BOTW)
 _Atomic int runtime_survey_pending;
 void runtime_survey_init(Module *m) {
     (void)m;
