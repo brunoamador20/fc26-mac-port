@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdatomic.h>
 #include <math.h>
 
@@ -377,6 +378,44 @@ static void check_site(const Module *m, const GamePatch *p) {
     }
 }
 
+/* TOTK_PCHTXT=<file>: an emulator ExeFS patch for main in pchtxt form, as community mods ship them (for example
+   TOTK-Ultrawide's aspect-ratio patch), for trying them here. Mac only: the phone's code is patched at build. Its
+   @nsobid must be main's build id, read from the extracted ExeFS (extracted/<version>/exefs/main at 0x40); the lines
+   between @enabled and @stop are "<main address> <bytes>" (offset_shift 0x100 is the NSO header only the IPS form
+   counts). It is applied before this runtime's own patches, whose checks of the original words then refuse a file that
+   overlaps them. */
+static void patch_pchtxt(Module *m) {
+    const char *path = getenv("TOTK_PCHTXT");
+    if (!path || !*path) return;
+    FILE *f = fopen(path, "r");
+    if (!f) runtime_fail("TOTK_PCHTXT: cannot open the file");
+    char nso[256], want[41] = {0}; uint8_t id[20];
+    snprintf(nso, sizeof nso, "extracted/%s/exefs/main", TOTK_GAME_DIR);
+    FILE *n = fopen(nso, "rb");
+    if (!n || fseek(n, 0x40, SEEK_SET) || fread(id, 1, sizeof id, n) != sizeof id) runtime_fail("TOTK_PCHTXT: cannot read main's build id from extracted/<version>/exefs/main");
+    fclose(n);
+    for (int i = 0; i < 20; i++) snprintf(want + 2 * i, 3, "%02X", id[i]);
+    char line[1024]; int enabled = 0, matched = 0; unsigned count = 0, bytes = 0;
+    while (fgets(line, sizeof line, f)) {
+        if (!strncmp(line, "@nsobid-", 8)) {
+            if (strncasecmp(line + 8, want, 40)) runtime_fail("TOTK_PCHTXT is for another build of main");
+            matched = 1; continue;
+        }
+        if (!strncmp(line, "@enabled", 8)) { enabled = 1; continue; }
+        if (!strncmp(line, "@stop", 5)) break;
+        unsigned long long at; char hex[512];
+        if (!enabled || line[0] == '@' || sscanf(line, "%llx %511s", &at, hex) != 2) continue;
+        size_t len = strlen(hex);
+        if (!matched) runtime_fail("TOTK_PCHTXT: patches before its @nsobid line");
+        if (len % 2 || at + len / 2 > m->file_size) runtime_fail("TOTK_PCHTXT: a patch line is malformed or outside main");
+        for (size_t i = 0; i < len / 2; i++) { unsigned v; sscanf(hex + 2 * i, "%2x", &v); m->base[at + i] = (uint8_t)v; }
+        count++; bytes += (unsigned)(len / 2);
+    }
+    fclose(f);
+    if (!matched) runtime_fail("TOTK_PCHTXT has no @nsobid line");
+    fprintf(stderr, "[totk] TOTK_PCHTXT %s: %u patches, %u bytes in main (build id %s)\n", path, count, bytes, want);
+}
+
 void runtime_game_patches(Module *m) {
     runtime_survey_init(m);
     const size_t n = sizeof fps60_sites / sizeof fps60_sites[0];
@@ -398,6 +437,7 @@ void runtime_game_patches(Module *m) {
         fprintf(stderr, "[totk] embedded main: real-time frame step and 60 FPS patch (%zu instructions) applied at build time\n", n);
         return;
     }
+    patch_pchtxt(m);   /* first: the runtime's own patches check the original words they replace */
     if (realtime_enabled()) patch_realtime(m);
     else fprintf(stderr,"[totk] real-time frame step off (TOTK_REALTIME=0)\n");
     patch_render_res(m);

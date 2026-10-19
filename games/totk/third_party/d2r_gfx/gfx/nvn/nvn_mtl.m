@@ -10971,6 +10971,13 @@ static void outup_note_gpu(int slot) {   // the present command buffer of this s
              (unsigned long long)g_outup_n, a[256], a[486], (unsigned long long)g_outup_skip[0], (unsigned long long)g_outup_skip[1], (unsigned long long)g_outup_skip[2]);
     }
 }
+// TOTK_STRETCH=1: fill the window whatever its shape, like an emulator's "Stretch to Window" (aspect-ratio mods such as
+// TOTK-Ultrawide draw a horizontally squeezed picture for it). Off: the game picture keeps its shape, centred.
+static int present_stretch(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("TOTK_STRETCH"); on = e && !strcmp(e, "1"); }
+    return on;
+}
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int fps_overlay) {
     NSUInteger cx = 0, cy = 0, cw = src.width, ch = src.height;
     if (crop && (crop[2] || crop[3])) {
@@ -10992,7 +10999,7 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     // when the ratio difference is < 1% (the remainder from the game width being a multiple of 8 in the full-screen setup, e.g. 1952x900 versus 2868x1320 differs by 0.17%) fill directly, leaving no few-pixel border
     double dw = dst.width, dh = dst.height, s = fmin(dw / cw, dh / ch);
     MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
-    if (fabs((dw / dh) / ((double)cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
+    if (fabs((dw / dh) / ((double)cw / ch) - 1) < 0.01 || present_stretch()) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     static double last_vp[4];   // 视口变化时记一行（真机屏幕级验收 screen_check.py 核宽高比用） | Log one line when the viewport changes (used by the real-device screen-level acceptance screen_check.py to check the aspect ratio)
     if (memcmp(last_vp, &vp, sizeof last_vp)) { memcpy(last_vp, &vp, sizeof last_vp);
@@ -11036,7 +11043,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     present_pipeline(dst.pixelFormat);
     double dw = dst.width, dh = dst.height, s = fmin(dw / cw, dh / ch);
     MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
-    if (fabs((dw / dh) / ((double)cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
+    if (fabs((dw / dh) / ((double)cw / ch) - 1) < 0.01 || present_stretch()) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     id<MTLTexture> up = output_upscale(cb, src, cx, cy, cw, ch, vp, uv_i);   // TOTK 2K output: MetalFX to the viewport, drawn 1:1 below
     id<MTLTexture> pic = up ? up : src;
