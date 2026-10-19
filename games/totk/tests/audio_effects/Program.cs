@@ -1,6 +1,6 @@
 // Synthetic DSP reference vectors, no game assets or device audio.
 // Reverb uses Room: the local reference ignores other EarlyMode table rows.
-// Other early modes have separate SDK-derived impulse checks in mixer_probe.c.
+// Other early modes have separate impulse checks in mixer_probe.c (Ryujinx.Audio's tables, indexed by mode).
 using System;
 using System.IO;
 using System.Runtime.InteropServices;

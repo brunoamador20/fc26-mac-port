@@ -16,8 +16,9 @@ Play your own copy of **The Legend of Zelda: Tears of the Kingdom** natively on 
 
 Update history:
 
-October 19: iPhone and iPad tested with 1.4.3: a fresh install shows the game from the first launch, without a played cache. All platforms now share one [shader list](docs/shader-list.md), and the build reads every shader in the game data (15,266 prepared for 1.4.3). Touch screens get a camera stick.
+October 19: iPhone and iPad tested with 1.4.3: a fresh install shows the game from the first launch, without a played cache. All platforms now share one [shader list](docs/shader-list.md), and the build reads every shader in the game data (15,266 prepared for 1.4.3). Touch controls are laid out like a Switch controller, with every button and both sticks.
 October 19: Added 1.2.1 support (the most widely used update), with the same build command.
+October 19: On Mac, the FPS, shader and load readings and the shortcut reminder share one small box in the window's top-right corner instead of covering the picture (`TOTK_HUD=corners` keeps the old layout).
 October 18: Added an iPhone/iPad IPA build target. Device installation and gameplay still need user-device validation.
 October 18: Added 1.4.3 support and shader prewarming. The title screen waits only for its own shaders (about 2 seconds); the rest warm in the background.
 October 17: Added 1.0.0 and 1.1.2 support. First-launch shader prewarming was not available yet, so new scenes could stutter.
@@ -138,7 +139,7 @@ Version 1.4.3 has been played on an **iPhone 14 (iOS 26.6.1)** and an **iPad wit
 - **First launch:** the app checks the game data (about 15 seconds) and imports the shaders it carries, with a progress bar. On an iPhone 14 this takes about 3 minutes before the title appears. Later launches show the title in about 8 seconds.
 - **Picture:** the game runs in handheld mode, as a Switch does without its dock: 1280×720.
 - **Shaders:** an iPhone or iPad cannot translate shaders while playing. A draw whose shader variant the app does not carry is skipped, so objects can be missing in places no player has reported yet. The device records what it missed; with a Mac, `games/totk/ios/tools/fill_shaders.py` translates those variants, sends them to the device and adds them to the [shared shader list](docs/shader-list.md). Send the list in a pull request so the next build carries them for everyone.
-- **Memory:** the game uses close to 4 GB on an iPhone 14, near the limit iOS allows it.
+- **Memory:** the game uses close to 4 GB on an iPhone 14, near what the phone can give it. In busy areas iOS can close the game after several minutes of play when the phone runs out of memory (seen twice on an iPhone 14, about 8 minutes in). Reducing the game's memory on iOS is the next piece of work.
 
 ## Controls
 
@@ -167,7 +168,7 @@ Language: the game and the launcher's own text (startup screen, shader warm-up p
 
 ## Known issues
 
-- Supports base 1.0.0, or base plus the separate 1.1.2, 1.2.1 or 1.4.3 update NSP/NSZ. Other versions, DLC, combined packages, compressed base games (NSZ/XCZ) and personalized tickets remain unsupported. On iPhone and iPad only 1.4.3 has been tested, and places no player has reported can show missing objects (see [iPhone and iPad](#iphone-and-ipad)).
+- Supports base 1.0.0, or base plus the separate 1.1.2, 1.2.1 or 1.4.3 update NSP/NSZ. Other versions, DLC, combined packages, compressed base games (NSZ/XCZ) and personalized tickets remain unsupported. On iPhone and iPad only 1.4.3 has been tested; places no player has reported can show missing objects, and on an iPhone 14 iOS can close the game when memory runs out (see [iPhone and iPad](#iphone-and-ipad)).
 - No online features, no amiibo.
 - New shaders can cause compilation stutters. Cache reuse reduces these, but does not guarantee stutter-free gameplay.
 - The 68 automated tests cover generated container/update fixtures, relocation formats, work-folder isolation, packaging, desktop migration, shader extraction (BNSH, agl `.sharcb` and game-module shaders), the shared shader list, first-import cache preservation, the Metal toolchain lookup and 27 native RomFS path cases. GitHub Actions is configured to run the source tests and the native path parser under the undefined-behavior sanitizer, without game data or keys. A complete Mac build also passed with a local XCI-derived NSP fixture and generated common ticket. An independent retail base NSP and gameplay from that input have not yet been tested.
@@ -210,8 +211,9 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 
 更新历史：
 
-10 月 19 日：iPhone 和 iPad 用 1.4.3 实测：全新安装、没有玩过的缓存，第一次启动就能看到游戏画面。所有平台改用同一份[着色器清单](docs/shader-list.md)，打包时读取游戏数据里的全部着色器（1.4.3 准备 15,266 个）。触屏加入镜头摇杆。
+10 月 19 日：iPhone 和 iPad 用 1.4.3 实测：全新安装、没有玩过的缓存，第一次启动就能看到游戏画面。所有平台改用同一份[着色器清单](docs/shader-list.md)，打包时读取游戏数据里的全部着色器（1.4.3 准备 15,266 个）。触屏控件按 Switch 手柄排布，所有按键和两个摇杆都有。
 10 月 19 日：支持 1.2.1（玩家最多的版本），构建命令不变。
+10 月 19 日：Mac 上 FPS、着色器、负载读数和快捷键说明集中到窗口右上角一个小框里，不再挡住画面（`TOTK_HUD=corners` 保留原来的布局）。
 10 月 18 日：加入 iPhone / iPad IPA 构建目标；真机安装和游玩仍需用户设备验证。
 10 月 18 日：支持 1.4.3，并加入着色器预热。标题画面只等它自己用到的着色器（约 2 秒），其余在后台预热。
 10 月 17 日：支持 1.0.0 和 1.1.2；当时尚未加入首次启动着色器预热，进入新场景可能卡顿。
@@ -331,7 +333,7 @@ python3.14 games/totk/tools/install_desktop_entry.py --app "/路径/Tears of the
 - **第一次启动：** App 先校验游戏数据（约 15 秒），再导入随 App 准备的着色器，有进度条。iPhone 14 上约 3 分钟后出现标题画面；之后的启动约 8 秒出标题。
 - **画面：** 游戏以掌机模式运行，和 Switch 不接底座时一样：1280×720。
 - **着色器：** iPhone 和 iPad 不能在游玩时翻译着色器。App 里没有的着色器变体，对应的绘制会被跳过，所以还没有玩家报告过的地方可能缺少物体。设备会记下缺了哪些；有 Mac 的话，用 `games/totk/ios/tools/fill_shaders.py` 翻译这些变体、推回设备，并加进[公共着色器清单](docs/shader-list.md)。把清单提交 pull request，下一次打包时所有人就都有了。
-- **内存：** 在 iPhone 14 上游戏占用接近 4 GB，接近 iOS 给它的上限。
+- **内存：** 在 iPhone 14 上游戏占用接近 4 GB，接近手机能给它的上限。在复杂的区域玩几分钟后，手机内存耗尽时 iOS 可能会关掉游戏（iPhone 14 上出现过两次，都在约 8 分钟时）。降低 iOS 上的内存占用是下一步要做的事。
 
 ## 操作
 
@@ -360,7 +362,7 @@ python3.14 games/totk/tools/install_desktop_entry.py --app "/路径/Tears of the
 
 ## 已知问题
 
-- 支持本体 1.0.0，或本体加单独的 1.1.2 / 1.2.1 / 1.4.3 更新（NSP/NSZ）。其他版本、DLC、合并包、压缩本体（NSZ/XCZ）和个性化票据仍不支持。iPhone 和 iPad 上只测过 1.4.3，还没有玩家报告过的地方可能缺少物体（见 [iPhone 和 iPad](#iphone-和-ipad)）。
+- 支持本体 1.0.0，或本体加单独的 1.1.2 / 1.2.1 / 1.4.3 更新（NSP/NSZ）。其他版本、DLC、合并包、压缩本体（NSZ/XCZ）和个性化票据仍不支持。iPhone 和 iPad 上只测过 1.4.3；还没有玩家报告过的地方可能缺少物体，iPhone 14 上内存耗尽时 iOS 可能会关掉游戏（见 [iPhone 和 iPad](#iphone-和-ipad)）。
 - 没有联网功能，没有 amiibo。
 - 首次遇到新着色器可能出现编译卡顿，缓存能减少重复编译，但不保证完全没有卡顿。
 - 68 项自动测试覆盖生成的容器 / 更新样本、重定位格式、工作目录隔离、打包、桌面入口迁移、着色器提取（BNSH、agl 的 `.sharcb` 和游戏程序里的着色器）、公共着色器清单、首次导入的缓存保留、Metal 工具链查找及 27 个原生 RomFS 路径用例。GitHub Actions 已配置为运行源码测试，并在未定义行为检查（UBSan）下运行原生路径解析器，不需要游戏数据或密钥；另使用本地 XCI 构造、附带生成通用票据的 NSP 测试副本完成完整 Mac 打包。尚未验证独立的零售本体 NSP，也未测试从该类输入构建后的实际游玩。

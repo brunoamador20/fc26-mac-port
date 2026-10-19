@@ -42,8 +42,8 @@ static float line_tap(const DelayLine *d,unsigned sample,int offset) {
 static float gain10(float x) { return x>=0?1:x<=-5.3f?0:powf(10,x); }
 static const float fdn_time[4][4]={{53.953247f,79.192566f,116.238770f,130.615295f},{53.953247f,79.192566f,116.238770f,170.615295f},{5,10,5,10},{47.03f,71,103,170}};
 static const float decay_time[4][4]={{7,9,13,17},{7,9,13,17},{1,1,1,1},{7,7,13,9}};
-/* The SDK indexes early reflections by EarlyMode. The local Ryujinx version
-   has all five tables but accidentally reads the first row for every mode. */
+/* Early reflections are indexed by EarlyMode. These are Ryujinx.Audio's five
+   tables; its own version reads the first row for every mode. */
 static const float early_time[5][10]={
     {0,3.5f,2.8f,3.9f,2.7f,13.4f,7.9f,8.4f,9.9f,12},
     {0,11.8f,5.5f,11.2f,10.4f,38.1f,22.2f,29.6f,21.2f,24.8f},

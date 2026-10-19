@@ -78,8 +78,8 @@ static void reverb_early_modes(void){
         AudrenReverbParam p={.channels=1,.channel_max=6,.sample_rate=48*16384,.early_mode=mode,.early_gain=16384,.late_mode=0,.decay=1000*16384,.hf_decay=13107,.reverb_gain=16384,.out_gain=16384};p.output[0]=6;
         r.effects[0]=(AudrenEffectIn){.type=4,.enabled=1,.is_new=1};memcpy(r.effects[0].specific,&p,sizeof p);audio_mixer_update_effects(&r);
         float response[3120];for(int b=0;b<13;b++){memset(m->buf,0,12*240*sizeof(float));if(!b)m->buf[0]=1;mix_effects(&r,0);memcpy(response+b*240,m->buf+6*240,240*sizeof(float));}
-        /* Selected impulses from SDK early-reflection tables, independent of
-           the local reference's incorrect mode indexing. No late/dry signal. */
+        /* Selected impulses from the five Ryujinx.Audio early-reflection tables,
+           indexed by mode (the C# reference reads only the first). No late/dry signal. */
         if(mode==0){near(response[1],.70f,"Room first reflection");near(response[169],.68f,"Room 3.5ms reflection");}
         if(mode==1){near(response[169],0,"Chamber must not use Room timing");near(response[567],.68f,"Chamber 11.8ms reflection");}
         if(mode==2)near(response[1],1.f,"Hall coincident .5+.5 reflections");
