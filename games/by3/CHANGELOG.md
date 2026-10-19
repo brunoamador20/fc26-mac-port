@@ -15,8 +15,8 @@ named by hash and subject. Game data, keys and saves are never committed (see th
 | 1 | Code and data out of the dump; code rewritten for Apple silicon | done 2026-10-19 |
 | 2 | A runtime target with the TotK-only parts compiled out, booting to `nnMain` | done 2026-10-19 |
 | 3 | Follow every unknown service / command / NVN call until the first `nvnQueuePresentTexture` | done 2026-10-19 |
-| 4 | A picture, audio (Wwise), input, saves; the 1.2.0 patches (60 fps, 900p) applied to the native code | in progress |
-| 5 | Performance, shaders, packaging as an app | open |
+| 4 | A picture, audio (Wwise), input, saves; the 1.2.0 patches (60 fps, 900p) applied to the native code | done 2026-10-19 (playable) |
+| 5 | Performance, shaders, packaging as an app | in progress: app and presets done |
 
 ## Log
 
@@ -218,3 +218,65 @@ the log, not handled yet: a draw with no program bound, and logic op 3 / alpha t
 without). Still unseen: system fonts.
 
 Commits: `1ce8e8b` (first frame), and this entry's commit (AudioOut, open users, shader tools).
+
+### 2026-10-19: stage 4, playable; stage 5, the app
+
+**Picture.** After the first frame, NVN features TotK never uses, one at a time:
+
+- `DispatchComputeIndirect`: Metal's indirect dispatch (both encoder APIs); the record is `OP_DISPATCH` with
+  `x == DISPATCH_INDIRECT` and the argument address in its spare field, so no op switch changes.
+- `CommandBufferFenceSync`: a fence that stands for the next submission (approximation; it cannot hang).
+- `DrawArrays/ElementsIndirect`, `MultiDraw*IndirectCount`: draw records with a tail (`p_draw_indirect`); the replay
+  writes the arguments it reads from memory into the record before drawing, because several passes keep pointers to
+  draw records. Arguments a GPU pass of the same submission writes are seen as in memory (usually last frame's).
+- Shader control sections are copied at `nvnProgramSetShaders` (content-interned, kept for the process): the game frees
+  that memory and the replay, which reads it later, found text there ("invalid shader code length 807416121").
+- **Per-stage program binding**: Bayonetta binds a vertex-only and a fragment-only program (NVN's stage mask). The
+  replay combines the bound stages into a host program per combination; a graphics bind covering every bound stage and
+  every compute-only bind keep the old behaviour (TotK's case). This is what made the title screen appear.
+
+The game then runs: logo, title, main menu, Naive Angel Mode screen, the story's opening (captures in the work
+folder). The game uses its own fonts; the system fonts were never asked for.
+
+**Input.** The Mac keyboard drives the controller (the player navigated the menus and started the story); game
+controllers go through the TotK host's GameController support, unchanged.
+
+**Sound.** Wwise mixes through `audout:u`; `runtime/audio_out.c` plays it with one Core Audio AudioQueue per output
+(5.1 mixed down to stereo), and the device's callbacks release the buffers, so the output paces the game.
+
+**Saves** are written (`GameData.dat`, `SlotData_0.dat` under the profile's `save/<account>`).
+
+**Pacing.** The TotK host presents on the display's rate (120 Hz on ProMotion) and uncapped, relying on TotK's
+real-time patch. Bayonetta has no such patch, so the fork sets a Switch 60 Hz base (`DM_PRESENT_HZ=60`,
+`TOTK_UNCAPPED=0`): about 25-30 fps on the title as shipped, 59 fps with the 60 fps patch (1,774 frames in 30 s).
+At a 120 Hz base the game ran above 100 fps; whether its logic then runs fast is not established, so the launcher
+labels 120 as experimental.
+
+**Mods.**
+- exefs `.pchtxt` (60 fps, 900p, LOD, film grain): `scripts/prepare_patches.py` checks the build ID and that no patch
+  touches bytes the Apple-silicon rewrite changed, and writes `patches/<slug>.tsv`; offsets are main image offsets
+  (the files' `offset_shift 0x100` is for the IPS container; every site decodes to a sensible change only that way).
+  `runtime/game_patches.c` applies what `BY3_PATCHES` names, checking original bytes at each site.
+- RomFS mods (the PS5-prompt UI `ui_000.pkz`): the TotK host's overlay manifest (`make mods`), loaded from
+  `TOTK_ROMFS_MODS`; replacement and original are both hashed at start.
+
+**The app** (`make app`, `app/launcher.m`): a settings window, then the game. Presets (Original 30 fps, Recommended
+60 fps, Performance 60 fps + fixed 900p, Quality: 900p, better LOD, no grain, full screen; Custom), frame rate,
+internal resolution, window or full screen (`BY3_FULLSCREEN`), window size, extras, interface mod and the HUD
+(`BY3_HUD_RENDER=1`: "FPS 60  1600x900 > 2560x1440"). The bundle is small: Info.plist's `BY3WorkFolder` names the work
+folder the game runs from. The icon comes from the game's own control data. Saves:
+`~/Library/Application Support/MacNativeGames/BY3/profile`; log: `~/Library/Logs/MacNativeGames/by3.log`.
+
+Pitfalls: `TOTK_GPU_ALLOW_SUBMIT=1` is needed for any picture; the TotK launcher also sets `TOTK_GPU_WIDEN`,
+`BLOCKRT`, `MIDCLEAR` (now the Bayonetta launcher does too). A shot's brightness says more than its file size when
+watching dozens of captures.
+
+Open:
+- 120 fps: does the game's logic follow real time? (compare a timed event at 60 and 120 Hz bases)
+- Menus show bands of "noise text": probably logic op 3 / alpha test 5, which Metal lacks and the layer skips.
+- Depth-bounds test (unavailable on Metal) is skipped; indirect-draw and fence approximations as above.
+- Shader stutter: no shared shader list or startup seed for Bayonetta yet (TotK's build prepares one).
+- `nn::oe::ExecuteProgram` (program 1, `…A001`) still stops with a message: not met in play so far.
+- Controllers: supported by the host; not yet tried with this game.
+
+Commits: `e0c96a0` (graphics: title screen), `2706d98` (sound, patches, pacing, full screen), `ae8c86a` (app, HUD).

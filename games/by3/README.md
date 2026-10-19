@@ -1,8 +1,8 @@
 # Bayonetta 3 (work in progress)
 
 An experiment: run Bayonetta 3 natively the way `games/totk` runs Tears of the Kingdom. It reuses that runtime
-(rewriter, loader, Horizon host, NVN on Metal). **It does not boot yet.** Only stage 1 is done: getting the game's code
-and data out of your own dump and rewriting the code for Apple silicon.
+(rewriter, loader, Horizon host, NVN on Metal). **It is playable**: title, menus and the story run with picture,
+sound, keyboard input and saves, from a small app with a settings window. Known gaps are listed in CHANGELOG.md.
 
 How the work was done, what was found and what went wrong on the way: [CHANGELOG.md](CHANGELOG.md).
 
@@ -14,6 +14,24 @@ this repository; `BY3_build/` (the work folder) and `mods/` are ignored by git.
 - Base `01004A4010FEA000` (v65536) and update 1.2.0 `01004A4010FEA800` (v131072), both NSP.
 - The base Program NCA is **sparse**: its ExeFS is empty and the RomFS parts the update replaces are not stored.
   The code always comes from the update, and the pinned hactool cannot read the base RomFS.
+
+## Build and play
+
+From `games/by3`, with the Python environment of `games/totk/requirements.txt` (`PY=<that python>`):
+
+```sh
+python scripts/extract_code.py "<update>.nsp" --keys prod.keys --output BY3_build/extracted/v120/exefs
+python scripts/merge_romfs.py "<base>.nsp" "<update>.nsp" --keys prod.keys --output BY3_build/extracted/v120/romfs
+(cd ../totk && for m in sdk subsdk0 main; do
+  DM_RULESET=native DM_PRIVATE_GATES=0 $PY third_party/d2r/patch_nso.py ../by3/BY3_build/extracted/v120/exefs/$m ../by3/BY3_build/rewritten/v120 $m
+done)
+$PY ../totk/scripts/prepare_modules.py BY3_build/extracted/v120/exefs --output BY3_build/extracted/v120/elf
+make prepare patches mods app PY=$PY GAME="<update>.nsp" KEYS=prod.keys
+open "Bayonetta 3.app"
+```
+
+Optional mods go in `mods/`: exefs patches as `mods/1.2.0/<name>/exefs/*.pchtxt`, RomFS mods as `mods/<name>/romfs/`.
+The app keeps running the game from `BY3_build`; do not move or delete it.
 
 ## Stage 1 (done)
 
