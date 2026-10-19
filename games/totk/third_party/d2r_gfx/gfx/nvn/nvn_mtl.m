@@ -342,7 +342,7 @@ static void defer_obj_release_ex(id obj, int keep_resident) {
 }
 static void defer_obj_release(id obj) { defer_obj_release_ex(obj, 0); }
 static void defer_obj_unref(id obj) { defer_obj_release_ex(obj, 1); }
-static void defer_drain(void) {
+static void defer_drain(void) { @autoreleasepool {   // also called from GPU completion handlers
     NSMutableArray<NvDeferredRelease *> *ready = [NSMutableArray array];
     pthread_mutex_lock(&g_deferred_mu);
     for (NSInteger i = g_deferred.count - 1; i >= 0; i--) {
@@ -360,7 +360,7 @@ static void defer_drain(void) {
         }
         d->object = nil;
     }
-}
+} }
 
 static pthread_mutex_t g_bf_want_mu = PTHREAD_MUTEX_INITIALIZER;
 static char **g_bf_want_keys; static size_t g_bf_want_n, g_bf_want_cap; static int g_bf_want_loaded;
@@ -964,6 +964,11 @@ static int g_sub_chunks; static uint64_t g_chunk_mark, g_stat_draw; static void 
 static int g_nupd, g_nshadow; static inline int upd_guard(uint64_t lo, uint64_t hi);   // renamed uniform updates, defined with mtl_sub_update
 void mtl_sub_begin(void) {
     g_fc_begin0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    /* The submission's autorelease pool, drained in mtl_sub_commit, opens before anything else: the guest's submit
+       thread has no pool of its own that drains (frontend.m's lasts the whole game), so what defer_drain, defer_reset,
+       warm_claim and pt_apply_request autoreleased before it piled up every submission (nxnative found the same leak:
+       an iPhone killed for memory in a shrine, docs/agents/04-graphics.md). */
+    g_sub_pool = objc_autoreleasePoolPush();
     if (g_cg.ng) { static int once; if (!once++) MLOG("【红】[cube-merge] 上次提交结束时还有 %d 组没落地（不应发生）", g_cg.ng); g_cg.ng = 0; } g_cg_pending = 0; g_cg.take_seq = ~0ull;
     mtl_init(); g_sub_serial++;
     { static int ka; if (!ka) { ka = 1; keepalive_start(); } atomic_store(&g_last_sub_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW)); }
@@ -975,7 +980,6 @@ void mtl_sub_begin(void) {
     pt_apply_request();
     g_sub_thread = pthread_self(); atomic_store(&g_sub_thread_set, 1);
     atomic_store(&g_last_commit_error, 0);
-    g_sub_pool = objc_autoreleasePoolPush();
     g_cb = [g_dev newCommandBuffer];
     // 不在帧中间等 GPU（真机热态：固定 3 个轮转时 GPU 跟不上就每帧在这里阻塞，提交线程睡醒后按低频跑，指令数 −18% 而 CPU 时间 +49%）：
     // 挑一个 GPU 已用完的分配器；都在用就新建；到上限才等最老的那个。超前量由游戏取交换链贴图处的等待约束，与旧接口相同。
