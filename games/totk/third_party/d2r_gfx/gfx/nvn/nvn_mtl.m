@@ -5461,6 +5461,21 @@ static int prog_fit(NvProg *pr) {
     }
     return changed;
 }
+// Prediction must not translate/compile, or mutate a program's active binding.
+// Only the exact already-resolved variant is safe to predict. Unknown variants
+// are left for the authoritative draw path, without changing active bindings.
+static int prog_prediction_stages(const prog_t *p, NvShader **vs, NvShader **fs) {
+    NvProg *pr = p && p->serial ? (__bridge NvProg *)serial_ptr(p->serial) : nil;
+    if (!pr) return 0;
+    NvShader *stages[2] = {nil, nil};
+    for (int st = 0; st < 2; st++) {
+        if (!pr->sh[st]) { if (!st) return 0; continue; }
+        uint64_t sig = stage_sig(st);
+        stages[st] = sig == pr->sig[st] ? pr->sh[st] : pr->alt[st][@(sig)];
+        if (!stages[st]) return 0;
+    }
+    *vs = stages[0]; *fs = stages[1]; return 1;
+}
 // Compute thread group size lives in the control section; not located yet, so compute shaders stop with this message.
 /* Compute thread group size: control+0x748/0x74c/0x750. Evidence (12 TOTK kernels): the triple exists only in compute
    control sections; every kernel with 1,1,1 reads no thread-in-group id, and every kernel that reads it carries a
@@ -5863,17 +5878,25 @@ static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t 
 // Now: on the first pipeline miss in a submission, scan ahead once along the remaining commands (replaying state only, no drawing) and kick all the normal-pass pipelines that will also miss later to the background to compile in parallel;
 // when the submit thread reaches that draw it only waits for 'the remaining time not yet compiled'. The compiled pipelines are identical to synchronously compiled ones (same descriptor). Pipeline keys of merged passes / specialized fragments depend on the planning result at replay time, are not predicted, and are compiled synchronously as before.
 #define PSO_PEND_MAX 384
-static struct { pso_key k; id<MTLRenderPipelineState> ps; int used, done; } g_pp[PSO_PEND_MAX];
+static struct { pso_key k; id<MTLRenderPipelineState> ps; uint64_t submit; int used, done; } g_pp[PSO_PEND_MAX];
 static pthread_mutex_t g_pp_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_pp_cv = PTHREAD_COND_INITIALIZER;
 static uint64_t g_pp_submit_mark, g_pp_kicked, g_pp_taken;   // 本次提交是否已预测过（按提交序号）；累计丢出 / 领用条数 | Whether this submission has already been predicted (by submission serial); cumulative kicked / taken counts
 static void pso_predict_rest(void);
 static int pso_pend_find(const pso_key *k) { for (int i = 0; i < PSO_PEND_MAX; i++) if (g_pp[i].used && !memcmp(&g_pp[i].k, k, sizeof *k)) return i; return -1; }
+// Called only with g_pp_mu held. An in-flight worker still owns its slot:
+// completion must be published before that slot can ever be reused.
+static void pso_pend_reclaim(uint64_t submit) {
+    for (int i = 0; i < PSO_PEND_MAX; i++) if (g_pp[i].used && g_pp[i].done && submit - g_pp[i].submit > 2) {
+        g_pp[i].ps = nil; g_pp[i].used = 0;
+    }
+}
 static void pso_pend_kick(const pso_key *k, NvShader *vs, NvShader *fs) {   // 提交线程调：没在缓存、没在表里才丢 | Called by the submit thread: kick only if it is neither in the cache nor in the table
     if (hm_get_id(&g_pso, k)) return;
     pthread_mutex_lock(&g_pp_mu);
+    pso_pend_reclaim(g_sub_serial);
     int at = pso_pend_find(k), slot = -1;
     if (at < 0) for (int i = 0; i < PSO_PEND_MAX; i++) if (!g_pp[i].used) { slot = i; break; }
-    if (at < 0 && slot >= 0) { g_pp[slot].k = *k; g_pp[slot].ps = nil; g_pp[slot].done = 0; g_pp[slot].used = 1; }
+    if (at < 0 && slot >= 0) { g_pp[slot].k = *k; g_pp[slot].ps = nil; g_pp[slot].done = 0; g_pp[slot].used = 1; g_pp[slot].submit = g_sub_serial; }
     pthread_mutex_unlock(&g_pp_mu);
     if (at >= 0 || slot < 0) return;
     MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0); g_pp_kicked++;
@@ -7252,14 +7275,17 @@ static void pso_predict_rest(void) {
     int pso_dirty = g_pso_dirty, dss_dirty = g_dss_dirty;
     uint32_t cf[8]; memcpy(cf, g_pass.cfmt, sizeof cf); uint32_t df = g_pass.dfmt, sf = g_pass.sfmt, samples = g_pass.samples, dfull = df, sfull = sf; int kicked0 = (int)g_pp_kicked, draws = 0;
     fz_cursor cur = {.p = g_exec_next};
-    // 先收齐再丢：按「附件原样挂」的键排在前（最可能用到），其余挂法排在后——后台并发有限，先丢的先编完
-    // Collect them all first, then dispatch: keys for "attachments attached as-is" go first (most likely to be used), the other attach modes after -- background concurrency is limited, and what is dispatched first is compiled first
-    enum { QN = 160 }; static struct { pso_key k; void *vs, *fs; } qa[QN], qb[QN]; int na = 0, nb = 0;
-    for (int guard = 0; guard < 200000 && na < QN; guard++) {
+    // Bound speculative work. Submit likely keys as they are found instead of
+    // making the current draw wait for the entire scan before any worker starts.
+    uint64_t started = bp_now();
+    enum { QN = 32 }; static struct { pso_key k; void *vs, *fs; } qa[QN], qb[QN]; int na = 0, nb = 0;
+    for (int guard = 0; guard < 8192 && na < QN; guard++) {
+        if (bp_now() - started > 2000000ull) break;
         const uint8_t *q; op_hdr hq; const void *aq;
         if (!fz_next(&cur, &q, &hq, &aq)) break;
         if (hq.op == OP_SET_RT) {
             const p_set_rt *r = aq; memset(cf, 0, sizeof cf); dfull = sfull = 0; samples = 1;
+            R.rt = *r; R.has_rt = 1;
             /* Prediction must not acquire/recreate/upload textures on the active GPU timeline. */
             for (int i = 0; i < r->n && i < 8; i++) { MTLTextureDescriptor *d = r->color[i] ? tex_desc(r->color[i], tex_mirrored(r->color[i])) : nil;
                 if (d) { cf[i] = (uint32_t)attachment_format(r->color[i], &r->cview[i], r->has_cview[i], d.pixelFormat); samples = (uint32_t)d.sampleCount; } }
@@ -7272,8 +7298,8 @@ static void pso_predict_rest(void) {
         }
         if (hq.op == OP_DRAW || hq.op == OP_DRAW_IDX) {
             draws++;
-            __unsafe_unretained NvProg *pr = S.prog ? prog_get(S.prog) : nil; if (!pr || !pr->sh[0]) continue;
-            __unsafe_unretained NvShader *vs = pr->sh[0], *fs = pr->sh[1];
+            NvShader *vs = nil, *fs = nil;
+            if (!prog_prediction_stages(S.prog, &vs, &fs)) continue;
             const uint32_t dv[4] = {dfull, 0, 0, dfull}, sv[4] = {sfull, 0, sfull, 0};
             for (int v = 0; v < 4; v++) {
                 if (v && dv[v] == dv[0] && sv[v] == sv[0]) continue;
@@ -7282,7 +7308,8 @@ static void pso_predict_rest(void) {
                 if (hm_get_id(&g_pso, &k)) continue;
                 int dup = 0; for (int i = 0; i < (v ? nb : na) && !dup; i++) dup = !memcmp(&(v ? qb : qa)[i].k, &k, sizeof k);
                 if (dup) continue;
-                if (!v && na < QN) { qa[na].k = k; qa[na].vs = (__bridge void *)vs; qa[na].fs = (__bridge void *)fs; na++; }
+                if (!v && na < QN) { qa[na].k = k; qa[na].vs = (__bridge void *)vs; qa[na].fs = (__bridge void *)fs; na++;
+                    pso_pend_kick(&k, vs, fs); }
                 else if (v && nb < QN) { qb[nb].k = k; qb[nb].vs = (__bridge void *)vs; qb[nb].fs = (__bridge void *)fs; nb++; }
             }
             continue;
@@ -7291,7 +7318,6 @@ static void pso_predict_rest(void) {
         state_op(hq.op, aq);
     }
     (void)df; (void)sf;
-    for (int i = 0; i < na; i++) pso_pend_kick(&qa[i].k, (__bridge NvShader *)qa[i].vs, (__bridge NvShader *)qa[i].fs);
     for (int i = 0; i < nb; i++) pso_pend_kick(&qb[i].k, (__bridge NvShader *)qb[i].vs, (__bridge NvShader *)qb[i].fs);
     memcpy(&S, &Ssave, sizeof S); R = Rsave; args_dirty_all(); g_pso_dirty = pso_dirty; g_dss_dirty = dss_dirty;
     static int logged; if (g_pp_kicked > (uint64_t)kicked0 && logged++ < 20) MLOG("并行预编：本次提交余下 %d 次绘制，丢给后台 %d 条管线", draws, (int)g_pp_kicked - kicked0);
@@ -7313,6 +7339,47 @@ void dm_nvn_probe_prediction(void) {
     g_exec_next=(const uint8_t *)&cond;pso_predict_rest();
     if(getenv("TOTK_PROBE_NEGATIVE"))state_op(OP_RENDER_COND,&cond.c);
     if(memcmp(&cache,&g_cond_cache[slot],sizeof cache)||g_draw_skip[14]!=unknown)MDIE("pipeline prediction evaluated a future conditional counter");
+    // A speculative future program need not be resolved. Calling prog_get here
+    // would try to translate its absent bytes (or compile real future shaders).
+    prog_t future = {.nstage = 1, .serial = UINT64_MAX - 17};
+    struct { op_hdr bind; p_bind_program program; op_hdr draw; p_draw args; op_hdr end; } cold = {
+        {OP_BIND_PROGRAM, 8 + sizeof(p_bind_program)}, {&future, 3},
+        {OP_DRAW, 8 + sizeof(p_draw)}, {0}, {OP_END, 8}
+    };
+    typeof(S) saved_state = S;
+    uint64_t old_libs = g_bp_lib_n, old_psos = g_bp_pso_n;
+    g_exec_next = (const uint8_t *)&cold; pso_predict_rest();
+    if (g_bp_lib_n != old_libs || g_bp_pso_n != old_psos || memcmp(&S, &saved_state, sizeof S))
+        MDIE("pipeline prediction compiled a future program or changed bindings");
+    // A cached program may need a different binding variant while scanning.
+    // Resolving it for prediction must neither compile nor select it for a draw.
+    NvProg *pr = [NvProg new]; NvShader *active = [NvShader new], *alternate = [NvShader new];
+    uint64_t signature = stage_sig(0);
+    pr->sh[0] = active; pr->sig[0] = signature ^ 1;
+    pr->alt[0] = [NSMutableDictionary dictionaryWithObject:alternate forKey:@(signature)];
+    prog_t cached = {.serial = nvn_new_serial()};
+    serial_put(cached.serial, pr);
+    NvShader *vs = nil, *fs = nil;
+    if (!prog_prediction_stages(&cached, &vs, &fs) || vs != alternate || pr->sh[0] != active || pr->sig[0] != (signature ^ 1))
+        MDIE("pipeline prediction selected a binding variant for the active draw");
+    [pr->alt[0] removeAllObjects];
+    if (prog_prediction_stages(&cached, &vs, &fs) || pr->sh[0] != active)
+        MDIE("pipeline prediction resolved a missing binding variant");
+    serial_del(cached.serial);
+
+    // Reclaim completed stale guesses, but retain recent completions and even
+    // very old unfinished jobs (their workers can still publish into the slot).
+    pthread_mutex_lock(&g_pp_mu);
+    for (int i = 0; i < PSO_PEND_MAX; i++) if (g_pp[i].used) MDIE("prediction probe requires an idle pending table");
+    g_pp[0].used = g_pp[0].done = 1; g_pp[0].submit = 9;
+    g_pp[1].used = g_pp[1].done = 1; g_pp[1].submit = 10;
+    g_pp[2].used = 1; g_pp[2].done = 0; g_pp[2].submit = 1;
+    pso_pend_reclaim(12);
+    if (g_pp[0].used || !g_pp[1].used || !g_pp[2].used)
+        MDIE("pipeline prediction recycled an in-flight or recent pending slot");
+    g_pp[2].done = 1; pso_pend_reclaim(13);
+    if (g_pp[1].used || g_pp[2].used) MDIE("pipeline prediction retained completed stale guesses");
+    pthread_mutex_unlock(&g_pp_mu);
     R = saved; g_exec_next = next;
 }
 
