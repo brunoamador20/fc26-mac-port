@@ -3,6 +3,7 @@
 #include "aspect_patch.h"
 #include "game_patches.h"
 #include "game_version.h"
+#include "world_survey.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -107,6 +108,7 @@ static void patch_realtime(Module *m){
 static void patch_output_res(Module *m);
 static void patch_render_res(Module *m);
 void runtime_game_patches(Module *m) {
+    runtime_survey_init(m);
     if (strcmp(m->name, "main")) runtime_fail("1.4.3 game patches expect main");
     patch_realtime(m);
     patch_output_res(m);
