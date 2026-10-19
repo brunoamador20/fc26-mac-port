@@ -214,7 +214,7 @@ static void overlay_init(void) {
   need(snprintf(d,sizeof(d),"%s/%ux%u%s",out?out:"extracted/" TOTK_GAME_DIR "/romfs-patches-out",w,h,scene)<(int)sizeof(d),"RomFS output overlay path");
   /* build_app.py makes the 2560x1440 canvas and, for 1.4.3, the 1920x1080 / 2560x1440 scenes on either canvas; other sizes are one command. */
   char m[4200];snprintf(m,sizeof(m),"%s/manifest.tsv",d);
-  if(access(m,R_OK)){fprintf(stderr,"[totk] RomFS overlay %s missing: make it with\n  .venv/bin/python scripts/make_output_res_overlay.py %ux%u%s%s --version " TOTK_GAME_DIR "\n",d,w,h,*scene?" --scene ":"",*scene?scene+7:"");
+  if(access(m,R_OK)){fprintf(stderr,"[totk] RomFS overlay %s missing: make it with\n  .venv/bin/python scripts/make_output_res_overlay.py %ux%u%s%s --version " TOTK_GAME_DIR "%s%s\n",d,w,h,*scene?" --scene ":"",*scene?scene+7:"",out?" --output-root ":"",out?out:"");
    runtime_fail("HeapDef overlay for this output / scene size missing (see the line above)");}
   overlay_load(d,1);}
  const char *mods=getenv("TOTK_ROMFS_MODS");if(mods&&*mods&&strcmp(mods,"0"))overlay_load(mods,0);
