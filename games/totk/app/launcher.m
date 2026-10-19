@@ -147,6 +147,12 @@ int main(int argc, char **argv) {
         setenv("TOTK_GAME_SLOT_DIR", slot.fileSystemRepresentation, 1);
         setenv("TOTK_ROMFS_PROOF_DIR", data.fileSystemRepresentation, 1);   // the app bundle stays read-only
         setenv("TOTK_SHARED_FONTS", "extracted/firmware/shared-fonts", 1);
+        /* Player mods (runtime/romfs.c): <data>/mods/<version>/manifest.tsv, when present. */
+        setenv("TOTK_ROMFS_MODS", [data stringByAppendingPathComponent:@"mods/" TOTK_GAME_DIR].fileSystemRepresentation, 0);
+        /* The game's language (runtime/services.c): the app's first preferred language, which also follows a per-app
+           language (defaults write org.macnativegames.totk AppleLanguages -array pt-BR). TOTK_LANG still overrides it. */
+        NSString *preferred = NSLocale.preferredLanguages.firstObject;
+        if (preferred) setenv("TOTK_LOCALE", preferred.UTF8String, 1);
         setenv("TOTK_GPU_ALLOW_SUBMIT", "1", 1);
         setenv("TOTK_GPU_WIDEN", "1", 1);
         setenv("TOTK_GPU_BLOCKRT", "1", 1);

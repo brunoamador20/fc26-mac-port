@@ -1,6 +1,8 @@
 /* nn::codec hardware Opus decoder, implemented with libopus on the host (the hwopus service is a
    hardware-accelerated libopus). Input frames carry Nintendo's 8-byte big-endian header
-   {payload size, final range}; the decoder's final range is checked against it. */
+   {payload size, final range}; the decoder's final range is checked against it. A header range of 0 is not a
+   recorded value: none of the 280,723 packets in 1.4.3's English voice streams has it, while a fan dub's encoder
+   writes 0 into every packet (all 186,758 of the PKG PT-BR dub, which decode without error). Those are not checked. */
 #include "runtime.h"
 #include <opus.h>
 #include <pthread.h>
@@ -61,7 +63,7 @@ static unsigned decode(void *guest, size_t *consumed, int *samples, int16_t *out
     int got = opus_decode(d->dec, in + 8, (opus_int32)n, out, max, 0);
     if (got < 0) { fprintf(stderr, "[totk] opus_decode: %s\n", opus_strerror(got)); return R_INVALID; }
     opus_uint32 final = 0; opus_decoder_ctl(d->dec, OPUS_GET_FINAL_RANGE(&final));
-    if (n && final != range) { fprintf(stderr, "[totk] Opus final range %#x != stream %#x\n", final, range); runtime_fail("Opus stream integrity"); }
+    if (n && range && final != range) { fprintf(stderr, "[totk] Opus final range %#x != stream %#x\n", final, range); runtime_fail("Opus stream integrity"); }
     *consumed = 8 + n; *samples = got; return 0;
 }
 
