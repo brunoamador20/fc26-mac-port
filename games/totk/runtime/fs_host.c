@@ -26,7 +26,11 @@
 #define R_INVALID_PATH 0x2ee602u
 #define R_OPEN_MODE 0x307402u
 #define R_APPEND_REQUIRED 0x2f5e02u
+#ifdef GAME_BOTW
+#define TOTK_APPLICATION_ID 0x01007ef00011e000ULL   /* Breath of the Wild: its own save data is the one that exists */
+#else
 #define TOTK_APPLICATION_ID 0x0100f2c0115b6000ULL
+#endif
 enum { M_FREE, M_SAVE, M_TEMP, M_CACHE };
 enum { OPEN_READ = 1, OPEN_WRITE = 2, OPEN_APPEND = 4 };
 #define FILE_BASE 0x200000000ULL

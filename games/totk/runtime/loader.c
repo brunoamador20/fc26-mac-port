@@ -51,6 +51,11 @@ void *runtime_symbol(const char *name) {
  return NULL;
 }
 uint8_t *runtime_module_base(const char *name){for(unsigned i=0;i<NM;i++)if(!strcmp(modules[i].name,name))return modules[i].base;return NULL;}
+#ifdef GAME_BOTW
+/* Is pc in a module's original code (not in the patch area, where rewritten windows and gates are)? Called from a signal
+   handler (threads.c, asynchronous preemption): only reads the module table. */
+int runtime_guest_code_pc(uint64_t pc){for(unsigned i=0;i<NM;i++){uint64_t b=(uintptr_t)modules[i].base;if(b&&pc>=b&&pc-b<modules[i].text_end)return 1;}return 0;}
+#endif
 /* RELRO in newer SDKs protects relocated data after linking. Keep permissions at
  * the guest's 4 KiB granularity. A Darwin 16 KiB page receives the union of its
  * four guest permissions, so protecting an edge never removes access from an
@@ -312,6 +317,9 @@ static void signal_hex(const char *label,uint64_t value) {
 #define HOST_CTR_EL0 0x8555c005ULL
 static void crash(int num,siginfo_t *info,void *context) {
  ucontext_t *u=context;
+#ifdef GAME_BOTW
+ if(num==SIGTRAP){extern int botw_jq_hook(void *);if(botw_jq_hook(context))return;}   /* TOTK_JQ_CHECK diagnostics (game_patches_botw.c) */
+#endif
 #ifndef GAME_BOTW
  /* During save load, this optional game object can contain a tagged invalid
     reference. Treat it as absent, as the following cbz path expects (TOTK). */
@@ -344,6 +352,12 @@ static void crash(int num,siginfo_t *info,void *context) {
  signal_hex("[totk] signal=",num);signal_hex("fault=",(uintptr_t)info->si_addr);signal_hex("esr=",u->uc_mcontext->__es.__esr);
  {mach_vm_address_t ra=(uintptr_t)info->si_addr;mach_vm_size_t rs=0;vm_region_basic_info_data_64_t ri;mach_msg_type_number_t rc=VM_REGION_BASIC_INFO_COUNT_64;mach_port_t ro=0;
   if(mach_vm_region(mach_task_self(),&ra,&rs,VM_REGION_BASIC_INFO_64,(vm_region_info_t)&ri,&rc,&ro)==KERN_SUCCESS){signal_hex("region=",ra);signal_hex("region size=",rs);signal_hex("region prot=",(uint64_t)ri.protection|((uint64_t)ri.max_protection<<8));}}signal_hex("pc=",pc);signal_hex("lr=",u->uc_mcontext->__ss.__lr);signal_hex("fp=",fp);
+#ifdef GAME_BOTW
+ {Dl_info di;for(int k=0;k<2;k++){uint64_t a=k?u->uc_mcontext->__ss.__lr:pc;if(dladdr((void *)(uintptr_t)a,&di)&&di.dli_sname){write(2,k?"lr host ":"pc host ",8);write(2,di.dli_sname,strlen(di.dli_sname));signal_hex(" +",a-(uintptr_t)di.dli_saddr);}}}   /* a fault in a host function: name it */
+ /* Diagnostics (TOTK_CRASH_THREADS=1): what every other guest thread was doing at the fault (wait states, last SVC chains,
+    and the live pc of the ones running), to see a job running into data another thread is rebuilding. Once per process. */
+ {static int dumped;if(getenv("TOTK_CRASH_THREADS")&&!__atomic_fetch_add(&dumped,1,__ATOMIC_SEQ_CST)){extern void runtime_dump_threads(void);runtime_dump_threads();}}
+#endif
  for(unsigned i=0;i<NM;i++)if(pc>=(uintptr_t)modules[i].base&&pc<(uintptr_t)modules[i].base+modules[i].size){write(2,modules[i].name,strlen(modules[i].name));signal_hex(" offset=",pc-(uintptr_t)modules[i].base);}
  for(unsigned i=0;i<29;i++)signal_hex("x=",u->uc_mcontext->__ss.__x[i]);signal_hex("sp=",u->uc_mcontext->__ss.__sp);
  for(unsigned depth=0;depth<24&&fp&&!(fp&15);depth++){uint64_t frame[2];mach_vm_size_t got=0;if(mach_vm_read_overwrite(mach_task_self(),fp,16,(uintptr_t)frame,&got)!=KERN_SUCCESS||got!=16)break;signal_hex("frame lr=",frame[1]);for(unsigned i=0;i<NM;i++)if(frame[1]>=(uintptr_t)modules[i].base&&frame[1]<(uintptr_t)modules[i].base+modules[i].size){write(2,modules[i].name,strlen(modules[i].name));signal_hex(" offset=",frame[1]-(uintptr_t)modules[i].base);}if(frame[0]==fp)break;fp=frame[0];   /* host-stack switch: frames may move between stacks */}
@@ -441,6 +455,12 @@ static void boot(void) {
  /* SDK 7.3.2 (Breath of the Wild): Start(handle, arg, rtld callback, module initializers). The order inside is the one of
     TOTK's SDK 15 (libc0, nnosInitialize, callback, libc1, InitializeSdkModule, nninitStartup, libc2, callback, nnMain), but
     after nnMain it calls nninitFinalizeSdkModule and quick-exits itself instead of a third callback. */
+ /* Host functions called from the main thread run on a stack of their own (8 MiB, guard page), as on every other guest
+    thread: the host-stack slot is then set while it runs guest code and cleared inside host code, which is how an
+    asynchronous preemption signal tells the two apart (threads.c preempt_signal). Without it a better thread that only
+    runs on core 0 waited for the main thread's next SVC (botw.md). */
+ if(!getenv("TOTK_MAIN_PREEMPT")||strcmp(getenv("TOTK_MAIN_PREEMPT"),"0")){extern void runtime_hle_stack_set(uintptr_t top);size_t n=8u<<20;void *hs=mmap(NULL,n,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+  need(hs!=MAP_FAILED&&mprotect(hs,0x4000,PROT_NONE)==0,"main thread host-service stack");runtime_hle_stack_set((uintptr_t)hs+n-64);}
  fprintf(stderr,"[totk] ENTER original nn::init::Start (SDK 7)\n");
  ((void(*)(uint64_t,uint64_t,void(*)(void),void(*)(void)))required("_ZN2nn4init5StartEmmPFvvES2_"))(main_handle,0,loader_ready,module_inits);
 #else

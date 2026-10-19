@@ -4209,9 +4209,9 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
     if (R.rt.depth) (void)attachment_texture(R.rt.depth, &R.rt.dview, R.rt.has_dview);
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     MTL4RenderPassDescriptor *pd = [MTL4RenderPassDescriptor new];
-    int any = 0;
+    int any = 0; BOTW_RT_DUP_CLEARS()
     for (int i = 0; i < R.rt.n; i++) {
-        if (!R.rt.color[i] || (clear_only == 1 && !R.clear_c[i])) continue;
+        if (!R.rt.color[i] || (clear_only == 1 && !R.clear_c[i])) continue; BOTW_RT_DUP_SKIP(i)
         attach(pd.colorAttachments[i], R.rt.color[i], &R.rt.cview[i], R.rt.has_cview[i]);
         { const tex_t *ot = R.rt.color[i]; int was = gpu_owned(ot->serial); gpu_owned_mark(ot->serial);
           if (ot->mem && tex_mirrored(ot)) wb_note(ot);
@@ -7326,7 +7326,7 @@ static void pso_predict_rest(void) {
             R.rt = *r; R.has_rt = 1;
             /* Prediction must not acquire/recreate/upload textures on the active GPU timeline. */
             for (int i = 0; i < r->n && i < 8; i++) { MTLTextureDescriptor *d = r->color[i] ? tex_desc(r->color[i], tex_mirrored(r->color[i])) : nil;
-                if (d) { cf[i] = (uint32_t)attachment_format(r->color[i], &r->cview[i], r->has_cview[i], d.pixelFormat); samples = (uint32_t)d.sampleCount; } }
+                if (d) { cf[i] = (uint32_t)attachment_format(r->color[i], &r->cview[i], r->has_cview[i], d.pixelFormat); samples = (uint32_t)d.sampleCount; } } BOTW_RT_DUP_PREDICT(r, cf)
             for (int i = 0; i < 8; i++) if (pf_block_compressed(cf[i])) memset(cf, 0, sizeof cf), r = NULL;   // TOTK: such passes are handled (or reported) when they begin
             if (!r) { cf[0] = 0; df = sf = dfull = sfull = 0; continue; }
             MTLTextureDescriptor *dd = r->depth ? tex_desc(r->depth, tex_mirrored(r->depth)) : nil;
@@ -8663,7 +8663,7 @@ static void clear_quad_core(id<MTL4RenderCommandEncoder> en, const uint32_t cfmt
     enc_r_draw(en, MTLPrimitiveTypeTriangle, 0, 3);
 }
 static void clear_quad(const p_clear_color *c) {
-    gpu_path_on("TOTK_GPU_MIDCLEAR", "mid-pass / partial-mask / scissored color clear");
+    gpu_path_on("TOTK_GPU_MIDCLEAR", "mid-pass / partial-mask / scissored color clear"); BOTW_RT_DUP_CLEAR_TO_FIRST(c)
     const tex_t *t = R.rt.color[c->index];
     int f = R.rt.has_cview[c->index] && R.rt.cview[c->index].set_format ? R.rt.cview[c->index].format : t->d.format;
     if (cls_of(f)) MDIE("partial color clear of integer render target format %#x not implemented", f);

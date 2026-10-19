@@ -55,6 +55,11 @@ static unsigned char alias_stale[ALIAS_SIZE_MAX/4096];
 static uint64_t alias_bytes;
 static uint8_t user_exception_context[0x1000] __attribute__((aligned(0x1000)));
 #define SYSTEM_RESOURCE_BUDGET (32ULL<<20)
+#ifdef GAME_BOTW
+#define GAME_PROGRAM_ID 0x01007ef00011e000ULL   /* GetInfo 18 (ProgramId): Breath of the Wild */
+#else
+#define GAME_PROGRAM_ID 0x0100f2c0115b6000ULL
+#endif
 #define HEAP_CAP (4ULL<<30)   /* 1.4.3 sets a 2.2 GiB heap during nninitStartup */
 #define APP_POOL app_pool()
 static uint64_t app_pool(void){static uint64_t v;if(!v){const char *e=getenv("TOTK_APP_POOL");uint64_t extra=(runtime_output_res_extra_bytes()+0x1fffff)&~0x1fffffULL;
@@ -282,6 +287,13 @@ void *runtime_override(const char *name) {
  void *input=runtime_input_override(name);if(input)return input;void *font=runtime_font_override(name);if(font)return font;void *codec=runtime_codec_override(name);if(codec)return codec;void *movie=runtime_movie_override(name);if(movie)return movie;void *clock=runtime_time_override(name);if(clock)return clock;void *applet=runtime_applet_override(name);if(applet)return applet;void *swkbd=runtime_swkbd_override(name);if(swkbd)return swkbd;void *account=runtime_account_override(name);if(account)return account;void *fs=runtime_fs_override(name);if(fs)return fs;void *front=runtime_front_override(name);return front?front:runtime_gfx_override(name);
 }
 void runtime_core_checkpoint(void);
+#ifdef GAME_BOTW
+/* Breath of the Wild (botw.md): the preemption point is also after every SVC. A thread the SVC woke competes for a core at
+   once (threads.c wake_queue); when it beats this one on this core, Horizon runs it before the SVC returns. */
+uint64_t runtime_svc_inner(unsigned num,uint64_t *r,const char *module,uint64_t offset);
+uint64_t runtime_svc(unsigned num,uint64_t *r,const char *module,uint64_t offset){uint64_t v=runtime_svc_inner(num,r,module,offset);runtime_core_checkpoint();return v;}
+#define runtime_svc runtime_svc_inner
+#endif
 uint64_t runtime_svc(unsigned num,uint64_t *r,const char *module,uint64_t offset) {
  runtime_core_checkpoint();
  // Successful SVCs occur several times per frame. Keep the detailed trace available
@@ -308,7 +320,7 @@ uint64_t runtime_svc(unsigned num,uint64_t *r,const char *module,uint64_t offset
   case 11:arc4random_buf(&value,8);break;
   case 12:value=ASLR_START;break;case 13:value=ASLR_SIZE;break;
   case 14:value=STACK_START;break;case 15:value=STACK_SIZE;break;
-  case 16:value=SYSTEM_RESOURCE_BUDGET;break;case 17:value=sizeof(stack_maps)+sizeof(alias_pages);break;case 18:value=0x0100f2c0115b6000ULL;break;
+  case 16:value=SYSTEM_RESOURCE_BUDGET;break;case 17:value=sizeof(stack_maps)+sizeof(alias_pages);break;case 18:value=GAME_PROGRAM_ID;break;
   case 20:value=(uintptr_t)user_exception_context;break;   /* UserExceptionContextAddress: SDK stores e.g. the dying-message region at +0x1c0 */case 23:value=1;break;
   /* AliasRegionExtraSize (18.0.0+): our alias reservation contains no
    * kernel-owned extension outside the range reported by ids 2 and 3. */
@@ -361,3 +373,6 @@ uint64_t runtime_svc(unsigned num,uint64_t *r,const char *module,uint64_t offset
  default:fprintf(stderr,"[totk] unimplemented SVC 0x%x at %s+%#llx\n",num,module,(unsigned long long)offset);if(num==0x1f)fprintf(stderr,"[totk] named port %.12s\n",(const char *)(uintptr_t)r[1]);runtime_trace_guest(r[29],r[30]);runtime_fail("system service not implemented");return 0;
  }
 }
+#ifdef GAME_BOTW
+#undef runtime_svc
+#endif
