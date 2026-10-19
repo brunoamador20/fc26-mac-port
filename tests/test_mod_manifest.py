@@ -55,12 +55,21 @@ class ModManifest(unittest.TestCase):
                                             hashlib.sha256(FILES['Sound/B.bwav']).hexdigest()])])
         self.assertIn('(same as the original): UI/C.bfres', result.stdout)
 
-    def test_unknown_path_writes_nothing(self):
+    def test_misspelt_path_writes_nothing(self):
         self.put('Sound/b.bwav', b'wrong case')
         result = run(self.mod, '--romfs', self.romfs)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('not a file of this RomFS: Sound/b.bwav', result.stderr)
+        self.assertIn('not a file of this RomFS: Sound/b.bwav (it has Sound/B.bwav', result.stderr)
         self.assertFalse((self.mod/'manifest.tsv').exists())
+
+    def test_new_file_is_added(self):   # issue #48
+        self.put('Sound/B.bwav', b'dubbed')
+        self.put('UI/Tex/New/Gold.bntx.zs', b'new texture')
+        result = run(self.mod, '--romfs', self.romfs)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = sorted(l for l in (self.mod/'manifest.tsv').read_text().splitlines() if not l.startswith('#'))
+        self.assertEqual(lines[1], '\t'.join(['UI/Tex/New/Gold.bntx.zs', '11', hashlib.sha256(b'new texture').hexdigest(), '-']))
+        self.assertIn('(1 replaced, 1 added)', result.stdout)
 
     def test_app_path_takes_the_version_from_the_folder(self):
         app = self.root/'Tears of the Kingdom.app'
