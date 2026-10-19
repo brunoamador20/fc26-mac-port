@@ -5432,6 +5432,7 @@ static size_t arena_alloc(size_t n, id<MTLBuffer> *buf) {
 // ---------- Draw state ----------
 static struct {
     const prog_t *prog;
+    const prog_t *stage_prog[5];   // graphics stage -> the program bound for it (NVN binds programs per stage mask)
     blend_st blend[8]; color_st color; chmask_st chmask; ms_st ms; poly_st poly; ds_st ds;
     va_st attr[16]; int nattr; vs_st stream[16]; int nstream;
     NVNbufferRange vbuf[16];
@@ -5465,6 +5466,38 @@ static void udc_note_draw(NvProg *pr) {
                 && (S.ds.fail_f != NVN_STENCIL_OP_KEEP || S.ds.zfail_f != NVN_STENCIL_OP_KEEP || S.ds.zpass_f != NVN_STENCIL_OP_KEEP
                     || S.ds.fail_b != NVN_STENCIL_OP_KEEP || S.ds.zfail_b != NVN_STENCIL_OP_KEEP || S.ds.zpass_b != NVN_STENCIL_OP_KEEP)) { t->wrote = 1; t->wwhy = 5; }
     }
+}
+/* Per-stage program binding (NVN: BindProgram(p, stages) replaces only the stages in the mask; a stage p lacks becomes
+   unbound). Bayonetta 3 binds a vertex-only and a fragment-only program; TOTK binds whole graphics programs and compute
+   programs on their own. The replay draws with one program, so:
+   - a compute-only bind makes that program current, as before (the graphics stages stay bound for later draws);
+   - a graphics bind whose program covers every bound graphics stage makes it current, as before (TOTK's case);
+   - otherwise the bound stages are combined into a host program, one per distinct combination (cached by the component
+     programs and their serials; a component's new SetShaders gives a new serial and so a new combination). */
+static int prog_stage_index(const prog_t *p, int stage) {
+    for (unsigned i = 0; p && i < p->nstage; i++) { uint32_t st; memcpy(&st, (const uint8_t *)p->sd[i].control + 0x714, 4); if ((int)st == stage) return (int)i; }
+    return -1;
+}
+extern uint64_t nvn_new_serial(void);
+static const prog_t *prog_combined(void) {
+    typedef struct { const prog_t *part[5]; uint64_t ser[5]; prog_t *prog; } combo_t;
+    static combo_t *tab; static size_t n, cap;
+    uint64_t ser[5]; for (int s = 0; s < 5; s++) ser[s] = S.stage_prog[s] ? S.stage_prog[s]->serial : 0;
+    for (size_t i = 0; i < n; i++) if (!memcmp(tab[i].part, S.stage_prog, sizeof tab[i].part) && !memcmp(tab[i].ser, ser, sizeof ser)) return tab[i].prog;
+    prog_t *c = calloc(1, sizeof *c); if (!c) MDIE("combined program allocation");
+    c->magic = 0x474f5250;   /* "PROG", as nvnProgramInitialize writes it */
+    for (int s = 0; s < 5; s++) { int k = prog_stage_index(S.stage_prog[s], s); if (k >= 0) c->sd[c->nstage++] = S.stage_prog[s]->sd[k]; }
+    c->serial = nvn_new_serial();
+    if (n == cap) { cap = cap ? cap * 2 : 64; tab = realloc(tab, cap * sizeof *tab); if (!tab) MDIE("combined program table"); }
+    combo_t *e = &tab[n++]; memcpy(e->part, S.stage_prog, sizeof e->part); memcpy(e->ser, ser, sizeof ser); e->prog = c;
+    if (n <= 4 || n % 1000 == 0) MLOG("[prog] combined program %zu: %u stages from per-stage binds", n, c->nstage);
+    return c;
+}
+static const prog_t *prog_bind(const prog_t *np, int stages) {
+    if (!(stages & NVN_SHADER_STAGE_ALL_GRAPHICS_BITS)) return np;   // compute only
+    for (int s = 0; s < 5; s++) if (stages & (1 << s)) S.stage_prog[s] = prog_stage_index(np, s) >= 0 ? np : NULL;
+    int mixed = 0; for (int s = 0; s < 5; s++) mixed |= S.stage_prog[s] && S.stage_prog[s] != np;
+    return mixed ? prog_combined() : np;
 }
 static void state_reset(void) {
     memset(&S, 0, sizeof S);
@@ -7429,7 +7462,7 @@ static int first_draw_covers(int i, id<MTLTexture> t, NSUInteger level) {
 static int state_op(uint32_t op, const void *a) {
     switch (op) {
         case OP_SCISSOR: R.sc = *(const p_scissor *)a; R.has_sc = 1; break;
-        case OP_BIND_PROGRAM: { const prog_t *np = ((const p_bind_program *)a)->prog; if (np != S.prog) { S.prog = np; g_pso_dirty = 1; args_program_changed(); } break; }
+        case OP_BIND_PROGRAM: { const p_bind_program *bp = a; const prog_t *np = prog_bind(bp->prog, bp->stages); if (np != S.prog) { S.prog = np; g_pso_dirty = 1; args_program_changed(); } break; }
         case OP_BIND_STATE: {
             const p_bind_state *b = a; void *dst = NULL; size_t n = 0;
             blend_st bs;
@@ -10030,6 +10063,27 @@ static id<MTL4ComputeCommandEncoder> disp_enc(void) {
     if (g_disp_n % 20000 == 0) MLOG("[nvn] 计算派发 至 %llu 次：其中 %llu 次（%.0f%%）接在已开的计算编码器里，没有另开编码器", (unsigned long long)g_disp_n, (unsigned long long)g_disp_shared, 100.0 * (double)g_disp_shared / (double)g_disp_n);
     return g_blit;
 }
+/* Indirect draw records (p_draw_indirect tail, Bayonetta 3): read {count, instances, first, base vertex, base instance}
+   (elements) or {count, instances, first, base instance} (arrays) from memory now and write them into the record.
+   Approximation: arguments a GPU pass of this same submission writes are seen as they are in memory at replay, usually the
+   previous frame's. 0 = nothing to draw. */
+static int draw_resolve(const op_hdr *h, void *rec, int indexed) {
+    size_t at = indexed ? DRAW_TAIL_AT(p_draw_idx) : DRAW_TAIL_AT(p_draw);
+    if (h->size < 8 + at + sizeof(p_draw_indirect)) return 1;
+    p_draw_indirect t; memcpy(&t, (uint8_t *)rec + at, sizeof t);
+    if (t.magic != DRAW_INDIRECT_MAGIC) return 1;
+    if (t.count_addr) { uint32_t cnt; if (g_nupd) upd_guard(t.count_addr, t.count_addr + 4); memcpy(&cnt, (const void *)(uintptr_t)t.count_addr, 4); if (t.index >= cnt) return 0; }
+    if (g_nupd) upd_guard(t.args, t.args + 20);
+    uint32_t v[5]; memcpy(v, (const void *)(uintptr_t)t.args, indexed ? 20 : 16);
+    if (!v[0] || !v[1]) return 0;
+    if (indexed) {
+        p_draw_idx *d = rec; unsigned isz = d->itype == NVN_INDEX_TYPE_UNSIGNED_BYTE ? 1 : d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? 2 : 4;
+        d->count = (int32_t)v[0]; d->instances = (int32_t)v[1]; d->ibuf = t.ibuf + (uint64_t)v[2] * isz; d->base_vertex = (int32_t)v[3]; d->base_instance = (int32_t)v[4];
+    } else {
+        p_draw *d = rec; d->count = (int32_t)v[0]; d->instances = (int32_t)v[1]; d->first = (int32_t)v[2]; d->base_instance = (int32_t)v[3];
+    }
+    return 1;
+}
 static void dispatch(const p_dispatch *dp) {
     zskip_clear();
     if (!S.prog) { RED_ONCE(27, "派发前没有绑定程序"); return; }
@@ -10049,6 +10103,7 @@ static void dispatch(const p_dispatch *dp) {
         hm_put_id(&g_cps, &k, ps);
     }
     if (g_nupd) upd_guard_stage(cs, 5);   // TOTK: renamed uniform updates touched by this dispatch's storage / texture buffers
+    if (cs->builtin && dp->x == DISPATCH_INDIRECT) { RED_ONCE(32, "indirect dispatch of a built-in kernel"); return; }
     if (cs->builtin) {   // 内嵌计算核：n = uniform 缓冲 0，src = 存储缓冲 0，dst = 存储缓冲 1 | Built-in compute kernel: n = uniform buffer 0, src = storage buffer 0, dst = storage buffer 1
         const p_bind_buf *u = &S.ubo[5][0], *a0 = &S.ssbo[5][0], *a1 = &S.ssbo[5][1];
         if (g_nupd) { upd_guard(u->addr, u->addr + 16); upd_guard(a0->addr, a0->addr + (a0->size ? a0->size : 8)); upd_guard(a1->addr, a1->addr + (a1->size ? a1->size : 8)); }   // the built-in kernel reads its uniform from memory
@@ -10069,16 +10124,27 @@ static void dispatch(const p_dispatch *dp) {
     }
     const uint16_t *tg = cs->rf.tg;
     if (!tg[0]) { RED_ONCE(29, "计算着色器缺线程组大小反射"); return; }
+    /* Indirect dispatch (Bayonetta 3): the GPU reads the group counts from {x, y, z} at dp->caller. Shaders that read the
+       grid size see the counts in memory at replay, the closest value the host has (the GPU may still change them). */
+    void *ib = NULL; uint64_t io = 0; int indirect = dp->x == DISPATCH_INDIRECT;
+    if (indirect) {
+        if (g_nupd) upd_guard(dp->caller, dp->caller + 12);
+        if (!mtl_addr(dp->caller, 12, &ib, &io)) { RED_ONCE(31, "indirect dispatch arguments outside every memory pool"); return; }
+    }
     rp_end();
     int reuse = disp_reuse_on() && !pg_on();
     id<MTLComputeCommandEncoder> ce;
     if (reuse) ce = disp_enc();
     else { if (g_blit) { enc_b_end(g_blit); g_blit = nil; } ce = pg_compute(); }
     enc_c_pso(ce, ps);
-    g_dispatch_grid[0] = (uint32_t)dp->x; g_dispatch_grid[1] = (uint32_t)dp->y; g_dispatch_grid[2] = (uint32_t)dp->z;
+    if (indirect) memcpy(g_dispatch_grid, (const void *)(uintptr_t)dp->caller, 12);
+    else { g_dispatch_grid[0] = (uint32_t)dp->x; g_dispatch_grid[1] = (uint32_t)dp->y; g_dispatch_grid[2] = (uint32_t)dp->z; }
     encode_args(ce, cs, 5, 0);
     if (atomic_load(&g_draw_log) > 0) MLOG("[uw] F%llu pass %llu dispatch cs %.8s grid %dx%dx%d", (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, cs->key, dp->x, dp->y, dp->z);
-    enc_c_dispatch(ce, MTLSizeMake(dp->x, dp->y, dp->z), MTLSizeMake(tg[0], tg[1], tg[2]));
+    if (!indirect) enc_c_dispatch(ce, MTLSizeMake(dp->x, dp->y, dp->z), MTLSizeMake(tg[0], tg[1], tg[2]));
+    else if ([(id)ce respondsToSelector:@selector(dispatchThreadgroupsWithIndirectBuffer:threadsPerThreadgroup:)])   // Metal 4: a GPU address
+        [(id<MTL4ComputeCommandEncoder>)ce dispatchThreadgroupsWithIndirectBuffer:((__bridge id<MTLBuffer>)ib).gpuAddress + io threadsPerThreadgroup:MTLSizeMake(tg[0], tg[1], tg[2])];
+    else [ce dispatchThreadgroupsWithIndirectBuffer:(__bridge id<MTLBuffer>)ib indirectBufferOffset:io threadsPerThreadgroup:MTLSizeMake(tg[0], tg[1], tg[2])];
     if (!reuse) enc_c_end(ce);
     bright_lut(cs);   // 3D 画面加亮：游戏算完调色表之后重写 | 3D picture brightening: rewrite after the game finishes computing the color lookup table
     /* TOTK_EXPO_LOG=<file> (diagnostic): after each dispatch of the exposure kernel (ae725063), copy floats 96..127 of its
@@ -10703,8 +10769,8 @@ void mtl_exec(const uint8_t *p) {
                 if (c->stencil_mask) { R.clear_s = 1; R.cs = (uint32_t)c->stencil; }
                 break;
             }
-            case OP_DRAW: g_exec_next = p + h.size; draw(a, NULL); g_exec_next = NULL; break;   // 前瞻起点 | Lookahead start point
-            case OP_DRAW_IDX: g_exec_next = p + h.size; draw(NULL, a); g_exec_next = NULL; break;
+            case OP_DRAW: if (!draw_resolve(&h, (void *)a, 0)) break; g_exec_next = p + h.size; draw(a, NULL); g_exec_next = NULL; break;   // 前瞻起点 | Lookahead start point
+            case OP_DRAW_IDX: if (!draw_resolve(&h, (void *)a, 1)) break; g_exec_next = p + h.size; draw(NULL, a); g_exec_next = NULL; break;
             // 状态没变就不置脏（游戏每次绘制前常重发同值的程序 / 状态块 / 顶点格式；脏标志只决定是否重取管线 / 深度模板对象，值相同则对象相同）
             // Do not mark dirty if the state did not change (the game often re-sends the same program / state block / vertex format before each draw; the dirty flag only decides whether to re-fetch the pipeline / depth-stencil object, and equal values mean the same object)
             case OP_SCISSOR: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:

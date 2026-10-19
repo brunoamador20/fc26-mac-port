@@ -138,7 +138,13 @@ typedef struct { int32_t face, value_mask, mask, ref, which; } p_stencil;  // wh
 typedef struct { float factor, units, clamp; } p_poly_offset;
 typedef struct { int32_t prim, first, count, base_instance, instances; } p_draw;   // TOTK: instances 0 = one instance (DrawArrays)
 typedef struct { int32_t prim, itype, count, base_vertex, base_instance, instances; uint64_t ibuf; } p_draw_idx;
-typedef struct { int32_t x, y, z; uint64_t caller; } p_dispatch;   // caller：游戏调用点返回地址（定位派发者） | caller: return address of the game call site (to locate the dispatcher)
+/* Indirect draws (Bayonetta 3) are OP_DRAW / OP_DRAW_IDX records followed by this tail. The replay reads the arguments
+   from memory just before the draw and writes them into the record, so every later reader sees a plain draw. */
+#define DRAW_INDIRECT_MAGIC 0x5443455249444e49ull   /* "INDIRECT" */
+typedef struct { uint64_t magic, args, ibuf, count_addr, index; } p_draw_indirect;   // count_addr != 0: drawn only while index < *(uint32_t *)count_addr (multi-draw)
+#define DRAW_TAIL_AT(rec_type) ((sizeof(rec_type) + 7) & ~(size_t)7)
+typedef struct { int32_t x, y, z; uint64_t caller; } p_dispatch;   // x == DISPATCH_INDIRECT: caller holds the GPU address of {x, y, z} (Bayonetta 3)
+#define DISPATCH_INDIRECT (-1)   // caller：游戏调用点返回地址（定位派发者） | caller: return address of the game call site (to locate the dispatcher)
 typedef struct { const dpool_t *pool; } p_set_pool;
 typedef struct { uint64_t src; const tex_t *tex; view_t view; uint8_t has_view; NVNcopyRegion r; int32_t flags; } p_copy_b2t;
 typedef struct { const tex_t *src, *dst; view_t sv, dv; uint8_t has_sv, has_dv; NVNcopyRegion sr, dr; int32_t flags; } p_copy_t2t;   // T2B 复用：src 存目标缓冲地址 | Reused for T2B: src stores the destination buffer address

@@ -518,11 +518,35 @@ NVN(nvnProgramInitialize, NVNboolean, NVNprogram *p, NVNdevice *d) {
     (void)d; memset(p, 0, sizeof(prog_t)); ((prog_t *)p)->magic = MAGIC('P', 'R', 'O', 'G'); return 1;
 }
 NVN(nvnProgramFinalize, void, NVNprogram *p) { x_drain(); mtl_prog_release((prog_t *)p); ((prog_t *)p)->magic = 0; }
+/* The driver reads a shader's control section during SetShaders; the game may free or reuse that memory afterwards
+   (Bayonetta 3 does; TOTK kept it). The replay reads control sections later, so each one is copied here into storage
+   that lives for the process, one copy per distinct content (0x880 bytes, the extent the replay reads). */
+#define CONTROL_BYTES 0x880
+static const void *control_intern(const void *control) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static const uint8_t **slots; static size_t cap, used;
+    if (!control) return NULL;
+    uint64_t h = 1469598103934665603ull; const uint8_t *b = control;
+    for (size_t i = 0; i < CONTROL_BYTES; i++) h = (h ^ b[i]) * 1099511628211ull;
+    pthread_mutex_lock(&mu);
+    if (used * 2 >= cap) {   // grow and rehash (open addressing)
+        size_t ncap = cap ? cap * 2 : 4096; const uint8_t **ns = calloc(ncap, sizeof *ns); if (!ns) die("control section table");
+        for (size_t i = 0; i < cap; i++) if (slots[i]) {
+            uint64_t k = 1469598103934665603ull; for (size_t j = 0; j < CONTROL_BYTES; j++) k = (k ^ slots[i][j]) * 1099511628211ull;
+            size_t at = k & (ncap - 1); while (ns[at]) at = (at + 1) & (ncap - 1); ns[at] = slots[i];
+        }
+        free(slots); slots = ns; cap = ncap;
+    }
+    size_t at = h & (cap - 1);
+    while (slots[at] && memcmp(slots[at], b, CONTROL_BYTES)) at = (at + 1) & (cap - 1);
+    if (!slots[at]) { uint8_t *c = malloc(CONTROL_BYTES); if (!c) die("control section copy"); memcpy(c, b, CONTROL_BYTES); slots[at] = c; used++; }
+    const void *r = slots[at]; pthread_mutex_unlock(&mu); return r;
+}
 NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData *sd) {
     NVN_BLOCKING();
     prog_t *o = (prog_t *)p;
     if (n < 0 || n > 6) { LOG("【红】ProgramSetShaders 阶段数 %d", n); return 0; }
     mtl_prog_release(o); o->nstage = n; memcpy(o->sd, sd, n * sizeof *sd); o->serial = nvn_new_serial();
+    for (int i = 0; i < n; i++) o->sd[i].control = control_intern(o->sd[i].control);
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
     return 1;
 }
@@ -592,6 +616,13 @@ static int sync_chain_left(int k) {
 NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) { (void)q; (void)s; return 1; }
 NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; (void)f; int tok; uint64_t v = fence_now(&tok); ((sync_t *)s)->fenced = tok ? 5 : 1; ((sync_t *)s)->fence = v;
     if (sync_chain_left(0)) { char w[96]; snprintf(w, sizeof w, "FenceSync sync=%p fence=%llu cond=%d flags=%d", (void *)s, (unsigned long long)v, (int)c, f); guest_chain(w); } }
+// A fence inside a command buffer (Bayonetta 3; TOTK only fences queues). Approximation: it stands for the next submission
+// (fence_now() + 1), where the command buffer normally goes. A later real submission releases waiters early (results read
+// before the GPU wrote them), an earlier one makes them wait longer; neither can hang.
+NVN(nvnCommandBufferFenceSync, void, NVNcommandBuffer *c, NVNsync *s, NVNsyncCondition cond, int flags) {
+    (void)c; (void)cond; (void)flags; int tok; uint64_t v = fence_now(&tok) + 1;
+    ((sync_t *)s)->fenced = tok ? 5 : 1; ((sync_t *)s)->fence = v;
+}
 // 没围栏过的同步对象按真机行为等到超时；已围栏的只在 GPU 真正完成到该栅栏值后放行
 // A sync object that was never fenced waits until timeout, as on a real device; a fenced one is released only after the GPU has actually completed up to that fence value
 // TOTK_SYNC_LOG=1: CPU waits by kind (0 fence sync, 1 window-acquire sync): calls, calls that had to block, blocked time,
@@ -1762,10 +1793,44 @@ NVN(nvnCommandBufferDrawElementsInstanced, void, NVNcommandBuffer *c, NVNdrawPri
     int bv, int bi, int inst) {
     *REC(c, OP_DRAW_IDX, p_draw_idx) = (p_draw_idx){pr, it, n, bv, bi, inst, ib}; hw_fix(CB(c), 44);   /* assumed: same 6-parameter draw macro as the base-vertex form (unverified) */
 }
+// Indirect draws (Bayonetta 3; TOTK never calls them): arguments in memory, resolved at replay (nvn_mtl.m draw_resolve).
+NVN(nvnCommandBufferDrawArraysIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNbufferAddress args) {
+    uint8_t *p = rec(c, OP_DRAW, DRAW_TAIL_AT(p_draw) + sizeof(p_draw_indirect));
+    *(p_draw *)p = (p_draw){pr, 0, 0, 0, 0}; *(p_draw_indirect *)(p + DRAW_TAIL_AT(p_draw)) = (p_draw_indirect){DRAW_INDIRECT_MAGIC, args, 0, 0, 0};
+}
+NVN(nvnCommandBufferDrawElementsIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib, NVNbufferAddress args) {
+    uint8_t *p = rec(c, OP_DRAW_IDX, DRAW_TAIL_AT(p_draw_idx) + sizeof(p_draw_indirect));
+    *(p_draw_idx *)p = (p_draw_idx){pr, it, 0, 0, 0, 0, ib}; *(p_draw_indirect *)(p + DRAW_TAIL_AT(p_draw_idx)) = (p_draw_indirect){DRAW_INDIRECT_MAGIC, args, ib, 0, 0};
+    hw_fix(CB(c), 44);
+}
+/* Multi-draws: one indirect record per possible draw (up to the game's maximum), each skipped at replay when its index is not
+   below the count in memory (the Count forms) or never (the plain forms, count = max). */
+static void multi_draw(NVNcommandBuffer *c, int indexed, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib, NVNbufferAddress args,
+                       NVNbufferAddress count, int max, ptrdiff_t stride) {
+    if (max < 0 || max > 4096) die("multi-draw of %d draws", max);
+    if (!stride) stride = indexed ? 20 : 16;
+    for (int i = 0; i < max; i++) {
+        size_t at = indexed ? DRAW_TAIL_AT(p_draw_idx) : DRAW_TAIL_AT(p_draw);
+        uint8_t *p = rec(c, indexed ? OP_DRAW_IDX : OP_DRAW, at + sizeof(p_draw_indirect));
+        if (indexed) *(p_draw_idx *)p = (p_draw_idx){pr, it, 0, 0, 0, 0, ib}; else *(p_draw *)p = (p_draw){pr, 0, 0, 0, 0};
+        *(p_draw_indirect *)(p + at) = (p_draw_indirect){DRAW_INDIRECT_MAGIC, args + (uint64_t)(i * stride), ib, count, (uint64_t)i};
+    }
+}
+NVN(nvnCommandBufferMultiDrawArraysIndirectCount, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNbufferAddress args, NVNbufferAddress count, int max, ptrdiff_t stride) {
+    multi_draw(c, 0, pr, 0, 0, args, count, max, stride);
+}
+NVN(nvnCommandBufferMultiDrawElementsIndirectCount, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib,
+    NVNbufferAddress args, NVNbufferAddress count, int max, ptrdiff_t stride) {
+    multi_draw(c, 1, pr, it, ib, args, count, max, stride);
+}
 NVN(nvnCommandBufferDispatchCompute, void, NVNcommandBuffer *c, int x, int y, int z) {
     // 跳板是尾跳（br），这里的返回地址就是游戏里的调用点
     // The thunk is a tail jump (br), so the return address here is the call site in the game
     *REC(c, OP_DISPATCH, p_dispatch) = (p_dispatch){x, y, z, (uint64_t)__builtin_return_address(0)};
+}
+// The group counts are read by the GPU from {x, y, z} at addr when it runs (Bayonetta 3; TOTK never calls it).
+NVN(nvnCommandBufferDispatchComputeIndirect, void, NVNcommandBuffer *c, NVNbufferAddress addr) {
+    *REC(c, OP_DISPATCH, p_dispatch) = (p_dispatch){DISPATCH_INDIRECT, 0, 0, (uint64_t)addr};
 }
 NVN(nvnCommandBufferBarrier, void, NVNcommandBuffer *c, int bits) { *(int32_t *)rec(c, OP_BARRIER, 8) = bits; }
 NVN(nvnCommandBufferSetTexturePool, void, NVNcommandBuffer *c, const NVNtexturePool *p) { REC(c, OP_SET_TEX_POOL, p_set_pool)->pool = (const dpool_t *)p; }
