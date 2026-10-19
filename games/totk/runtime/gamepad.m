@@ -6,11 +6,29 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "runtime.h"
+#include "controller_map.h"
 
 static pthread_mutex_t gamepadLock = PTHREAD_MUTEX_INITIALIZER;
 static RuntimeGamepadState gamepadState;
 static uint64_t pressedEdges;
 static BOOL started;
+static uint16_t controllerMap[CONTROLLER_BUTTONS];
+
+/* The player's button layout (controller_map.h): TOTK_CONTROLS names the file (the launcher: <data>/controls.txt and
+   checks it first). No file: the default layout. */
+static void load_controller_map(void) {
+    controller_map_default(controllerMap);
+    const char *path = getenv("TOTK_CONTROLS");
+    FILE *f = path && *path ? fopen(path, "rb") : NULL;
+    if (!f) { fprintf(stderr, "[totk-input] controller layout: default\n"); return; }
+    char text[16384]; size_t n = fread(text, 1, sizeof text - 1, f); int whole = feof(f); fclose(f);
+    if (!whole) runtime_fail("controller layout file too large");
+    text[n] = 0;
+    const char *error = NULL; int line = controller_map_parse(text, controllerMap, &error);
+    if (line) { fprintf(stderr, "[totk-input] %s line %d: %s\n", path, line, error); runtime_fail("controller layout file"); }
+    int changed = 0; for (int i = 0; i < CONTROLLER_BUTTONS; i++) changed += controllerMap[i] != (uint16_t)(1u << i);
+    fprintf(stderr, "[totk-input] controller layout: %s (%d buttons changed)\n", path, changed);
+}
 
 static int32_t stick_axis(float value) {
     const float deadzone = 0.12f;
@@ -25,6 +43,7 @@ static int32_t stronger_axis(int32_t a, int32_t b) {
     return abs(b) > abs(a) ? b : a;
 }
 
+/* The physical buttons held, bit i = controller_physical_names[i]. */
 static uint64_t gamepad_buttons(GCExtendedGamepad *pad) {
     uint64_t buttons = 0;
     if (pad.buttonA.isPressed) buttons |= 1ULL << 0;
@@ -52,7 +71,7 @@ static void refresh_gamepads(void) {
         GCExtendedGamepad *pad = controller.extendedGamepad;
         if (!pad) continue;
         next.connected = 1;
-        next.buttons |= gamepad_buttons(pad);
+        next.buttons |= controller_map_apply(controllerMap, gamepad_buttons(pad));
         next.lx = stronger_axis(next.lx, stick_axis(pad.leftThumbstick.xAxis.value));
         next.ly = stronger_axis(next.ly, stick_axis(pad.leftThumbstick.yAxis.value));
         next.rx = stronger_axis(next.rx, stick_axis(pad.rightThumbstick.xAxis.value));
@@ -81,6 +100,7 @@ static void attach_gamepad(GCController *controller) {
 void runtime_gamepad_start(void) {
     if (started) return;
     started = YES;
+    load_controller_map();
     NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
     [center addObserverForName:GCControllerDidConnectNotification object:nil queue:NSOperationQueue.mainQueue
                    usingBlock:^(NSNotification *notification) { attach_gamepad(notification.object); }];
