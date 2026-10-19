@@ -173,7 +173,21 @@ int botw_dead_keep(uint64_t serial);
 #define BOTW_TEX_RELEASE_KEEP(k) if (!botw_dead_keep(k))
 void botw_dead_forget(const uint64_t *serials, size_t n);
 #define BOTW_DEAD_FORGET(s, n) botw_dead_forget((s), (n));
+/* Key 3 (MetalFX 2K): Breath of the Wild's own upscale of the finished 1600x900 picture into the 1920x1080 canvas is the
+   fragment shader 0af88d51 (a 3-vertex triangle: five texel reads around the fragment's own coordinates, an edge-directed
+   sharpening of the sampled colour; no dynamic resolution, so the valid region is the whole source). MetalFX replaces the
+   whole draw (mfxup_dock; botw.md). */
+#define BOTW_MFXUP_DOCK_KEY(fs) int botw_ = !strncmp((fs)->key, "0af88d51bb12a2346b03bb2586d131def5a631271df192779b701efba6eb7f70-", 65);
+#define BOTW_AND_NOT_DOCK && !botw_
+#define BOTW_MFXUP_DOCK_REGION(cw, ch, src) if (botw_ && !why) { (cw) = (src).width; (ch) = (src).height; }
+/* Breath of the Wild's upscale draw writes RGB only (mask 0x7): the canvas keeps its cleared alpha, which nothing reads
+   (the final copy into the swapchain is opaque); MetalFX writes alpha too. TOTK's draw writes all four. */
+#define BOTW_MFXUP_MASK_BAD (botw_ ? (S.chmask.mask & 0x7) != 0x7 : (S.chmask.mask & 0xf) != 0xf)
 #else
+#define BOTW_MFXUP_MASK_BAD (S.chmask.mask & 0xf) != 0xf
+#define BOTW_MFXUP_DOCK_KEY(fs)
+#define BOTW_AND_NOT_DOCK
+#define BOTW_MFXUP_DOCK_REGION(cw, ch, src)
 #define BOTW_T2B_NOTE(c, t, mb, mo, n)
 #define BOTW_GPU_COPY_SUPERSEDES(mb, mo, n)
 #define BOTW_SERIAL_NOTE(k, what)

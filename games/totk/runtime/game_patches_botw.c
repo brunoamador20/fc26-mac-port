@@ -446,6 +446,17 @@ int botw_jq_hook(void *context) {   /* SIGTRAP from loader.c crash(): 1 = it was
 int runtime_output_res(unsigned *w, unsigned *h) { (void)w; (void)h; return 0; }
 uint64_t runtime_output_res_extra_bytes(void) { return 0; }
 int runtime_output_res_toggle(void) { return 0; }
-int runtime_output_mode_cycle(void) { fprintf(stderr, "[botw] key 3: no 2K modes yet\n"); return 0; }
+/* Key 3 (runtime/input.c): MetalFX 2K on / off. On: MetalFX replaces the game's own upscale of the 1600x900 picture into
+   the 1080p canvas (nvn_mtl.m mfxup_dock, BOTW_MFXUP_DOCK_KEY) and upscales the canvas into a window or full screen bigger
+   than 1080p at the present (the output stage). This game has no native-2K mode yet: its canvas size is not patched. */
+int runtime_output_mode_cycle(void) {
+    extern int mfxup_enabled(void);
+    extern void dm_gfx_set_flag(const char *name, int value);
+    int next = !mfxup_enabled();
+    dm_gfx_set_flag("mfx_output", next);
+    dm_gfx_set_flag("mfx_upscale", next);
+    fprintf(stderr, "[botw] key 3: %s\n", next ? "MetalFX 2K" : "关闭 2K");
+    return 1;
+}
 float runtime_aspect_now(void) { return 0; }
 int runtime_aspect_toggle(void) { return 0; }

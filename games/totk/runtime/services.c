@@ -211,11 +211,20 @@ void runtime_guest_resident(uint64_t *resident,uint64_t *dirty,uint64_t *compres
 }
 static void host_diag_init(void) { fprintf(stderr,"[totk] native diagnostics initialized\n"); }
 static void host_oe_init(void) { fprintf(stderr,"[totk] application environment: local macOS process\n"); }
+#ifdef GAME_BOTW
+void runtime_aoc_announce(void); int runtime_aoc_count(void); int runtime_aoc_list(int *out,int offset,int count);   /* aoc_romfs.c */
+static void host_aoc_init(void) { runtime_aoc_announce(); }   /* aoc_romfs.c: the DLC volumes (botw.md) */
+static int host_aoc_count(void) { return runtime_aoc_count(); }
+static int host_aoc_list(int *out,int offset,int count) {
+ if(offset<0||count<0)runtime_fail("invalid add-on content list range");return runtime_aoc_list(out,offset,count);
+}
+#else
 static void host_aoc_init(void) { fprintf(stderr,"[totk] add-on content: no DLC\n"); }
 static int host_aoc_count(void) { return 0; }
 static int host_aoc_list(int *out,int offset,int count) {
  (void)out;if(offset<0||count<0)runtime_fail("invalid add-on content list range");return 0;
 }
+#endif
 static void host_error_init(void) { fprintf(stderr,"[totk] error contexts: local diagnostics\n"); }
 static void host_fs_init(void) { runtime_fs_init(); }
 static void host_pctl_init(void) { fprintf(stderr,"[totk] local application parental controls initialized\n"); }

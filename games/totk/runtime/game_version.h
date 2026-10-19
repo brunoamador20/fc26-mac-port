@@ -12,6 +12,8 @@
 #endif
 #define TOTK_GAME_VERSION "1.6.0"
 #define GAME_NAME "Breath of the Wild"
+#define GAME_FOLDER "BotW"   /* ~/Library/Application Support/MacNativeGames/<GAME_FOLDER> (app/launcher.m) */
+#define GAME_LOG "botw"      /* ~/Library/Logs/MacNativeGames/<GAME_LOG>.log */
 #define TOTK_GAME_DIR "botw160"
 #define GAME_ADDR_0xe995c4 0xe53f8c   /* return address of nnMain's only call to nn::oe::SetFocusHandlingMode */
 #define GAME_ADDR_0x2aa4fa0 0x2128690 /* nn::swkbd::ShowKeyboard: main's PLT stub */
@@ -145,4 +147,8 @@
 #endif
 #ifndef GAME_NAME
 #define GAME_NAME "Tears of the Kingdom"   /* window title and menu (game_version.h is per binary) */
+#endif
+#ifndef GAME_FOLDER
+#define GAME_FOLDER "TOTK"   /* the player's data folder under ~/Library/Application Support/MacNativeGames (app/launcher.m) */
+#define GAME_LOG "totk"
 #endif
