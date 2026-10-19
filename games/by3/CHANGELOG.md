@@ -13,8 +13,8 @@ named by hash and subject. Game data, keys and saves are never committed (see th
 |---|---|---|
 | 0 | Feasibility: does the game fit the TotK architecture? | done 2026-10-19 |
 | 1 | Code and data out of the dump; code rewritten for Apple silicon | done 2026-10-19 |
-| 2 | A runtime target with the TotK-only parts compiled out, booting to `nnMain` | next |
-| 3 | Follow every unknown service / command / NVN call until the first `nvnQueuePresentTexture` | open |
+| 2 | A runtime target with the TotK-only parts compiled out, booting to `nnMain` | done 2026-10-19 |
+| 3 | Follow every unknown service / command / NVN call until the first `nvnQueuePresentTexture` | in progress |
 | 4 | Audio (Wwise), input, saves; the 1.2.0 patches (60 fps, 900p) applied to the native code | open |
 | 5 | Performance, shaders, packaging as an app | open |
 
@@ -103,3 +103,45 @@ Commits:
 Open questions carried forward: what program 1 (`…A001`) is; whether the WebM movies are VP9 (the TotK movie host
 decodes VP9 with libvpx); the audio renderer revision Wwise requests under SDK 13.3.2; whether NVN struct layouts differ
 between SDK 13.3.2 and the version `nvn.h` assumes.
+
+### 2026-10-19: stage 2, the game reaches `nnMain`
+
+**Layout.** `games/by3/runtime` is a fork of `games/totk/runtime` (commit `52edc0a` is the unchanged copy, so the next
+commit's diff is the whole fork). A fork rather than `#ifdef`s in the shared files: TotK addresses, patches and
+diagnostics sit in several files and nothing here can test TotK. The NVN-on-Metal layer
+(`games/totk/third_party/d2r_gfx`) is compiled unchanged by `games/by3/Makefile`. Generated headers and the binary live
+in `BY3_build/build`; the runtime reads `extracted/` and `rewritten/` relative to its working directory, so it runs from
+`BY3_build`.
+
+**What changed in the fork:**
+
+- `game_version.h` defines no game address on purpose: any leftover TotK `GAME_ADDR` is a compile error. That found
+  every use: the loader's TotK fault workaround (removed), the frame-controller diagnostic (returns 0), the startup
+  checkpoint's caller check (now prints the caller's offset instead), the software keyboard probe (refuses to run).
+- `game_patches.c`: no patches; the host hooks the shared graphics layer and input call (`runtime_output_*`,
+  `runtime_frame_step_*`, `runtime_aspect_*`) answer "off". `aspect_patch.h` and `game_patches_v143.c` are gone.
+- `world_survey.c` (TotK actors and scenes): stubs.
+- Title ID `01004A4010FEA000` (save ownership in `fs_host.c`, `svcGetInfo` 18 in `services.c`), window and menu titles.
+- `shared_font.c`: the NSPs have no system fonts, and the game imports `nn::pl::GetSharedFont`. Without fonts the rows
+  are empty and the runtime stops with instructions when the game first asks for one.
+- Includes of the graphics layer point at `../../totk/third_party/d2r_gfx`.
+
+`scripts/prepare_runtime.py` merges TotK's three generators (runtime tables, RomFS index, fonts config) and checks every
+input against `assets/expected-v1.2.0.json`. TotK pins the compiler's exact DT_INIT instruction pair; here the first
+`adrp` + `ldr w` on the same register in DT_INIT is decoded and printed. All three Bayonetta modules have TotK 1.0.0's
+shape (x20, +0x10 / +0x18).
+
+Verified:
+
+- `by3-native rewritten/v120 probe`: pass. Three modules mapped, 236,495 relocations, identity checked, 4,000 calls
+  main PLT → sdk → host timer on 4 threads. The first Bayonetta code to run on the Mac.
+- `TOTK_HEADLESS=1 TOTK_VERIFY_STARTUP=1 by3-native rewritten/v120 boot`: pass (phase 4). The original
+  `nn::init::Start` ran the SDK startup; the RomFS (15.0 GB) was verified; every constructor finished with state 2 (main
+  265, subsdk0 45, sdk 112 init_array entries); the original `nnMain` ran up to its focus-handling setup, called from
+  `main+0xce39c8`.
+
+The graphics layer reports its own NVN table (TotK's 523 names, 413 implemented); Bayonetta's 12 extra names get the
+unimplemented stub too.
+
+Commits: `52edc0a` chore(by3): copy games/totk/runtime as the starting point; then feat(by3): a runtime that boots
+Bayonetta 3 to nnMain.

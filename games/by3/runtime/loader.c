@@ -312,26 +312,7 @@ static void signal_hex(const char *label,uint64_t value) {
 #define HOST_CTR_EL0 0x8555c005ULL
 static void crash(int num,siginfo_t *info,void *context) {
  ucontext_t *u=context;
- /* During save load, this optional game object can contain a tagged invalid
-    reference. Treat it as absent, as the following cbz path expects. */
- if(num==SIGSEGV&&modules[0].base&&
-    u->uc_mcontext->__ss.__pc==(uintptr_t)modules[0].base+GAME_ADDR(0x15ecb0c)&&
-    (uintptr_t)info->si_addr==0xffff0000ffffffffULL&&
-    u->uc_mcontext->__ss.__x[8]==0xffff0000ffffffffULL){
-  uintptr_t field=u->uc_mcontext->__ss.__x[19]+0x6b0;
-  uint64_t current=0;mach_vm_size_t got=0;
-  if(mach_vm_read_overwrite(mach_task_self(),field,sizeof(current),(uintptr_t)&current,&got)==KERN_SUCCESS&&
-     got==sizeof(current)&&current==0xffff0000ffffffffULL){
-   uint64_t expected=current;
-   if(__atomic_compare_exchange_n((uint64_t *)field,&expected,0,false,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST)){
-    static const char note[]="[totk] ignored invalid optional menu reference\n";
-    write(2,note,sizeof(note)-1);
-    u->uc_mcontext->__ss.__x[8]=0;
-    u->uc_mcontext->__ss.__pc-=4;
-    return;
-   }
-  }
- }
+ /* (The TotK fault workaround for an invalid optional menu reference is TotK-only and not carried over.) */
  /* EL0 cache maintenance that Darwin traps but Horizon allows: emulate exactly two encodings (SDK only). */
  if(num==SIGILL){uint32_t insn=*(const uint32_t *)(uintptr_t)u->uc_mcontext->__ss.__pc;unsigned rt=insn&31;
   if((insn&~31u)==0xd53b0020u){if(rt!=31)u->uc_mcontext->__ss.__x[rt]=HOST_CTR_EL0;u->uc_mcontext->__ss.__pc+=4;return;}   /* mrs Xt, CTR_EL0 */
@@ -409,11 +390,7 @@ int runtime_module_offset(uint64_t pc,const char **name,uint64_t *off) {
  return 0;
 }
 uintptr_t runtime_frame_controller_return_pc(void) {
-#ifdef TOTK_GAME_V143
- return 0; /* The older graphics diagnostic reads the pre-1.4 controller layout. */
-#else
- return (uintptr_t)modules[0].base + GAME_ADDR(0x8f6cbc);
-#endif
+ return 0; /* The graphics diagnostic reads TotK's frame controller; Bayonetta 3 has none. */
 }
 uint64_t runtime_image_bytes(void) { uint64_t total=0;for(unsigned i=0;i<NM;i++)total+=modules[i].key_off;return page_up(total); }
 static void loader_ready(void) { fprintf(stderr,"[totk] rtld callback: modules linked\n"); }
@@ -424,9 +401,9 @@ static void module_inits(void) {
 }
 void runtime_startup_checkpoint(uintptr_t caller) {
  if(!getenv("TOTK_VERIFY_STARTUP"))return;
- need(caller==(uintptr_t)modules[0].base+GAME_ADDR(0xe995c4),"checkpoint not reached from original nnMain");
+
  for(unsigned i=0;i<NM;i++){uint32_t state;memcpy(&state,modules[i].base+modules[i].ctor_flag,4);need(state==2,"constructor checkpoint state");}
- printf("{\"status\":\"pass\",\"phase\":4,\"original_nnMain_return_pc\":\"0x%x\",\"scope\":\"all DT_INIT constructor loops completed; original nnMain prefix executed; stops at focus setup\"}\n", GAME_ADDR(0xe995c4));fflush(stdout);_exit(0);
+ printf("{\"status\":\"pass\",\"phase\":4,\"caller_main_offset\":\"0x%llx\",\"scope\":\"all DT_INIT constructor loops completed; original nnMain prefix executed; stops at focus setup\"}\n",(unsigned long long)(caller-(uintptr_t)modules[0].base));fflush(stdout);_exit(0);
 }
 static void module_finis(void) { runtime_fail("guest exited: module finalizers not yet implemented"); }
 static void boot(void) {

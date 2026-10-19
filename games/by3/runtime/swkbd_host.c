@@ -198,7 +198,7 @@ void runtime_swkbd_selftest(void) {
 
 /* ---------- probe (make probe-swkbd): guest SDK arguments, main's PLT stub, no window ---------- */
 #include "game_version.h"
-enum { MAIN_PLT_SHOW_KEYBOARD = GAME_ADDR(0x2aa4fa0), MAIN_GOT_SHOW_KEYBOARD = GAME_ADDR(0x453f648) };   /* scripts/re/calls.py main <ShowKeyboard> */
+enum { MAIN_PLT_SHOW_KEYBOARD = 0, MAIN_GOT_SHOW_KEYBOARD = 0 };   /* Bayonetta 3: main's ShowKeyboard PLT/GOT not mapped yet; the probe refuses to run */
 static unsigned checks;
 static void need(int ok, const char *what) { checks++; if (!ok) { fprintf(stderr, "swkbd probe: %s\n", what); runtime_fail("software keyboard probe failed"); } }
 static void *sym(const char *name) { void *p = runtime_symbol(name); if (!p) { fprintf(stderr, "swkbd probe: no %s\n", name); runtime_fail("software keyboard probe: guest symbol"); } return p; }
@@ -220,6 +220,7 @@ static void *probe_thread(void *unused) {
     SetText initial = (SetText)sym("_ZN2nn5swkbd14SetInitialTextEPNS0_15ShowKeyboardArgEPKDs");
     Size string_size = (Size)sym("_ZN2nn5swkbd27GetRequiredStringBufferSizeEv");
     WorkSize work_size = (WorkSize)sym("_ZN2nn5swkbd25GetRequiredWorkBufferSizeEb");
+    if (!MAIN_PLT_SHOW_KEYBOARD) runtime_fail("software keyboard probe: Bayonetta 3 PLT addresses are not mapped");
     uint8_t *main_base = runtime_module_base("main");
     need(main_base != NULL, "main module base");
     void *got; memcpy(&got, main_base + MAIN_GOT_SHOW_KEYBOARD, 8);
