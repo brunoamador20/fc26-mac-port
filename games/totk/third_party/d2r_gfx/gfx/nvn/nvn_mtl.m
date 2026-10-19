@@ -2290,6 +2290,7 @@ void dm_gfx_set_flag(const char *name, int v) {
     if (!strcmp(name, "skip_invisible")) { skv_set(v); return; }
     if (!strcmp(name, "mfx_upscale")) { mfxup_set(v < 0 ? !mfxup_enabled() : v); return; }   // TOTK_MFX_UPSCALE at run time (manual key 3 picture mode)
     if (!strcmp(name, "mfx_interp")) { mfx_set(v); return; }
+    if (!strcmp(name, "uw_log")) { extern _Atomic long g_uw_log; atomic_store(&g_uw_log, v); MLOG("[flag] uw_log: canvas draws of the next %d frames", v); return; }   // key 4 UI squeeze diagnostic
     if (!strcmp(name, "mfx_output")) { mfxup_output_set(v < 0 ? !mfxup_output_enabled() : v); return; }   // TOTK_MFX_OUTPUT at run time (the window output stage)
     if (!strcmp(name, "pass_gpu")) {
         if (v < 0 || v > 120) { MLOG("[flag] pass_gpu requires 0..120 frames"); return; }
@@ -4140,7 +4141,7 @@ static void attach(MTLRenderPassAttachmentDescriptor *a, const tex_t *t, const v
    target with the presented texture's aspect ratio before a pass into a presented texture: 1920x1080 docked, 1280x720 in
    handheld mode, where the final pass scales it to the 1920x1080 swapchain), notes the G-buffer depth (three or more
    colour targets and a D32F depth of their size) and, once the scene is copied, adds the UI attachment to canvas passes. */
-static void mfx_pass_setup(MTL4RenderPassDescriptor *pd) {
+static void canvas_learn(MTL4RenderPassDescriptor *pd) {
     const tex_t *t0 = R.rt.n > 0 ? R.rt.color[0] : NULL;
     id<MTLTexture> c0 = t0 ? pd.colorAttachments[0].texture : nil;
     if (t0 && c0 && g_mfx.swap_w) {
@@ -4151,6 +4152,11 @@ static void mfx_pass_setup(MTL4RenderPassDescriptor *pd) {
                    pf_is_float(c0.pixelFormat) && !pd.depthAttachment.texture)
             g_mfx.last_c0 = t0->serial;
     }
+}
+static void mfx_pass_setup(MTL4RenderPassDescriptor *pd) {
+    canvas_learn(pd);
+    const tex_t *t0 = R.rt.n > 0 ? R.rt.color[0] : NULL;
+    id<MTLTexture> c0 = t0 ? pd.colorAttachments[0].texture : nil;
     id<MTLTexture> dt = pd.depthAttachment.texture;
     if (!g_mfx.depth_done && dt && c0 && dt.pixelFormat == MTLPixelFormatDepth32Float && dt.width == c0.width && dt.height == c0.height && dt.width >= 320) {
         int nc = 0; for (int i = 0; i < R.rt.n && i < 8; i++) nc += pd.colorAttachments[i].texture != nil;
@@ -4170,6 +4176,37 @@ static int mfx_ui_vs(const char *key) {
     static const char *const ui[] = {"7f2113e2", "e9fd7b43", "a662e313", "16684efc", "3e11cee5", "48c18ae6", "35cbc686", "4872bec9", "9f47ed90"};
     for (size_t i = 0; i < sizeof ui / sizeof *ui; i++) if (!strncmp(key, ui[i], 8)) return 1;
     return 0;
+}
+/* Key 4 / TOTK_ASPECT (runtime/aspect_patch.h): the camera sees a wider view squeezed into the 16:9 canvas and the
+   present stretches the canvas over the window, so the UI drawn into the canvas would come out stretched as well. Its
+   draws are squeezed back about the canvas centre instead, so the HUD keeps its shape in the middle 16:9 of the window.
+   A UI draw: into the canvas, from the first draw with a UI vertex shader on (as TOTK_MFX takes it), a quad of 6
+   indices with one of the UI vertex shaders (uw_ui_vs). Everything else stays: the inventory composes its 3D scene
+   (full-screen triangles, shader 0ac9a549 and its post passes) after UI draws, and its opaque quad 7d591779 belongs to
+   that scene (squeezed, Link turns into a black silhouette). The canvas is learned as for TOTK_MFX (canvas_learn,
+   uw_note_present); g_uw_ui: this frame's UI has begun. */
+extern float runtime_aspect_now(void) __attribute__((weak_import));
+static int g_uw_ui;
+_Atomic long g_uw_log;   // diagnostic "flag uw_log <frames>": log the canvas draws of that many frames
+static double uw_ratio(void) { float a = runtime_aspect_now ? runtime_aspect_now() : 0; return a > 0 ? a : 0; }
+static void uw_note_present(const tex_t *t) {
+    int known = 0; for (int i = 0; i < g_mfx.nswap; i++) known |= g_mfx.swap[i] == t->serial;
+    if (!known) g_mfx.swap[g_mfx.nswap < 4 ? g_mfx.nswap++ : (int)(t->serial % 4)] = t->serial;
+    g_mfx.swap_w = t->d.width; g_mfx.swap_h = t->d.height;
+}
+static int uw_on_canvas(void) { return g_mfx.canvas && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_mfx.canvas; }
+/* The horizontal squeeze for this draw: the wide ratio over the canvas's, or 1 (not UI, or 16:9). */
+/* The TOTK_MFX UI vertex shaders and four more that draw UI quads (inventory tab labels, map icons). */
+static int uw_ui_vs(const char *vs) {
+    static const char *const more[] = {"1a40e5f5", "2117f58b", "8d4e36d0", "1469983f"};
+    if (mfx_ui_vs(vs)) return 1;
+    for (size_t i = 0; i < sizeof more / sizeof *more; i++) if (!strncmp(vs, more[i], 8)) return 1;
+    return 0;
+}
+static double uw_ui_squeeze(const char *vs, const p_draw *dw, const p_draw_idx *di, NSUInteger tw, NSUInteger th) {
+    if (!g_uw_ui || !vs || !uw_ui_vs(vs) || (dw ? dw->count : di ? di->count : 0) != 6 || !uw_on_canvas() || !tw || !th) return 1;
+    double f = uw_ratio() * th / tw;
+    return f > 1.001 ? f : 1;
 }
 /* TOTK_MFX: the scene is complete: end the pass (the draw that follows opens it again, loading the canvas, with the UI
    attachment) and copy the canvas into this frame's scene texture. */
@@ -4355,6 +4392,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
       void ts_note(id pd, NSUInteger nc); ts_note(pd, (NSUInteger)R.rt.n); }
     ser_gate();
     if (mfx_enabled()) mfx_pass_setup(pd);   // TOTK: MetalFX scene / UI attachments, G-buffer depth
+    else if (uw_ratio()) canvas_learn(pd);   // key 4: the canvas the UI is squeezed in
     g_enc = enc_r_begin(pd);
     args_dirty_all();
     g_stat_pass++;
@@ -9490,6 +9528,7 @@ frz_plain:;
         PD("L %llu 分层通道内的绘制不能写层号，在此切开", g_stat_pass); rp_end(); g_lay.refuse = 1; g_lay.refused++; }
     if (!g_mfx.scene_done && g_mfx.canvas && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_mfx.canvas && pr && pr->sh[0] && mfx_ui_vs(pr->sh[0]->key) && mfx_enabled())
         mfx_snapshot_scene();   // TOTK_MFX: first UI draw into the canvas: copy the finished scene first
+    if (!g_uw_ui && uw_on_canvas() && pr && pr->sh[0] && mfx_ui_vs(pr->sh[0]->key)) g_uw_ui = 1;   // key 4: the UI begins
     id<MTLRenderCommandEncoder> en = rp_begin_ex(mode);
     g_fd_dw = NULL; g_fd_di = NULL;
     if (!en) { g_draw_skip[8]++; return; }
@@ -9546,11 +9585,21 @@ frz_plain:;
     if (g_ui_rect_fn && dw && dw->count == 4 && S.nattr == 2 && S.stream[0].stride == 20) { double uy = 0, uh = 1; g_ui_rect_fn(&uy, &uh);
         if (uh > 0 && uh < 1) { if (ui_cover_all(uh)) vs = 1 / uh; else if (uy > 0) { so = lround(uy * th); if (ui_mat_ok()) moff = 2 * uy; else { vo = so; static int n; if (n++ < 4) MLOG("界面下移：投影矩阵这次读不到，退回挪视口（通道 %llu）", g_stat_pass); } } } }
     if (moff != g_ui_moff) { g_ui_moff = moff; args_dirty_stage(0); }
-    if (S.has_vp) enc_r_viewport(en, (MTLViewport){S.vp[0][0], S.vp[0][1] + vo, S.vp[0][2], S.vp[0][3] * vs, S.dr[0], S.dr[1]});
-    else enc_r_viewport(en, (MTLViewport){0, vo, tw, th * vs, 0, 1});
+    double ux = uw_ui_squeeze(pr && pr->sh[0] ? pr->sh[0]->key : NULL, dw, di, tw, th), cx = tw / 2.0;   // key 4: UI squeezed by 1 / ux about the canvas centre
+    double vx = S.has_vp ? S.vp[0][0] : 0, vw = S.has_vp ? S.vp[0][2] : tw;
+    if (ux != 1) { vx = cx + (vx - cx) / ux; vw /= ux; }
+    if (atomic_load(&g_uw_log) > 0 && uw_on_canvas())
+        MLOG("[uw] F%llu pass %llu ui %d squeeze %.3f vs %.8s fs %.8s count %u vp %s%g,%g,%g,%g sc %s%d,%d,%d,%d blend %#x tex %ux%u",
+             (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, g_uw_ui, ux, pr && pr->sh[0] ? pr->sh[0]->key : "-", pr && pr->sh[1] ? pr->sh[1]->key : "-",
+             dw ? dw->count : di ? di->count : 0, S.has_vp ? "" : "none ", S.has_vp ? S.vp[0][0] : 0, S.has_vp ? S.vp[0][1] : 0, S.has_vp ? S.vp[0][2] : 0, S.has_vp ? S.vp[0][3] : 0,
+             R.has_sc ? "" : "none ", R.sc.x, R.sc.y, R.sc.w, R.sc.h, S.color.blend_en, (unsigned)tw, (unsigned)th);
+    if (S.has_vp) enc_r_viewport(en, (MTLViewport){vx, S.vp[0][1] + vo, vw, S.vp[0][3] * vs, S.dr[0], S.dr[1]});
+    else enc_r_viewport(en, (MTLViewport){vx, vo, vw, th * vs, 0, 1});
     MTLScissorRect sc = {0, 0, tw, th};
     if (R.has_sc) {
-        long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y <= 0 ? 0 : R.sc.y + so, x1 = (long)R.sc.x + R.sc.w, y1 = vs != 1 ? (long)th : (long)R.sc.y + R.sc.h + so;
+        long sx0 = R.sc.x, sx1 = (long)R.sc.x + R.sc.w;
+        if (ux != 1) { sx0 = lround(cx + (sx0 - cx) / ux); sx1 = lround(cx + (sx1 - cx) / ux); }
+        long x0 = sx0 < 0 ? 0 : sx0, y0 = R.sc.y <= 0 ? 0 : R.sc.y + so, x1 = sx1, y1 = vs != 1 ? (long)th : (long)R.sc.y + R.sc.h + so;
         if (x1 > (long)tw) x1 = tw; if (y1 > (long)th) y1 = th;
         if (x1 <= x0 || y1 <= y0) { g_draw_skip[10]++; return; }
         sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
@@ -11099,7 +11148,6 @@ static void outup_note_gpu(int slot) {   // the present command buffer of this s
 }
 // TOTK_STRETCH=1, or the ultrawide ratio of key 4 / TOTK_ASPECT: fill the window whatever its shape, like an emulator's "Stretch to Window" (aspect-ratio mods such as
 // TOTK-Ultrawide draw a horizontally squeezed picture for it). Off: the game picture keeps its shape, centred.
-extern float runtime_aspect_now(void) __attribute__((weak_import));   // runtime/aspect_patch.h (Mac game binaries)
 static int present_stretch(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("TOTK_STRETCH"); on = e && !strcmp(e, "1"); }
@@ -11935,11 +11983,7 @@ void mtl_present_discard(int on) { atomic_store(&g_present_discard, on != 0); if
 static id<MTL4CommandAllocator> g_mfx_alloc[3]; static id<MTL4CommandBuffer> g_mfx_cb[3]; static _Atomic int g_mfx_busy[3];
 static id<MTLTexture> g_mfx_swap_prev;   // TOTK_MFX_DUMP: copy of the previous presented image
 static int mfx_present_frame_body(const tex_t *t, double period, int discard) {
-    if (t) {
-        int known = 0; for (int i = 0; i < g_mfx.nswap; i++) known |= g_mfx.swap[i] == t->serial;
-        if (!known) g_mfx.swap[g_mfx.nswap < 4 ? g_mfx.nswap++ : (int)(t->serial % 4)] = t->serial;
-        g_mfx.swap_w = t->d.width; g_mfx.swap_h = t->d.height;
-    }
+    if (t) uw_note_present(t);
     int slot = mfx_frame_prepare(period);
     if (slot >= 0) {
         int a = -1; for (int i = 0; i < 3 && a < 0; i++) if (!atomic_load(&g_mfx_busy[i])) a = i;
@@ -11998,6 +12042,9 @@ static int mfx_present_frame(const tex_t *t, double period, int discard) {
 uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
     int discard = atomic_load(&g_present_discard), islot = mfx_enabled() && t ? mfx_present_frame(t, period, discard) : -1;
     if (mfx_latch() && !mfx_enabled()) g_mfx.scene_done = g_mfx.ui_cleared = g_mfx.depth_done = g_mfx.want_cam = 0;   // key 2 / flag mfx_interp: the next frame is fully on or off
+    if (t && !mfx_enabled() && uw_ratio()) uw_note_present(t);   // key 4: the canvas search (TOTK_MFX does it in mfx_present_frame)
+    g_uw_ui = 0;
+    if (atomic_load(&g_uw_log) > 0) atomic_fetch_sub(&g_uw_log, 1);
     if (discard) return 0;   // 票号 0 = 没有待完成的上屏，取交换链贴图处不等 | Ticket number 0 = no pending present; the swapchain texture acquire does not wait
     if (t) { xv_check(t->serial, 0, 0, "出图"); if (g_xv_npresent < 128) g_xv_present[g_xv_npresent++] = t->serial; }
     static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, present_start);
