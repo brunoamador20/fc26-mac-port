@@ -5,8 +5,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "game_patches.h"
 #include "game_version.h"
+uint32_t runtime_thread_current_handle(void);
 
 /* Real-time frame step (TOTK_REALTIME=0: as shipped). ksys::VFR (singleton pointer main+0x2d1e170, built at main+0x183eb98)
    keeps one frame ratio at +0x3c: the frame's length in 30 fps frames. Every per-core step the game reads derives from it:
@@ -36,6 +38,10 @@ static double frame_samples[5], report_seconds, report_game, report_short_ms, re
 static unsigned frame_sample_count, frame_sample_next, report_short, report_long;
 static _Atomic uint32_t pinned_step_us;
 enum { VFR_INSTANCE = 0x2d1e170, VFR_RATIO = 0x3c, VFR_DELTA_TIME = 0x138 };
+static _Atomic uint32_t *pad_tick;   /* data page +8: 1 when the next frame's game time crosses a 1/30 s boundary */
+static double pad_phase;
+static uint64_t report_ticks;
+static uint8_t *g_pad_main; static int g_pad_log_on; static _Atomic uint64_t g_pad_dir_until;   /* TOTK_PAD_LOG */
 
 static int realtime_enabled(void) { const char *e = getenv("TOTK_REALTIME"); return !(e && !strcmp(e, "0")); }
 static uint64_t frame_step_bits(float seconds) {
@@ -69,14 +75,15 @@ static void frame_step_report(uint64_t now_ns) {
     char game[96];
     if (atomic_load(&pinned_step_us)) snprintf(game, sizeof game, "step pinned");
     else snprintf(game, sizeof game, "steps add up to %.2f s (%.4f of the frames' time)", report_game, report_seconds > 0 ? report_game / report_seconds : 0);
+    char ticks[64] = "";
+    if (pad_tick) snprintf(ticks, sizeof ticks, "; pad counts %.1f ticks/s", report_ticks / span);
     fprintf(stderr, "[botw] real-time frame step: %llu frames in %.1f s (%.1f fps, %.2f ms apart on average), %s; the game's VFR ratio "
-                    "%.3f, delta time %.2f ms; %u intervals under 1/120 s (clamping each: +%.0f ms), %u over 1/15 s (-%.0f ms)\n",
+                    "%.3f, delta time %.2f ms; %u intervals under 1/120 s (clamping each: +%.0f ms), %u over 1/15 s (-%.0f ms)%s\n",
             (unsigned long long)report_frames, span, report_frames / span, report_frames ? report_seconds / report_frames * 1e3 : 0, game,
-            ratio, delta * 1e3, report_short, report_short_ms, report_long, report_long_ms);
-    report_ns = now_ns; report_frames = 0; report_seconds = report_game = report_short_ms = report_long_ms = 0; report_short = report_long = 0;
+            ratio, delta * 1e3, report_short, report_short_ms, report_long, report_long_ms, ticks);
+    report_ns = now_ns; report_frames = report_ticks = 0; report_seconds = report_game = report_short_ms = report_long_ms = 0; report_short = report_long = 0;
 }
-void runtime_frame_step_update(uint64_t now_ns) {
-    if (!frame_step_data || !now_ns) return;
+static void frame_step_measure(uint64_t now_ns) {
     frame_step_report(now_ns);
     uint64_t prev = last_present_ns;
     last_present_ns = now_ns;
@@ -101,11 +108,142 @@ void runtime_frame_step_update(uint64_t now_ns) {
     report_game += step;
     atomic_store_explicit(frame_step_data, frame_step_bits((float)step), memory_order_release);
 }
+/* The pad tick follows the game time the next frame adds (the step on the page, pinned or measured): one tick per 1/30 s,
+   at most one per frame (below 30 fps the counts advance once a frame, as shipped). */
+static void pad_tick_advance(void) {
+    uint32_t hi = (uint32_t)(atomic_load_explicit(frame_step_data, memory_order_relaxed) >> 32);
+    float seconds; memcpy(&seconds, &hi, 4);
+    pad_phase += (double)seconds * 30.0;
+    uint32_t tick = 0;
+    if (pad_phase >= 1.0) { tick = 1; pad_phase -= 1.0; if (pad_phase >= 1.0) pad_phase = 0; }
+    report_ticks += tick;
+    atomic_store_explicit(pad_tick, tick, memory_order_release);
+    if (g_pad_log_on) {
+        uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        if (now < atomic_load(&g_pad_dir_until)) fprintf(stderr, "[pad] %.4f present thread %#x: tick %u (step %.2f ms)\n", now * 1e-9, runtime_thread_current_handle(), tick, seconds * 1e3);
+    }
+}
+void runtime_frame_step_update(uint64_t now_ns) {
+    if (!frame_step_data || !now_ns) return;
+    frame_step_measure(now_ns);
+    if (pad_tick) pad_tick_advance();
+}
 static uint32_t adrp_reg(unsigned rd, uint64_t site, uint64_t target) {
     int64_t pages = (int64_t)(target >> 12) - (int64_t)(site >> 12);
     if (pages < -(1 << 20) || pages >= (1 << 20)) runtime_fail("real-time frame-step data outside ADRP range");
     uint32_t imm = (uint32_t)pages & 0x1fffff;
     return 0x90000000u | ((imm & 3u) << 29) | ((imm >> 2) << 5) | (rd & 31u);
+}
+/* Pad repeat and hold counts by real time (TOTK_PAD_REPEAT=0: as shipped; botw.md). sead::ControllerBase::
+   updateDerivativeParams_ (main+0x126e3b0) counts the frames each button has been held (+0x30 + 4 i) and raises its
+   repeat bit (+0x10) when the count reaches the button's delay (+0xb0 + i) and then every pulse (+0xd0 + i) frames.
+   The menus set delay 6 / pulse 2 for the stick and d-pad directions (main+0x1a40958) or take them from their data
+   (main+0x12143e4); at 120 fps the cursor moved four times as fast as at the shipped 30 fps. The loop over the buttons
+   (main+0x126e490..0x126e528, 38 instructions) is rewritten in place: a held button is counted, and its repeat tested,
+   only on frames whose game time crosses a 1/30 s boundary (the tick at data page +8, from the same step as the VFR
+   ratio), so counts, delays and pulses are 1/30 s again. Released buttons still reset at once; the trigger and release
+   bits are computed before the loop and stay per frame. New registers: x16 (the page, then the tick) and x17 (the count's
+   address; the shipped loop reused x11 for it and reloaded the hold mask every iteration). MacNativeGames
+   games/botw/scripts/verify_pad_repeat_patch.py runs both loops with Unicorn. */
+enum { PAD_LOOP = 0x126e490, PAD_LOOP_WORDS = 38, PAD_ADRP = 7 };
+static const uint32_t pad_loop_shipped[PAD_LOOP_WORDS] = {
+    0xb9410268u, 0x7100051fu, 0xb901166bu, 0xb900127fu, 0x5400044bu, 0x2a1f03e8u, 0xaa1f03e9u, 0x320003eau, 0x14000002u, 0xb941166bu,
+    0x1ac9214cu, 0x6a0c017fu, 0x54000180u, 0x8b09026eu, 0x394341cdu, 0x8b090a6bu, 0x340001edu, 0xb940316fu, 0x3942c1ceu, 0x6b0e01eeu,
+    0x540000e1u, 0x2a0c0108u, 0xb9001268u, 0x14000008u, 0x8b090a6bu, 0xb900317fu, 0x14000008u, 0x54000089u, 0x1acd09cfu, 0x1b0db9edu,
+    0x34fffeedu, 0xb940316cu, 0x1100058cu, 0xb900316cu, 0xb981026bu, 0x91000529u, 0xeb0b013fu, 0x54fffc8bu,
+};
+static const uint32_t pad_loop_ticked[PAD_LOOP_WORDS] = {
+    0xb9410268u, /* ldr   w8, [x19, #0x100]   (button count) */
+    0x7100051fu, /* cmp   w8, #1 */
+    0xb901166bu, /* str   w11, [x19, #0x114]  (hold) */
+    0xb900127fu, /* str   wzr, [x19, #0x10]   (repeat = 0) */
+    0x5400044bu, /* b.lt  end */
+    0x2a1f03e8u, /* mov   w8, wzr */
+    0xaa1f03e9u, /* mov   x9, xzr */
+    0,           /* adrp  x16, <data page> */
+    0xb9400a10u, /* ldr   w16, [x16, #8]      (tick) */
+    0x5280002au, /* mov   w10, #1 */
+    0x1ac9214cu, /* loop: lsl w12, w10, w9 */
+    0x8b090a71u, /* add   x17, x19, x9, lsl #2 */
+    0x6a0c017fu, /* tst   w11, w12 */
+    0x54000180u, /* b.eq  released */
+    0x34000290u, /* cbz   w16, next           (no tick: count and repeat unchanged) */
+    0x8b09026eu, /* add   x14, x19, x9 */
+    0x394341cdu, /* ldrb  w13, [x14, #0xd0]   (pulse) */
+    0x340001cdu, /* cbz   w13, count */
+    0xb940322fu, /* ldr   w15, [x17, #0x30]   (count) */
+    0x3942c1ceu, /* ldrb  w14, [x14, #0xb0]   (delay) */
+    0x6b0e01eeu, /* subs  w14, w15, w14 */
+    0x540000c1u, /* b.ne  past */
+    0x2a0c0108u, /* repeat: orr w8, w8, w12 */
+    0xb9001268u, /* str   w8, [x19, #0x10] */
+    0x14000007u, /* b     count */
+    0xb900323fu, /* released: str wzr, [x17, #0x30] */
+    0x14000008u, /* b     next */
+    0x54000089u, /* past: b.ls count */
+    0x1acd09cfu, /* udiv  w15, w14, w13 */
+    0x1b0db9edu, /* msub  w13, w15, w13, w14 */
+    0x34ffff0du, /* cbz   w13, repeat */
+    0xb940322cu, /* count: ldr w12, [x17, #0x30] */
+    0x1100058cu, /* add   w12, w12, #1 */
+    0xb900322cu, /* str   w12, [x17, #0x30] */
+    0xb981026fu, /* next: ldrsw x15, [x19, #0x100] */
+    0x91000529u, /* add   x9, x9, #1 */
+    0xeb0f013fu, /* cmp   x9, x15 */
+    0x54fffcabu, /* b.lt  loop */
+};
+/* The pause menu's own count (main+0x1214474..0x1214498, 9 instructions, in the menu update main+0x12125b0): each
+   direction has a record {mask, 60, countdown, delay 9, pulse 3, fast delay 60, fast pulse 1} (built at main+0x1207d0c);
+   while the direction is held, every frame takes one off the countdown, and at zero the controllers' delay / pulse
+   switch to the fast pair (at the shipped 30 fps the held count is 60 at that moment, so the cursor goes on at one step
+   per 1/30 s without a pause). Per frame, at 120 fps the switch came at 0.5 s with the held count at 25, and the cursor
+   stopped until the count reached 60. The countdown now takes one off only on a tick as well (same registers; the
+   record address is formed in two adds instead of four instructions, and the "already negative" test is dropped: a
+   negative countdown keeps falling by one per tick, which is harmless):
+     add x10, x27, x10, lsl #4 / add x11, x10, #0x64000 / adrp x13, <page> / ldr w13, [x13, #8] / cbz w13, done /
+     ldr w12, [x11, #0xa00] / sub w13, w12, #1 / str w13, [x11, #0xa00] / cbnz w12, done */
+enum { MENU_CD = 0x1214474, MENU_CD_WORDS = 9, MENU_CD_ADRP = 2 };
+static const uint32_t menu_cd_shipped[MENU_CD_WORDS] = { 0x8b0a136au, 0x5289400bu, 0x72a000cbu, 0x8b0b014bu, 0xb940016cu, 0x37f80accu, 0x5100058du, 0xb900016du, 0x35000a6cu };
+static const uint32_t menu_cd_ticked[MENU_CD_WORDS] = { 0x8b0a136au, 0x9141914bu, 0, 0xb94009adu, 0x34000aedu, 0xb94a016cu, 0x5100058du, 0xb90a016du, 0x35000a6cu };
+static void pad_log_arm(Module *m) {
+    const char *l = getenv("TOTK_PAD_LOG");
+    if (!l || !*l || !strcmp(l, "0")) return;
+    /* diagnostics: a brk on the loop's first instruction (ldr w8, [x19, #0x100], the same shipped and patched), see botw_pad_hook */
+    uint32_t b = 0xd4200000u | (0x7c0u << 5); memcpy(m->base + PAD_LOOP, &b, 4);
+    g_pad_main = m->base; g_pad_log_on = 1;
+    fprintf(stderr, "[botw] TOTK_PAD_LOG: every controller update while a direction is held, and the tick at each present\n");
+}
+static void patch_pad_repeat(Module *m, uint64_t page) {
+    const char *e = getenv("TOTK_PAD_REPEAT");
+    if (e && !strcmp(e, "0")) { fprintf(stderr, "[botw] pad repeat and hold counts per frame, as shipped (TOTK_PAD_REPEAT=0)\n"); pad_log_arm(m); return; }
+    for (unsigned i = 0; i < PAD_LOOP_WORDS; i++) {
+        uint32_t w; memcpy(&w, m->base + PAD_LOOP + 4 * i, 4);
+        if (w != pad_loop_shipped[i]) {
+            fprintf(stderr, "[botw] pad repeat main+%#x: found %08x expected %08x\n", PAD_LOOP + 4 * i, w, pad_loop_shipped[i]);
+            runtime_fail("pad repeat by real time requires the 1.6.0 sead::ControllerBase loop");
+        }
+    }
+    for (unsigned i = 0; i < MENU_CD_WORDS; i++) {
+        uint32_t w; memcpy(&w, m->base + MENU_CD + 4 * i, 4);
+        if (w != menu_cd_shipped[i]) {
+            fprintf(stderr, "[botw] menu countdown main+%#x: found %08x expected %08x\n", MENU_CD + 4 * i, w, menu_cd_shipped[i]);
+            runtime_fail("pad repeat by real time requires the 1.6.0 pause menu countdown");
+        }
+    }
+    pad_tick = (_Atomic uint32_t *)(uintptr_t)(page + 8);
+    atomic_store(pad_tick, 1);
+    for (unsigned i = 0; i < PAD_LOOP_WORDS; i++) {
+        uint32_t w = i == PAD_ADRP ? adrp_reg(16, (uintptr_t)m->base + PAD_LOOP + 4 * i, page) : pad_loop_ticked[i];
+        memcpy(m->base + PAD_LOOP + 4 * i, &w, 4);
+    }
+    for (unsigned i = 0; i < MENU_CD_WORDS; i++) {
+        uint32_t w = i == MENU_CD_ADRP ? adrp_reg(13, (uintptr_t)m->base + MENU_CD + 4 * i, page) : menu_cd_ticked[i];
+        memcpy(m->base + MENU_CD + 4 * i, &w, 4);
+    }
+    fprintf(stderr, "[botw] pad repeat and hold counts by real time: held buttons count once per 1/30 s of game time, and so does "
+                    "the pause menu's fast-repeat countdown (%u + %u instructions, all verified; TOTK_PAD_REPEAT=0: once per frame, as shipped)\n",
+            PAD_LOOP_WORDS, MENU_CD_WORDS);
+    pad_log_arm(m);
 }
 static void patch_realtime(Module *m) {
     /* The loader reserved a writable page immediately after main's image; nothing else uses it in this game. */
@@ -139,6 +277,7 @@ static void patch_realtime(Module *m) {
     fprintf(stderr, "[botw] real-time frame step: the VFR ratio and one interval-stepped fade follow the measured frame time "
                     "(%zu instructions, %zu verified); initial 33.33 ms, sampled at each present (TOTK_REALTIME=0: as shipped)\n",
             sizeof put / sizeof *put, sizeof check / sizeof *check);
+    patch_pad_repeat(m, page);
 }
 /* Diagnostics (TOTK_JQ_CHECK=1): random crashes look like one job run twice (two threads in the same skinning job, a list
    item consumed twice). brk instructions replace a few instructions of sead::JobQueue::run (main+0x12c0dc0) and of the
@@ -213,7 +352,28 @@ static int jq_slot(uint64_t th) {
 static double jq_ms(uint64_t since) { static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb); return since ? (double)(mach_absolute_time() - since) * tb.numer / tb.denom / 1e6 : -1; }
 #define U32(a) (*(const uint32_t *)(uintptr_t)(a))
 #define U64(a) (*(const uint64_t *)(uintptr_t)(a))
+/* TOTK_PAD_LOG: at the controller loop's first instruction (x19 = the controller, w11 = the new hold mask): the load it
+   replaced, and one line per update while a stick or d-pad direction (bits 16..23) is or was held: time, thread, the
+   controller, the tick the loop will read, new and previous hold, the previous update's repeat bits, counts 16..23. */
+static int botw_pad_hook(ucontext_t *u) {
+    uint64_t *x = u->uc_mcontext->__ss.__x, c = x[19]; uint32_t hold = (uint32_t)x[11];
+    x[8] = *(const uint32_t *)(uintptr_t)(c + 0x100);
+    uint32_t old = *(const uint32_t *)(uintptr_t)(c + 0x114), rep = *(const uint32_t *)(uintptr_t)(c + 0x10);
+    if ((hold | old) & 0xff0000u) {
+        uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        atomic_store(&g_pad_dir_until, now + 300000000ull);
+        const uint32_t *n = (const uint32_t *)(uintptr_t)(c + 0x30);
+        const uint8_t *dl = (const uint8_t *)(uintptr_t)(c + 0xb0), *pu = (const uint8_t *)(uintptr_t)(c + 0xd0);
+        fprintf(stderr, "[pad] %.4f update thread %#x ctrl %#llx tick %u hold %#x (was %#x) repeat %#x counts16-23 %u %u %u %u %u %u %u %u "
+                        "delay/pulse16-23 %u/%u %u/%u %u/%u %u/%u %u/%u %u/%u %u/%u %u/%u\n",
+                now * 1e-9, runtime_thread_current_handle(), (unsigned long long)c, pad_tick ? atomic_load(pad_tick) : 1, hold, old, rep,
+                n[16], n[17], n[18], n[19], n[20], n[21], n[22], n[23], dl[16], pu[16], dl[17], pu[17], dl[18], pu[18], dl[19], pu[19],
+                dl[20], pu[20], dl[21], pu[21], dl[22], pu[22], dl[23], pu[23]);
+    }
+    u->uc_mcontext->__ss.__pc += 4; return 1;
+}
 int botw_jq_hook(void *context) {   /* SIGTRAP from loader.c crash(): 1 = it was one of ours, handled */
+    if (g_pad_log_on && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_pad_main + PAD_LOOP) return botw_pad_hook(context);
     if (!g_jq_on) return 0;
     ucontext_t *u = context; uint64_t pc = u->uc_mcontext->__ss.__pc, *x = u->uc_mcontext->__ss.__x;
     int site = -1; for (int i = 0; i < JQ_SITES; i++) if (pc == (uintptr_t)g_jq_main + g_jq_site[i].off) site = i;
