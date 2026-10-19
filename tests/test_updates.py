@@ -14,7 +14,7 @@ from test_game_containers import (HEADER, AREA, TITLEKEK, CONTENT, SCRIPTS, TITL
                                   encrypt, nca, partition, ticket, game_image, romfs)
 from cryptography.hazmat.primitives.ciphers import modes
 from extract_exefs import decrypt, common_tickets, container_entries
-from extract_update_romfs import merge
+from extract_update_romfs import hactool_prod_keys, merge
 import build_app
 
 
@@ -102,6 +102,55 @@ class Updates(unittest.TestCase):
             with patch.object(build_app, 'run', side_effect=AssertionError('cache must avoid extraction')):
                 self.assertEqual(build_app.identify_update(tree, source, self.keys, self.root/'logs'), (version, source))
         self.assertFalse((tree/'rewritten').exists())
+
+    def test_lockpick_kek_source_nul_is_stripped_for_hactool(self):
+        body = '11' * 16
+        original = self.keys.read_text()
+        if not original.endswith('\n'):
+            original += '\n'
+        self.keys.write_text(original + f'master_kek_source_06 = {body}00\n'
+                             f'mariko_master_kek_source_05 = {body.upper()}00 # kept\n')
+        out = self.root/'hactool.keys'
+        hactool_prod_keys(self.keys, out)
+        self.assertEqual(os.stat(out).st_mode & 0o777, 0o600)
+        lines = out.read_text().splitlines()
+        self.assertIn(f'master_kek_source_06 = {body}', lines)
+        self.assertIn(f'mariko_master_kek_source_05 = {body.upper()} # kept', lines)
+        self.assertEqual(self.keys.read_text(), original + f'master_kek_source_06 = {body}00\n'
+                         f'mariko_master_kek_source_05 = {body.upper()}00 # kept\n')
+        bad = self.root/'bad.keys'
+        bad.write_text(f'master_kek_source_06 = {body}ff\n')
+        with self.assertRaisesRegex(ValueError, 'master_kek_source_06 must be 16 bytes') as caught:
+            hactool_prod_keys(bad, self.root/'rejected.keys')
+        self.assertNotIn(body, str(caught.exception))
+        self.assertFalse((self.root/'rejected.keys').exists())
+
+    def test_merge_passes_stripped_kek_sources_only(self):
+        space = patch('extract_update_romfs.shutil.disk_usage')
+        space.start().return_value.free = 100 * 2**30
+        self.addCleanup(space.stop)
+        body = '22' * 16
+        original = self.keys.read_text()
+        if not original.endswith('\n'):
+            original += '\n'
+        self.keys.write_text(original + f'master_kek_source_0a = {body}00\n')
+        before = self.keys.read_bytes()
+        helper = self.root/'hactool'
+        helper.write_text('#!'+sys.executable+'\n'+
+            'import os,sys,pathlib,stat\n'
+            f'body={body!r}\n'
+            'path=pathlib.Path(sys.argv[sys.argv.index("-k")+1])\n'
+            'assert stat.S_IMODE(path.stat().st_mode)==0o600\n'
+            'found=[line.split("=",1)[1].strip() for line in path.read_text().splitlines() if line.startswith("master_kek_source_0a")]\n'
+            'assert found==[body]\n'
+            'out=pathlib.Path(next(s.split("=",1)[1] for s in sys.argv if s.startswith("--section")))\n'
+            f'out.write_bytes({romfs()!r})\n'
+            'for i in range(6): print(f"Level {i} (GOOD)")\n')
+        helper.chmod(0o755)
+        base = self.root/'base.nsp'; base.write_bytes(game_image('nsp', managed=True))
+        merge(base, self.update, self.keys, helper, self.root/'merged')
+        self.assertEqual(self.keys.read_bytes(), before)
+        self.assertFalse(list(self.root.glob('update-merge-*')))
 
     def test_merge_ticket_privacy_and_failure_cleanup(self):
         # A mock hactool verifies plumbing, not BKTR cryptography (covered by the real local build).
