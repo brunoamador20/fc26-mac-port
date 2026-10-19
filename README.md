@@ -16,13 +16,16 @@ Play your own copy of **The Legend of Zelda: Tears of the Kingdom** natively on 
 
 Update history:
 
-October 19: iPhone and iPad tested with 1.4.3: a fresh install shows the game from the first launch, without a played cache. All platforms now share one [shader list](docs/shader-list.md), and the build reads every shader in the game data (15,266 prepared for 1.4.3). Touch controls are laid out like a Switch controller, with every button and both sticks.
-October 19: Added 1.2.1 support (the most widely used update), with the same build command.
-October 19: On Mac, the FPS, shader and load readings and the shortcut reminder share one small box in the window's top-right corner instead of covering the picture (`TOTK_HUD=corners` keeps the old layout).
-October 18: Added an iPhone/iPad IPA build target. Device installation and gameplay still need user-device validation.
-October 18: Added 1.4.3 support and shader prewarming. The title screen waits only for its own shaders (about 2 seconds); the rest warm in the background.
-October 17: Added 1.0.0 and 1.1.2 support. First-launch shader prewarming was not available yet, so new scenes could stutter.
-
+| Date | Platform | Update |
+|---|---|---|
+| Oct 19 | iPhone, iPad | Tested with 1.4.3: a fresh install shows the game from the first launch, without a played cache |
+| Oct 19 | iPhone, iPad | Touch controls laid out like a Switch controller, with every button and both sticks |
+| Oct 19 | All | One shared [shader list](docs/shader-list.md); the build reads every shader in the game data (15,266 prepared for 1.4.3) |
+| Oct 19 | Mac | 1.2.1 support (the most widely used update), with the same build command |
+| Oct 19 | Mac | FPS, shader and load readings and the shortcut reminder in one small box in the window's top-right corner (`TOTK_HUD=corners` keeps the old layout) |
+| Oct 18 | iPhone, iPad | IPA build target |
+| Oct 18 | Mac | 1.4.3 support and shader prewarming: the title screen waits only for its own shaders (about 2 seconds), the rest warm in the background |
+| Oct 17 | Mac | 1.0.0 and 1.1.2 support; no first-launch shader prewarming yet, so new scenes could stutter |
 
 **Stuttering when you first start playing or enter a new scene is expected while new shaders compile—don't be surprised.** Performance typically improves as the cache warms up. Let's maintain one [shader list](docs/shader-list.md) together: then no shader is new when you meet it, and nothing stutters!
 
@@ -211,12 +214,16 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 
 更新历史：
 
-10 月 19 日：iPhone 和 iPad 用 1.4.3 实测：全新安装、没有玩过的缓存，第一次启动就能看到游戏画面。所有平台改用同一份[着色器清单](docs/shader-list.md)，打包时读取游戏数据里的全部着色器（1.4.3 准备 15,266 个）。触屏控件按 Switch 手柄排布，所有按键和两个摇杆都有。
-10 月 19 日：支持 1.2.1（玩家最多的版本），构建命令不变。
-10 月 19 日：Mac 上 FPS、着色器、负载读数和快捷键说明集中到窗口右上角一个小框里，不再挡住画面（`TOTK_HUD=corners` 保留原来的布局）。
-10 月 18 日：加入 iPhone / iPad IPA 构建目标；真机安装和游玩仍需用户设备验证。
-10 月 18 日：支持 1.4.3，并加入着色器预热。标题画面只等它自己用到的着色器（约 2 秒），其余在后台预热。
-10 月 17 日：支持 1.0.0 和 1.1.2；当时尚未加入首次启动着色器预热，进入新场景可能卡顿。
+| 日期 | 平台 | 更新 |
+|---|---|---|
+| 10 月 19 日 | iPhone、iPad | 用 1.4.3 实测：全新安装、没有玩过的缓存，第一次启动就能看到游戏画面 |
+| 10 月 19 日 | iPhone、iPad | 触屏控件按 Switch 手柄排布，所有按键和两个摇杆都有 |
+| 10 月 19 日 | 全部 | 所有平台共用一份[着色器清单](docs/shader-list.md)；打包时读取游戏数据里的全部着色器（1.4.3 准备 15,266 个） |
+| 10 月 19 日 | Mac | 支持 1.2.1（玩家最多的版本），构建命令不变 |
+| 10 月 19 日 | Mac | FPS、着色器、负载读数和快捷键说明集中到窗口右上角一个小框里（`TOTK_HUD=corners` 保留原来的布局） |
+| 10 月 18 日 | iPhone、iPad | 加入 IPA 构建目标 |
+| 10 月 18 日 | Mac | 支持 1.4.3，并加入着色器预热：标题画面只等它自己用到的着色器（约 2 秒），其余在后台预热 |
+| 10 月 17 日 | Mac | 支持 1.0.0 和 1.1.2；当时还没有首次启动着色器预热，进入新场景可能卡顿 |
 
 **第一次进入游戏或新场景时，新着色器的编译可能造成卡顿，这是预期现象，不必惊讶。** 随着着色器缓存逐步预热，表现通常会改善。让我们一起维护一份[着色器清单](docs/shader-list.md)。这样就不会遇到新着色器，不会卡顿了！
 
