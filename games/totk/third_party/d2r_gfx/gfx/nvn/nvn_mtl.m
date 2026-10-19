@@ -2391,6 +2391,22 @@ static int wb_level_back(const tex_t *t, id<MTLTexture> mt, unsigned level, unsi
     g_wb_bytes += lp * lr;
     return 1;
 }
+static void wb_write_list(wb_ent **list, int nl, int force);
+/* Diagnostic TOTK_WB_EAGER=<w>x<h>: at every present, renderings of mirrored textures of that size are written back to
+   memory without waiting for the game's invalidate (to see whether the CPU reads them from an uncached pool). */
+void mtl_wb_eager(void) {
+    static int on = -1; static unsigned w, h; if (on < 0) { const char *e = getenv("TOTK_WB_EAGER"); on = e && sscanf(e, "%ux%u", &w, &h) == 2; if (on) MLOG("TOTK_WB_EAGER: %ux%u renderings written back every frame", w, h); }
+    if (!on || !atomic_load(&g_wb_on)) return;
+    pthread_mutex_lock(&g_smu);
+    wb_ent *list[512]; int nl = 0;
+    for (uint32_t i = 0; i < g_wb.cap && nl < 512 && g_wb.n; i++) {
+        wb_ent *e = g_wb.vals ? g_wb.vals[i] : NULL;
+        if (!e || e->t.d.width != w || e->t.d.height != h) continue;
+        uint64_t k = e->t.serial; nvn_hm_del(&g_wb, &k); list[nl++] = e; i = (uint32_t)-1;
+    }
+    pthread_mutex_unlock(&g_smu);
+    wb_write_list(list, nl, 1);
+}
 void mtl_pool_invalidate(const pool_t *p, uint64_t off, uint64_t n) {
     if (!p || !p->mem || !atomic_load(&g_wb_on)) return;
     pthread_mutex_lock(&g_smu);
@@ -2403,13 +2419,17 @@ void mtl_pool_invalidate(const pool_t *p, uint64_t off, uint64_t n) {
         uint64_t k = e->t.serial; nvn_hm_del(&g_wb, &k); list[nl++] = e; i = (uint32_t)-1;   // deletion shifts entries: rescan
     }
     pthread_mutex_unlock(&g_smu);
+    wb_write_list(list, nl, 0);
+}
+/* Writes the listed renderings back to memory (the entries are freed); force: even over CPU writes since the render. */
+static void wb_write_list(wb_ent **list, int nl, int force) {
     if (!nl) return;
     { extern void nvn_x_drain(void) __attribute__((weak)); if (nvn_x_drain) nvn_x_drain(); }   // translation thread: nothing queued overtakes this read-back (as for ReadTexels)
     mtl_finish_gpu();
     /* Freshness is decided for every entry before anything is written back (a write-back marks its pages written), and
        of several renderings of the same memory (texture objects over it) only the newest is written back. */
     int fresh[512];
-    for (int i = 0; i < nl; i++) fresh[i] = !nvn_dirty_since(list[i]->t.mem, list[i]->t.L.size, list[i]->stamp);
+    for (int i = 0; i < nl; i++) fresh[i] = force || !nvn_dirty_since(list[i]->t.mem, list[i]->t.L.size, list[i]->stamp);
     for (int i = 0; i < nl; i++) for (int j = 0; j < nl; j++)
         if (i != j && fresh[i] && fresh[j] && list[j]->t.mem == list[i]->t.mem && list[j]->stamp > list[i]->stamp) { fresh[i] = 2; break; }   // 2: superseded
     for (int i = 0; i < nl; i++) {
@@ -2417,7 +2437,7 @@ void mtl_pool_invalidate(const pool_t *p, uint64_t off, uint64_t n) {
         id o = (__bridge id)e->obj; id<MTLTexture> mt = [o isKindOfClass:[NvPkg class]] ? ((NvPkg *)o)->tex : o;
         uint32_t upf; int ubpp;
         if (fresh[i] == 2 || !mt) { wb_ent_free(e); continue; }   // !mt: copy evicted (pkg_evict_sweep) before the GPU rendered into it
-        TILELOG(t, "invalidate %#llx+%#llx: %s", (unsigned long long)(uintptr_t)a, (unsigned long long)n, !fresh[i] ? "CPU wrote since the render, skip" : "write back");
+        TILELOG(t, "write-back request: %s", !fresh[i] ? "CPU wrote since the render, skip" : "write back");
         if (tilelog_match(t) && !fresh[i]) {   // who wrote it
             extern int runtime_module_offset(uint64_t pc, const char **name, uint64_t *off);
             nvn_dirty_rec rec[64]; int nr = nvn_dirty_recent((uintptr_t)t->mem & ~(uintptr_t)16383, (uintptr_t)t->mem + t->L.size, rec, 64);
@@ -2431,7 +2451,10 @@ void mtl_pool_invalidate(const pool_t *p, uint64_t off, uint64_t n) {
             }
             TILELOG(t, "writers since the render (%d records):%s", nr, line);
         }
-        if (!fresh[i]) { g_wb_skip_cpu++; wb_ent_free(e); continue; }   // the CPU wrote it since: its bytes are newer
+        if (!fresh[i]) {   // the CPU wrote it since: its bytes are newer
+            if (++g_wb_skip_cpu <= 24) MLOG("[writeback] skipped (CPU wrote since the render) ser=%llu %ux%u nvnfmt=%#x lv%u", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, t->d.levels);
+            wb_ent_free(e); continue;
+        }
         if (!mt || bc_unpack(t->d.format, &upf, &ubpp) || t->d.target == 2 || t->d.samples > 1) { if (++g_wb_skip_fmt <= 8) MLOG("【红】GPU 写回内存：不支持的贴图 ser=%llu 格式 %#x 目标 %d", (unsigned long long)t->serial, t->d.format, t->d.target); wb_ent_free(e); continue; }
         /* the GPU's bytes landing in memory: not a CPU write (with dm_guest_write_prepare the page this texture shares
            with a neighbour counted as written, and the neighbour's own write-back was skipped as "CPU wrote since") */
@@ -5015,6 +5038,20 @@ void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
     if (id_ < (1 << 20)) atomic_store_explicit(&g_tser[id_], t ? t->serial : 0, memory_order_release);
     registry_unlock();
 }
+/* TOTK: Metal has three border colours (transparent black, opaque black, opaque white). A sampler that clamps to any
+   other colour is emulated in the shader (fs_fn_border). The game's grass interaction map (two 256x256 targets updated
+   from each other every frame, scrolled with the player) clamps to (0.5, 0.5, 0.5, 0.5), its "untouched" value: with
+   transparent black every area entering the map read as grass bent all the way, so grass lay flat away from the player,
+   stood up where Link walked and showed no cut (#49). */
+static int samp_border_custom(const samp_par *p) {
+    if (!(p->ws == 4 || p->ws == 5 || p->wt == 4 || p->wt == 5 || p->wr == 4 || p->wr == 5)) return 0;
+    const float *b = p->border;
+    int grey = b[0] == b[1] && b[1] == b[2];
+    if (grey && b[0] == 0 && (b[3] == 0 || b[3] == 1)) return 0;   // transparent / opaque black
+    if (grey && b[0] == 1 && b[3] == 1) return 0;                   // opaque white
+    return 1;
+}
+static _Atomic int g_border_custom_any;   // set once such a sampler is registered: border_key runs only then
 void mtl_reg_samp(int sid, const samp_par *sp) {
     int id_ = sid; if (id_ < 0) return;
     registry_lock();
@@ -5023,6 +5060,7 @@ void mtl_reg_samp(int sid, const samp_par *sp) {
     if (g_sview[id_]) { CFRelease(g_sview[id_]); g_sview[id_] = NULL; g_srid[id_] = 0; }
     g_reg_gen++;
     g_sreg[id_] = *sp; g_sreg_ok[id_] = 1;
+    if (samp_border_custom(sp)) atomic_store(&g_border_custom_any, 1);
     registry_unlock();
 }
 /* Texture-pool slots whose cached view still holds a texture of a finalized serial (diagnostic for the readout line). */
@@ -5296,19 +5334,6 @@ static inline __attribute__((always_inline)) void *tex_fast(int tid) {
 static inline __attribute__((always_inline)) uint64_t tex_fast_rid(int tid, void **out) {
     if (tid > 0 && tid < g_ntreg && g_treg[tid].ok && g_treg[tid].view && g_treg[tid].view_ser == g_ser_gen && (!g_treg[tid].view_pkg || g_treg[tid].view_dirty == treg_stamp(g_treg[tid].view_pkg))) { if (out) *out = g_treg[tid].view; return g_treg[tid].view_rid; }
     id<MTLTexture> t = tex_by_id(tid); if (out) *out = (__bridge void *)t; return t ? t.gpuResourceID._impl : 0;
-}
-/* TOTK: Metal has three border colours (transparent black, opaque black, opaque white). A sampler that clamps to any
-   other colour is emulated in the shader (fs_fn_border). The game's grass interaction map (two 256x256 targets updated
-   from each other every frame, scrolled with the player) clamps to (0.5, 0.5, 0.5, 0.5), its "untouched" value: with
-   transparent black every area entering the map read as grass bent all the way, so grass lay flat away from the player,
-   stood up where Link walked and showed no cut (#49). */
-static int samp_border_custom(const samp_par *p) {
-    if (!(p->ws == 4 || p->ws == 5 || p->wt == 4 || p->wt == 5 || p->wr == 4 || p->wr == 5)) return 0;
-    const float *b = p->border;
-    int grey = b[0] == b[1] && b[1] == b[2];
-    if (grey && b[0] == 0 && (b[3] == 0 || b[3] == 1)) return 0;   // transparent / opaque black
-    if (grey && b[0] == 1 && b[3] == 1) return 0;                   // opaque white
-    return 1;
 }
 static MTLSamplerAddressMode wrapm(int w) {
     switch (w) { case 0: case 7: return MTLSamplerAddressModeClampToEdge; case 1: return MTLSamplerAddressModeRepeat;
@@ -5648,16 +5673,90 @@ static int vs_layerable(NvShader *vs) {
         && [vsrc0 rangeOfString:@"main0_out out = {};"].location != NSNotFound && [vsrc0 rangeOfString:@"render_target_array_index"].location == NSNotFound ? 1 : -1;
     return vs->lay_ok > 0;
 }
-static id<MTLFunction> vs_fn_for(NvShader *vs, NvShader *fs, int layered) {
+static NSString *fs_src_without_depth(NvShader *fs);
+/* TOTK: samplers that clamp to a border colour Metal does not have (samp_border_custom) are emulated in the shader: the
+   stage's sample calls on them return that colour when the coordinate is outside [0, 1]. border_key lists the stage's
+   bound samplers that need it (argument id and colour; nil when none), border_src rewrites the MSL. */
+static NSString *border_key(NvShader *sh, int stage, float colours[][4], int aids[], int *n) {
+    *n = 0;
+    if (!atomic_load_explicit(&g_border_custom_any, memory_order_relaxed)) return nil;
+    NSMutableString *key = nil;
+    registry_lock();
+    for (int i = 0; i < sh->rf.nb && *n < 8; i++) {
+        const nvn_rbind *b = &sh->rf.b[i];
+        if ((b->kind != NVN_RB_SAMP && b->kind != NVN_RB_SAMPT) || b->reg >= 128) continue;
+        int sid = (int)((b->kind == NVN_RB_SAMPT ? S.tex[stage][b->reg] : S.samp[stage][b->reg]) >> 20);
+        if (sid <= 0 || sid >= g_nsreg || !g_sreg_ok[sid] || !samp_border_custom(&g_sreg[sid])) continue;
+        memcpy(colours[*n], g_sreg[sid].border, sizeof colours[*n]); aids[*n] = b->aid;
+        if (!key) key = [NSMutableString string];
+        [key appendFormat:@"%d:%a,%a,%a,%a;", b->aid, colours[*n][0], colours[*n][1], colours[*n][2], colours[*n][3]];
+        ++*n;
+    }
+    registry_unlock();
+    if (key) sh->border_seen = 1;
+    return key;
+}
+static NSString *border_src(NvShader *sh, NSString *src0, float colours[][4], const int aids[], int n) {
+    NSString *src = src0; int patched = 0;
+    for (int i = 0; i < n; i++) {   // SPIRV-Cross: "sampler <name> [[id(<aid>)]]" in the argument struct, used as tex.sample(spvDescriptorSet0.<name>, coord, ...)
+        NSString *decl = [NSString stringWithFormat:@"sampler\\s+(\\w+)\\s*\\[\\[id\\(%d\\)\\]\\]", aids[i]];
+        NSTextCheckingResult *m = [[NSRegularExpression regularExpressionWithPattern:decl options:0 error:nil] firstMatchInString:src options:0 range:NSMakeRange(0, src.length)];
+        if (!m) continue;
+        NSString *name = [src substringWithRange:[m rangeAtIndex:1]];
+        NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:[NSString stringWithFormat:@"([\\w.]+)\\.sample\\((\\s*spvDescriptorSet0\\.%@\\s*,)", name] options:0 error:nil];
+        patched += (int)[re numberOfMatchesInString:src options:0 range:NSMakeRange(0, src.length)];
+        src = [re stringByReplacingMatchesInString:src options:0 range:NSMakeRange(0, src.length)
+                                      withTemplate:[NSString stringWithFormat:@"totk_border_sample(float4(%a, %a, %a, %a), $1,$2", colours[i][0], colours[i][1], colours[i][2], colours[i][3]]];
+    }
+    if (!patched) { static int warned; if (!warned++) MLOG("[totk] shader %s: a sampler clamps to a border colour Metal lacks, but no sample call to emulate it was found", sh->key); return nil; }
+    NSString *helper =   // 2D, 2D array and 3D textures test the normalized coordinate; other kinds (cube, depth) sample as before
+        @"template<typename T, typename... A> static inline vec<T, 4> totk_border_sample(float4 border, texture2d<T> t, sampler s, float2 uv, A... a)\n"
+        @"{ return any(uv < 0.0) || any(uv > 1.0) ? vec<T, 4>(border) : t.sample(s, uv, a...); }\n"
+        @"template<typename T, typename... A> static inline vec<T, 4> totk_border_sample(float4 border, texture2d_array<T> t, sampler s, float2 uv, A... a)\n"
+        @"{ return any(uv < 0.0) || any(uv > 1.0) ? vec<T, 4>(border) : t.sample(s, uv, a...); }\n"
+        @"template<typename T, typename... A> static inline vec<T, 4> totk_border_sample(float4 border, texture3d<T> t, sampler s, float3 uv, A... a)\n"
+        @"{ return any(uv < 0.0) || any(uv > 1.0) ? vec<T, 4>(border) : t.sample(s, uv, a...); }\n"
+        @"template<typename Tex, typename C, typename... A> static inline auto totk_border_sample(float4 border, Tex t, sampler s, C uv, A... a) -> decltype(t.sample(s, uv, a...))\n"
+        @"{ return t.sample(s, uv, a...); }\n";
+    NSRange r = [src rangeOfString:@"using namespace metal;\n"];
+    if (r.location == NSNotFound) MDIE("shader %s: no 'using namespace metal;' for the border colour helper", sh->key);
+    static int logged; if (logged++ < 16) MLOG("[totk] shader %s: sampler border colour %g %g %g %g emulated in the shader (%d samples; Metal has no such border colour)",
+                                              sh->key, colours[0][0], colours[0][1], colours[0][2], colours[0][3], patched);
+    return [src stringByReplacingCharactersInRange:NSMakeRange(NSMaxRange(r), 0) withString:helper];
+}
+/* The fragment function for the draw's samplers (border_key), nil when none needs the emulation. */
+static id<MTLFunction> fs_fn_border(NvShader *fs, int nodepth) {
+    if (!fs || !sh_has_src(fs)) return nil;
+    float colours[8][4]; int aids[8], n;
+    NSString *key = border_key(fs, 1, colours, aids, &n);
+    if (!key) return nil;
+    if (nodepth && fs->writes_depth) key = [@"nodepth;" stringByAppendingString:key];
+    static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT; os_unfair_lock_lock(&lock);
+    id<MTLFunction> fn = fs->bpatch[key];
+    if (!fn) {
+        NSString *src = border_src(fs, nodepth && fs->writes_depth ? fs_src_without_depth(fs) : sh_src(fs), colours, aids, n);
+        if (!src) { os_unfair_lock_unlock(&lock); return nil; }
+        NSError *err = nil; id<MTLLibrary> lib = totk_msl_library(src, &err);
+        fn = lib ? [lib newFunctionWithName:fs->fn.name] : nil;
+        if (!fn) MDIE("fragment shader %s with emulated sampler border colour: %s", fs->key, err.localizedDescription.UTF8String);
+        if (!fs->bpatch) fs->bpatch = [NSMutableDictionary dictionary];
+        fs->bpatch[key] = fn;
+    }
+    os_unfair_lock_unlock(&lock);
+    return fn;
+}
+static id<MTLFunction> vs_fn_for(NvShader *vs, NvShader *fs, int layered, int border) {
     static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT;
     if (layered && !vs_layerable(vs)) MDIE("vertex shader %s cannot write the render target array index", vs->key);
-    if (!sh_has_src(vs) || (!layered && (!fs || !sh_has_src(fs)))) return vs->fn;
+    float bc[8][4]; int ba[8], bn = 0;   // TOTK: vertex-stage samplers with a border colour Metal lacks (PSO_VBORDER)
+    NSString *bkey = border && sh_has_src(vs) ? border_key(vs, 0, bc, ba, &bn) : nil;
+    if (!sh_has_src(vs) || (!layered && !bkey && (!fs || !sh_has_src(fs)))) return vs->fn;
     os_unfair_lock_lock(&lk);
     NSDictionary *in = fs && sh_has_src(fs) ? msl_varyings(fs) : nil, *out = in ? msl_varyings(vs) : nil;
     NSMutableArray *miss = [NSMutableArray array];
     for (NSNumber *l in [in.allKeys sortedArrayUsingSelector:@selector(compare:)]) if (!out[l]) [miss addObject:l];
-    if (!miss.count && !layered) { os_unfair_lock_unlock(&lk); return vs->fn; }
-    NSString *key = [(layered ? @"layer;" : @"") stringByAppendingString:[miss componentsJoinedByString:@","]];
+    if (!miss.count && !layered && !bkey) { os_unfair_lock_unlock(&lk); return vs->fn; }
+    NSString *key = [NSString stringWithFormat:@"%@%@%@", layered ? @"layer;" : @"", bkey ? [NSString stringWithFormat:@"border:%@", bkey] : @"", [miss componentsJoinedByString:@","]];
     id<MTLFunction> f = vs->vpatch[key];
     if (!f) {
         NSMutableString *add = [NSMutableString string];
@@ -5665,6 +5764,7 @@ static id<MTLFunction> vs_fn_for(NvShader *vs, NvShader *fs, int layered) {
         if (layered) [add appendString:@"    uint totk_layer [[render_target_array_index]];\n"];
         NSString *head = @"struct main0_out\n{\n";
         NSString *vsrc0 = sh_src(vs);
+        if (bkey) { NSString *b = border_src(vs, vsrc0, bc, ba, bn); if (b) vsrc0 = b; }
         NSRange r = [vsrc0 rangeOfString:head];
         if (r.location == NSNotFound) MDIE("vertex shader %s: no main0_out to extend", vs->key);
         NSString *src = [vsrc0 stringByReplacingCharactersInRange:r withString:[head stringByAppendingString:add]];
@@ -5720,73 +5820,6 @@ static id<MTLFunction> fs_fn_without_depth(NvShader *fs) {
         MLOG("[totk] fragment depth export omitted for a color-only pass: %s", fs->key);
     }
     id<MTLFunction> fn = fs->no_depth_fn; os_unfair_lock_unlock(&lock); return fn;
-}
-/* TOTK: the fragment function for the draw's samplers when one of them clamps to a border colour Metal does not have
-   (samp_border_custom): its samples return that colour when the coordinate is outside [0, 1]. nil when no bound sampler
-   needs it. The variant's key is the argument ids and colours, so the shader keeps one function per sampler set. */
-static NSString *fs_border_key(NvShader *fs, float colours[][4], int aids[], int *n) {
-    NSMutableString *key = nil; *n = 0;
-    registry_lock();
-    for (int i = 0; i < fs->rf.nb && *n < 8; i++) {
-        const nvn_rbind *b = &fs->rf.b[i];
-        if ((b->kind != NVN_RB_SAMP && b->kind != NVN_RB_SAMPT) || b->reg >= 128) continue;
-        int sid = (int)((b->kind == NVN_RB_SAMPT ? S.tex[1][b->reg] : S.samp[1][b->reg]) >> 20);
-        if (sid <= 0 || sid >= g_nsreg || !g_sreg_ok[sid] || !samp_border_custom(&g_sreg[sid])) continue;
-        memcpy(colours[*n], g_sreg[sid].border, sizeof colours[*n]); aids[*n] = b->aid;
-        if (!key) key = [NSMutableString string];
-        [key appendFormat:@"%d:%a,%a,%a,%a;", b->aid, colours[*n][0], colours[*n][1], colours[*n][2], colours[*n][3]];
-        ++*n;
-    }
-    registry_unlock();
-    return key;
-}
-static id<MTLFunction> fs_fn_border(NvShader *fs, int nodepth) {
-    if (!fs || !sh_has_src(fs)) return nil;
-    float colours[8][4]; int aids[8], n;
-    NSString *key = fs_border_key(fs, colours, aids, &n);
-    if (!key) return nil;
-    fs->border_seen = 1;
-    if (nodepth && fs->writes_depth) key = [@"nodepth;" stringByAppendingString:key];
-    static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT; os_unfair_lock_lock(&lock);
-    id<MTLFunction> fn = fs->bpatch[key];
-    if (!fn) {
-        NSString *src = nodepth && fs->writes_depth ? fs_src_without_depth(fs) : sh_src(fs);
-        int patched = 0;
-        for (int i = 0; i < n; i++) {   // SPIRV-Cross: "sampler <name> [[id(<aid>)]]" in the argument struct, used as tex.sample(spvDescriptorSet0.<name>, coord, ...)
-            NSString *decl = [NSString stringWithFormat:@"sampler\\s+(\\w+)\\s*\\[\\[id\\(%d\\)\\]\\]", aids[i]];
-            NSTextCheckingResult *m = [[NSRegularExpression regularExpressionWithPattern:decl options:0 error:nil] firstMatchInString:src options:0 range:NSMakeRange(0, src.length)];
-            if (!m) continue;
-            NSString *name = [src substringWithRange:[m rangeAtIndex:1]];
-            NSString *call = [NSString stringWithFormat:@"([\\w.]+)\\.sample\\((\\s*spvDescriptorSet0\\.%@\\s*,)", name];
-            NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:call options:0 error:nil];
-            NSUInteger before = [re numberOfMatchesInString:src options:0 range:NSMakeRange(0, src.length)];
-            src = [re stringByReplacingMatchesInString:src options:0 range:NSMakeRange(0, src.length)
-                                          withTemplate:[NSString stringWithFormat:@"totk_border_sample(float4(%a, %a, %a, %a), $1,$2", colours[i][0], colours[i][1], colours[i][2], colours[i][3]]];
-            patched += (int)before;
-        }
-        if (!patched) { os_unfair_lock_unlock(&lock); static int warned; if (!warned++) MLOG("[totk] fragment shader %s: a sampler clamps to a border colour Metal lacks, but no sample call to emulate it was found", fs->key); return nil; }
-        NSString *helper =   // 2D, 2D array and 3D textures test the normalized coordinate; other kinds (cube, depth) sample as before
-            @"template<typename T, typename... A> static inline vec<T, 4> totk_border_sample(float4 border, texture2d<T> t, sampler s, float2 uv, A... a)\n"
-            @"{ return any(uv < 0.0) || any(uv > 1.0) ? vec<T, 4>(border) : t.sample(s, uv, a...); }\n"
-            @"template<typename T, typename... A> static inline vec<T, 4> totk_border_sample(float4 border, texture2d_array<T> t, sampler s, float2 uv, A... a)\n"
-            @"{ return any(uv < 0.0) || any(uv > 1.0) ? vec<T, 4>(border) : t.sample(s, uv, a...); }\n"
-            @"template<typename T, typename... A> static inline vec<T, 4> totk_border_sample(float4 border, texture3d<T> t, sampler s, float3 uv, A... a)\n"
-            @"{ return any(uv < 0.0) || any(uv > 1.0) ? vec<T, 4>(border) : t.sample(s, uv, a...); }\n"
-            @"template<typename Tex, typename C, typename... A> static inline auto totk_border_sample(float4 border, Tex t, sampler s, C uv, A... a) -> decltype(t.sample(s, uv, a...))\n"
-            @"{ return t.sample(s, uv, a...); }\n";
-        NSRange r = [src rangeOfString:@"using namespace metal;\n"];
-        if (r.location == NSNotFound) MDIE("fragment shader %s: no 'using namespace metal;' for the border colour helper", fs->key);
-        src = [src stringByReplacingCharactersInRange:NSMakeRange(NSMaxRange(r), 0) withString:helper];
-        NSError *err = nil; id<MTLLibrary> lib = totk_msl_library(src, &err);
-        fn = lib ? [lib newFunctionWithName:fs->fn.name] : nil;
-        if (!fn) MDIE("fragment shader %s with emulated sampler border colour: %s", fs->key, err.localizedDescription.UTF8String);
-        if (!fs->bpatch) fs->bpatch = [NSMutableDictionary dictionary];
-        fs->bpatch[key] = fn;
-        static int logged; if (logged++ < 16) MLOG("[totk] fragment shader %s: sampler border colour %g %g %g %g emulated in the shader (%d samples; Metal has no such border colour)",
-                                                  fs->key, colours[0][0], colours[0][1], colours[0][2], colours[0][3], patched);
-    }
-    os_unfair_lock_unlock(&lock);
-    return fn;
 }
 /* TOTK_MFX: the fragment function with its colour 0 output copied to attachment 7, the UI layer (role 3 makes the copy
    opaque). Returns nil when the source cannot take the copy (no float colour 0, attachment 7 already written); the
@@ -5911,7 +5944,7 @@ static void nan_trace_bind(id<MTL4RenderCommandEncoder> en) {
 }
 static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvShader *fs, id<MTLFunction> fsfn, int merged) {
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
-    d.vertexFunction = vs_fn_for(vs, fs, (k->a2c & PSO_LAYERED) != 0); d.fragmentFunction = fsfn ? fsfn : fs ? (k->dfmt ? fs->fn : fs_fn_without_depth(fs)) : nil;
+    d.vertexFunction = vs_fn_for(vs, fs, (k->a2c & PSO_LAYERED) != 0, (k->a2c & PSO_VBORDER) != 0); d.fragmentFunction = fsfn ? fsfn : fs ? (k->dfmt ? fs->fn : fs_fn_without_depth(fs)) : nil;
     if (!fsfn && nan_trace_match(fs) && !fs->writes_depth) d.fragmentFunction = nan_trace_fn(fs);   // diagnostic TOTK_NAN_TRACE
     // 诊断 DM_NVN_HILITE=片元着色器键,…：这些绘制改用纯色片元（第 1–6 个键依次 品红 / 绿 / 青 / 黄 / 蓝 / 白），看几何落在哪里
     // Diagnostic DM_NVN_HILITE=fragment shader key,...: these draws use a solid-color fragment instead (keys 1–6 in order magenta / green / cyan / yellow / blue / white), to see where the geometry lands
@@ -6076,6 +6109,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get(NvProg *pr, MTLRen
     if (g_pso_lmap) { memcpy(k.lmap, g_pso_lmap, 8); k.fsfn = (__bridge void *)g_pso_fsfn; }
     __unsafe_unretained id<MTLFunction> bfn = !g_pso_lmap && !g_mfx.role ? fs_fn_border(fs, k.dfmt == 0) : nil;   // TOTK: sampler border colour emulation
     if (bfn) k.fsfn = (__bridge void *)bfn;
+    { float bc[8][4]; int ba[8], bn; if (border_key(vs, 0, bc, ba, &bn)) k.a2c |= PSO_VBORDER; }
     __unsafe_unretained id<MTLRenderPipelineState> cached = (__bridge id<MTLRenderPipelineState>)hm_get_ptr(&g_pso, &k);
     if (cached) return cached;
     id<MTLRenderPipelineState> ps;
@@ -6089,7 +6123,8 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get(NvProg *pr, MTLRen
     }
     g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
     if (!ps) { static int said; if (said++ < 12) MLOG("【红】建渲染管线失败：%s（vs %s ps %s dfmt %d sfmt %d cfmt0 %d samples %d）", e.localizedDescription.UTF8String, vs->key, fs ? fs->key : "-", (int)k.dfmt, (int)k.sfmt, (int)k.cfmt[0], (int)k.samples); else if (said == 12) MLOG("【红】建渲染管线失败：后续不再逐条打印"); return nil; }
-    pso_skey sk; char shex[sizeof sk * 2 + 1]; pso_skey_from(&k, vs, fs, g_pso_lmap != NULL, g_pso_lmap ? &g_pso_fz : NULL, &sk); pso_skey_hex(&sk, shex);
+    pso_key rk = k; rk.a2c &= ~PSO_VBORDER; if (bfn) rk.fsfn = NULL;   // the warm-up list records the plain pipeline: a border variant is built from the draw's samplers
+    pso_skey sk; char shex[sizeof sk * 2 + 1]; pso_skey_from(&rk, vs, fs, g_pso_lmap != NULL, g_pso_lmap ? &g_pso_fz : NULL, &sk); pso_skey_hex(&sk, shex);
     if (survey_shader_log()) MLOG("[survey-shader] frame %llu render pipeline %s in %.2f ms", (unsigned long long)atomic_load(&g_cur_frame), shex, (bp_now() - bt) / 1e6);
     pso_record("R\t%s\n", shex);
     pso_user_record("R\t%s\n", shex);
@@ -9646,7 +9681,7 @@ frz_plain:;
     // The pipeline depends only on (program, render pass targets, blend / color / write mask / multisample state, vertex layout): if these did not change, reuse the previous one
     static id<MTLRenderPipelineState> cur_ps; static NvProg *cur_pr; static uint64_t cur_ps_pass;
     if (g_fz.active && !g_defer_replaying) { g_pso_lmap = g_fz.phase == 1 ? g_fz.lmap1 : g_fz.lmap2; g_pso_fsfn = g_fz.phase == 1 ? nil : fz_fn; g_pso_fz = g_fz.phase == 1 ? (pso_fz_desc){0} : g_fz_desc; g_pso_dirty = 1; }   // 可读 tile 合并：按物理 → 逻辑映射与特化取管线 | Readable tile merge: fetch the pipeline by the physical -> logical mapping and the specialization
-    if (g_pso_dirty || pr != cur_pr || cur_ps_pass != g_pass.serial || (pr->sh[1] && pr->sh[1]->border_seen)) { cur_ps = pso_get(pr, nil); cur_pr = pr; cur_ps_pass = g_pass.serial; g_pso_dirty = !cur_ps; }
+    if (g_pso_dirty || pr != cur_pr || cur_ps_pass != g_pass.serial || (pr->sh[1] && pr->sh[1]->border_seen) || (pr->sh[0] && pr->sh[0]->border_seen)) { cur_ps = pso_get(pr, nil); cur_pr = pr; cur_ps_pass = g_pass.serial; g_pso_dirty = !cur_ps; }
     if (g_pso_lmap) { g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz); g_pso_dirty = 1; }   // 下一次绘制重新按自身情况取 | The next draw fetches again according to its own situation
     __unsafe_unretained id<MTLRenderPipelineState> ps = cur_ps;
     if (!ps) { g_draw_skip[9]++; static int failed_n; if (failed_n++ < 3) MLOG("[pipeline-draw] rt-depth=%p serial=%llu fmt=%#x pass-depth=%u dt=%u dw=%u fs-depth=%d", R.rt.depth, (unsigned long long)(R.rt.depth ? R.rt.depth->serial : 0), R.rt.depth ? R.rt.depth->d.format : 0, g_pass.dfmt, S.ds.dt, S.ds.dw, pr->sh[1] ? pr->sh[1]->writes_depth : 0); return; }
@@ -12172,6 +12207,7 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
     int discard = atomic_load(&g_present_discard), islot = mfx_enabled() && t ? mfx_present_frame(t, period, discard) : -1;
     if (mfx_latch() && !mfx_enabled()) g_mfx.scene_done = g_mfx.ui_cleared = g_mfx.depth_done = g_mfx.want_cam = 0;   // key 2 / flag mfx_interp: the next frame is fully on or off
     if (t && !mfx_enabled() && uw_ratio()) uw_note_present(t);   // key 4: the canvas search (TOTK_MFX does it in mfx_present_frame)
+    mtl_wb_eager();
     g_uw_ui = 0;
     if (atomic_load(&g_uw_log) > 0) atomic_fetch_sub(&g_uw_log, 1);
     if (atomic_load(&g_draw_log) > 0) atomic_fetch_sub(&g_draw_log, 1);
