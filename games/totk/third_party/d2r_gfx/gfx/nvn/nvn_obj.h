@@ -40,7 +40,7 @@ typedef struct {
 // TOTK: the game reserves 16 bytes for NVNtextureView on its stack (main+0x823398 SetDefaults at sp+0x30, its own
 // data at sp+0x40), so the view is packed into 16 bytes. swz = NVN view swizzle selectors.
 typedef struct {
-    uint8_t set_levels : 1, set_layers : 1, set_format : 1, set_target : 1, set_swizzle : 1, pad0 : 3;
+    uint8_t set_levels : 1, set_layers : 1, set_format : 1, set_target : 1, set_swizzle : 1, set_stencil : 1, pad0 : 2;   // set_stencil: sample the stencil plane (Bayonetta 3)
     uint8_t base_level, nlevels, target; uint16_t min_layer, nlayers; uint16_t format; uint8_t swz[4]; uint8_t pad1[2];
 } view_t;
 _Static_assert(sizeof(view_t) == 16, "NVNtextureView is 16 bytes in TOTK's NVN");
