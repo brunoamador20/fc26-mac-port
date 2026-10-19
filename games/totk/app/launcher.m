@@ -149,9 +149,9 @@ int main(int argc, char **argv) {
         NSData *layout = [NSData dataWithContentsOfFile:controls];
         if (layout) {
             NSString *text = layout.length < 16384 ? [[NSString alloc] initWithData:layout encoding:NSUTF8StringEncoding] : nil;
-            uint16_t map[CONTROLLER_BUTTONS]; controller_map_default(map);
+            uint16_t map[CONTROLLER_BUTTONS]; uint8_t modes[CONTROLLER_BUTTONS]; controller_map_default(map, modes);
             const char *problem = layout.length < 16384 ? "not UTF-8 text" : "larger than 16 KB";
-            int line = text ? controller_map_parse(text.UTF8String, map, &problem) : 1;
+            int line = text ? controller_map_parse(text.UTF8String, map, modes, &problem) : 1;
             if (line) { show_error([NSString stringWithFormat:@"%@, line %d: %s", controls, line, problem]); return 1; }
         }
         setenv("TOTK_CONTROLS", controls.fileSystemRepresentation, 1);

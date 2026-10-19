@@ -9,11 +9,19 @@ static int failures;
 static void expect(int ok, const char *what) { if (!ok) { fprintf(stderr, "FAIL: %s\n", what); failures++; } }
 
 static uint64_t press(const char *text, uint64_t physical, int *line) {
-    uint16_t map[CONTROLLER_BUTTONS]; const char *error = NULL;
-    controller_map_default(map);
-    *line = controller_map_parse(text, map, &error);
+    uint16_t map[CONTROLLER_BUTTONS]; uint8_t modes[CONTROLLER_BUTTONS]; const char *error = NULL;
+    controller_map_default(map, modes);
+    *line = controller_map_parse(text, map, modes, &error);
     expect(!*line || error, "a bad line names its problem");
     return controller_map_apply(map, physical);
+}
+
+/* The mode and target of one physical button after parsing text, or -1 with *line set. */
+static int mode_of(const char *text, int physical, int *line) {
+    uint16_t map[CONTROLLER_BUTTONS]; uint8_t modes[CONTROLLER_BUTTONS]; const char *error = NULL;
+    controller_map_default(map, modes);
+    *line = controller_map_parse(text, map, modes, &error);
+    return *line ? -1 : modes[physical];
 }
 
 int main(void) {
@@ -31,6 +39,17 @@ int main(void) {
     expect(press("south =\n", SOUTH, &line) == A && line == 1, "missing Switch button");
     expect(press("\n# note\nsouth b\n", SOUTH, &line) == A && line == 3, "missing equals sign");
     expect(press("= a\n", SOUTH, &line) == A && line == 1, "missing controller button");
+    expect(mode_of("south = x tap\n", 0, &line) == CONTROLLER_TAP && !line, "tap mode");
+    expect(mode_of("l3 = b TOGGLE\n", 4, &line) == CONTROLLER_TOGGLE && !line, "toggle mode, upper case");
+    expect(mode_of("south = b hold\n", 0, &line) == CONTROLLER_HOLD && !line, "hold mode");
+    expect(mode_of("south = b\n", 0, &line) == CONTROLLER_HOLD && !line, "no mode: hold");
+    expect(mode_of("south = b tap extra\n", 0, &line) == -1 && line == 1, "two modes");
+    expect(mode_of("south = b turbo\n", 0, &line) == -1 && line == 1, "unknown mode");
+    expect(mode_of("menu = none tap\n", 10, &line) == -1 && line == 1, "none takes no mode");
+    expect(mode_of("l2 = zr aim r2\n", 8, &line) == (CONTROLLER_AIM | 9 << 4) && !line, "aim with its fire button");
+    expect(mode_of("l2 = zr aim\n", 8, &line) == -1 && line == 1, "aim without a fire button");
+    expect(mode_of("l2 = zr aim l2\n", 8, &line) == -1 && line == 1, "aim fired by itself");
+    expect(mode_of("l2 = zr aim r2 extra\n", 8, &line) == -1 && line == 1, "aim with an extra word");
     if (failures) return 1;
     printf("PASS: controller layout cases\n");
     return 0;
