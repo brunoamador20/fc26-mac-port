@@ -101,6 +101,7 @@ static id<MTLTexture> g_fps_tex[4];
 static id<MTLBuffer> g_fps_uv[3];
 static struct { fps_overlay_info info; int scale; } g_fps_key[4] = {{{.fps = -1000}, 0}, {{.fps = -1000}, 0}, {{.fps = -1000}, 0}, {{.fps = -1000}, 0}};
 static _Atomic int g_pic_big;   /* the game picture (its crop) is bigger than 1920x1080: true 2K (" 2K" in the FPS box) */
+static _Atomic uint64_t g_pic_src;   /* the last game frame's size presented (crop): height << 32 | width, for the HUD */
 static int g_fps_box[4][2];
 // TOTK load line (bottom-right, load_overlay_prepare; totk_sysload.c): same slots as the FPS box, a wider texture.
 static id<MTLTexture> g_load_tex[4];
@@ -11280,7 +11281,9 @@ static int fps_overlay_prepare(int slot, MTLViewport vp, MTLViewport *ovp, float
     int scale = fps_overlay_scale(vp.height);
     uint64_t mfx_at = atomic_load(&g_mfxup_last), gen_at = atomic_load(&g_mfxi_last), cur = atomic_load(&g_cur_frame);   // the last game frame MetalFX did the upscale (" MFX") / an interpolated frame was shown ("+50")
     int gen = gen_at && cur - gen_at < 30 ? fps_overlay_gen_value() : 0;
-    fps_overlay_info info = {fps_overlay_value(), (int)lround(vp.width), (int)lround(vp.height), mfx_at && cur - mfx_at < 30, gen > 0 ? gen : 0, atomic_load(&g_pic_big)};
+    uint64_t src = atomic_load(&g_pic_src);
+    fps_overlay_info info = {fps_overlay_value(), (int)lround(vp.width), (int)lround(vp.height), mfx_at && cur - mfx_at < 30, gen > 0 ? gen : 0, atomic_load(&g_pic_big),
+                             (int)(src & 0xffffffff), (int)(src >> 32)};
     if (hud_compact()) { char text[96]; fps_overlay_text(&info, text, sizeof text); hud_publish(HUD_FPS, text, 0); return 0; }   // shown in the window's corner panel
     pthread_mutex_lock(&mu);
     if (g_fps_key[slot].scale != scale || memcmp(&g_fps_key[slot].info, &info, sizeof info)) {
@@ -11465,6 +11468,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
         cx = crop[0]; cy = crop[1]; cw = crop[2]; ch = crop[3];
     }
     if (crop) atomic_store(&g_pic_big, cw > 1920 || ch > 1080);   // a game frame (interpolated frames come without the crop)
+    if (crop) atomic_store(&g_pic_src, (uint64_t)ch << 32 | cw);   // the game frame's size, for the HUD (BY3_HUD_RENDER)
     present_pipeline(dst.pixelFormat);
     double dw = dst.width, dh = dst.height, s = fmin(dw / cw, dh / ch);
     MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};

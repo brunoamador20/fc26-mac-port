@@ -67,5 +67,46 @@ boot: runtime
 	@mkdir -p "$(dir $(BY3_LOG))"
 	cd "$(WORK)" && TOTK_HEADLESS=$${TOTK_HEADLESS-} ./build/by3-native rewritten/v120 boot 2> "$(abspath $(BY3_LOG))"; echo "exit $$?; log: $(BY3_LOG)"
 
+# The player's mods, made into checked tables: exefs patches (mods/1.2.0/<name>/exefs/*.pchtxt) -> <work>/patches,
+# RomFS mods (mods/<name>/romfs/...) -> their manifest.tsv (sizes and SHA-256 of the replacements and the originals).
+.PHONY: patches mods app
+patches:
+	"$(PY)" scripts/prepare_patches.py --work "$(WORK)"
+mods:
+	for d in mods/*/romfs; do [ -d "$$d" ] && "$(PY)" $(TOTK)/scripts/make_mod_manifest.py "$$d" --romfs "$(WORK)/extracted/v120/romfs"; done; true
+
+# The app: a small launcher bundle (settings window with presets, then the game) that runs the game from the work
+# folder, which it names in Info.plist (BY3WorkFolder): nothing large is copied. Its icon comes from the game's own
+# control data (GAME=<base or update NSP> KEYS=<prod.keys>), or the app goes without one.
+APP ?= Bayonetta 3.app
+GAME ?=
+KEYS ?=
+$(OUT)/launcher: app/launcher.m Makefile
+	xcrun clang -std=gnu11 -O2 -Wall -Wextra -Werror -fobjc-arc app/launcher.m -framework Cocoa -o "$@"
+$(OUT)/AppIcon.icns:
+	@if [ -n "$(GAME)" ] && [ -n "$(KEYS)" ]; then cd $(TOTK)/scripts && "$(PY)" extract_app_icon.py "$(GAME)" --keys "$(KEYS)" --title 01004a4010fea000 --output "$(abspath $@)"; \
+	 else echo "no GAME= / KEYS=: the app gets no icon"; fi
+app: runtime shader-tools $(OUT)/launcher $(OUT)/AppIcon.icns
+	rm -rf "$(APP)" && mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources"
+	cp "$(OUT)/launcher" "$(APP)/Contents/MacOS/Bayonetta 3"
+	[ -f "$(OUT)/AppIcon.icns" ] && cp "$(OUT)/AppIcon.icns" "$(APP)/Contents/Resources/" || true
+	printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+	  '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+	  '<plist version="1.0"><dict>' \
+	  '<key>CFBundleExecutable</key><string>Bayonetta 3</string>' \
+	  '<key>CFBundleIdentifier</key><string>org.macnativegames.by3</string>' \
+	  '<key>CFBundleName</key><string>Bayonetta 3</string>' \
+	  '<key>CFBundlePackageType</key><string>APPL</string>' \
+	  '<key>CFBundleShortVersionString</key><string>1.2.0</string>' \
+	  '<key>CFBundleVersion</key><string>1</string>' \
+	  '<key>CFBundleIconFile</key><string>AppIcon</string>' \
+	  '<key>LSMinimumSystemVersion</key><string>26.0</string>' \
+	  '<key>LSApplicationCategoryType</key><string>public.app-category.action-games</string>' \
+	  '<key>NSHighResolutionCapable</key><true/>' \
+	  '<key>BY3WorkFolder</key><string>$(abspath $(WORK))</string>' \
+	  '</dict></plist>' > "$(APP)/Contents/Info.plist"
+	codesign --force --sign - "$(APP)"
+	@echo "built $(APP) (game data stay in $(abspath $(WORK)))"
+
 clean:
 	rm -rf "$(OUT)/obj" "$(OUT)/by3-native"
