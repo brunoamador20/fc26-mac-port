@@ -178,3 +178,32 @@ class WarmMetalToolTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class MetalCompilerTests(unittest.TestCase):
+    """The offline compiler comes with an Xcode's Metal toolchain; the selected developer folder may be the command line
+    tools, so other Xcodes are tried and the one that has it is used to run it too."""
+
+    def fake_run(self, found_in):
+        def run(argv, capture_output=True, text=True, env=None):
+            developer = (env or {}).get('DEVELOPER_DIR')
+            if argv[:2] == ['xcrun', '--find']:
+                ok = developer == found_in
+                return subprocess.CompletedProcess(argv, 0 if ok else 1, stdout='/toolchain/metal\n' if ok else '', stderr='')
+            return subprocess.CompletedProcess(argv, 0, stdout='Apple metal version 32023\n', stderr='')
+        return run
+
+    def test_an_xcode_outside_the_selected_folder_supplies_the_compiler(self):
+        with mock.patch.object(build_app, 'developer_dirs', return_value=['/Library/Developer/CommandLineTools',
+                                                                          '/Volumes/x/Xcode.app/Contents/Developer']), \
+             mock.patch.object(build_app.subprocess, 'run', side_effect=self.fake_run('/Volumes/x/Xcode.app/Contents/Developer')), \
+             mock.patch.dict(build_app.os.environ, {}, clear=False):
+            build_app.os.environ.pop('DEVELOPER_DIR', None)
+            metal, version, env = build_app.metal_compiler()
+        self.assertEqual((metal, version, env['DEVELOPER_DIR']),
+                         ('/toolchain/metal', 'Apple metal version 32023', '/Volumes/x/Xcode.app/Contents/Developer'))
+
+    def test_no_toolchain_anywhere_is_none(self):
+        with mock.patch.object(build_app, 'developer_dirs', return_value=['/Library/Developer/CommandLineTools']), \
+             mock.patch.object(build_app.subprocess, 'run', side_effect=self.fake_run('nowhere')):
+            self.assertIsNone(build_app.metal_compiler())

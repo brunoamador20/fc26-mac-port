@@ -521,17 +521,45 @@ def step_shaders(tree, logs, *, version='v0'):
     run([tree/'.venv/bin/python', 'scripts/prepare_shader_seed.py',
          '--romfs', tree/f'extracted/{version}/romfs', '--output', tree/f'build/shader-seed/{version}',
          '--translator', translator, '--spirv-cross', tree/'build/spirv-cross/spirv-cross',
-         '--version', version], logs/'prepare-shader-seed.log', cwd=tree)
+         '--version', version, '--modules', tree/f'rewritten/{version}'], logs/'prepare-shader-seed.log', cwd=tree)
+
+
+def developer_dirs():
+    """Developer folders that may hold the Metal toolchain: DEVELOPER_DIR, the one xcode-select points at, Xcode*.app in
+    /Applications, then any Xcode Spotlight knows (one kept outside /Applications, for example next to the game)."""
+    found = [os.environ['DEVELOPER_DIR']] if os.environ.get('DEVELOPER_DIR') else []
+    try:
+        found.append(subprocess.check_output(['xcode-select', '-p'], text=True, stderr=subprocess.DEVNULL).strip())
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    found += [str(p / 'Contents/Developer') for p in sorted(Path('/Applications').glob('Xcode*.app'))]
+    found += [str(p / 'Contents/Developer') for p in sorted(Path.home().glob('Applications/Xcode*.app'))]
+    # An Xcode kept on another volume, at its top or one folder down (Spotlight may not index it)
+    found += [str(p / 'Contents/Developer') for p in sorted(Path('/Volumes').glob('*/Xcode*.app'))]
+    found += [str(p / 'Contents/Developer') for p in sorted(Path('/Volumes').glob('*/*/Xcode*.app'))]
+    try:
+        spotlight = subprocess.check_output(['mdfind', "kMDItemCFBundleIdentifier == 'com.apple.dt.Xcode'"], text=True,
+                                            stderr=subprocess.DEVNULL)
+        found += [line + '/Contents/Developer' for line in spotlight.splitlines() if line.endswith('.app')]
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return list(dict.fromkeys(d for d in found if d))
 
 
 def metal_compiler():
-    """Apple's offline shader compiler, or None: it comes with Xcode's optional Metal toolchain, not the command line tools."""
-    found = subprocess.run(['xcrun', '--find', 'metal'], capture_output=True, text=True)
-    metal = found.stdout.strip()
-    if found.returncode or not metal:
-        return None
-    version = subprocess.run([metal, '--version'], capture_output=True, text=True)
-    return (metal, version.stdout.splitlines()[0]) if not version.returncode and version.stdout else None
+    """(compiler, its version, the environment to run it with), or None. Apple's offline shader compiler comes with an
+    Xcode's optional Metal toolchain, not the command line tools, so when the selected folder has none the other Xcodes
+    on this Mac are tried."""
+    for developer in developer_dirs():
+        env = dict(os.environ, DEVELOPER_DIR=developer)
+        found = subprocess.run(['xcrun', '--find', 'metal'], capture_output=True, text=True, env=env)
+        metal = found.stdout.strip()
+        if found.returncode or not metal:
+            continue
+        version = subprocess.run([metal, '--version'], capture_output=True, text=True, env=env)
+        if not version.returncode and version.stdout:
+            return metal, version.stdout.splitlines()[0], env
+    return None
 
 
 # The options of totk_precise_opts() in nvn_mtl.m: the translated shaders need exactly rounded float arithmetic.
@@ -548,7 +576,7 @@ def step_shader_libs(tree, logs, *, version='v0'):
         say('3/4 shaders: no Metal toolchain (xcodebuild -downloadComponent MetalToolchain), so the startup shaders go '
             "into Metal's cache for the app's location at the end of the build instead; moving the app makes them cold again")
         return
-    metal, compiler = found
+    metal, compiler, metal_env = found
     libs = tree/'build/shader-libs'
     stamp = libs/'compiler.txt'
     identity = ' '.join([compiler, *METAL_FLAGS])
@@ -566,7 +594,7 @@ def step_shader_libs(tree, logs, *, version='v0'):
     def compile_one(item):
         digest, src = item
         partial = libs/f'{digest}.partial'
-        r = subprocess.run([metal, *METAL_FLAGS, '-o', partial, src], capture_output=True, text=True)
+        r = subprocess.run([metal, *METAL_FLAGS, '-o', partial, src], capture_output=True, text=True, env=metal_env)
         if r.returncode:
             partial.unlink(missing_ok=True)
             return f'{src.name}\n{r.stdout}{r.stderr}'

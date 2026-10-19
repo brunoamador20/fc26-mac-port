@@ -37,6 +37,17 @@ void runtime_boot_progress(const char *stage,uint64_t done,uint64_t total){
   else {bootDetail.text=@(TOTK_UI("正在处理，请稍候","Working, please wait"));bootProgress.hidden=YES;}
  });
 }
+void runtime_boot_count(const char *stage,uint64_t done,uint64_t total){
+ /* Steps counted in items, not bytes (the shader import: tens of thousands of files, minutes on a phone). */
+ static const char *last;
+ if(stage!=last){fprintf(stderr,"[totk-boot] %.3f %s\n",bootStartNS?(runtime_now_ns()-bootStartNS)/1e9:0,stage?stage:"startup");last=stage;}
+ NSString *s=[NSString stringWithUTF8String:stage?stage:TOTK_UI("正在启动","Starting")];
+ dispatch_async(dispatch_get_main_queue(), ^{
+  if(!bootOverlay||bootOverlay.hidden)return;
+  bootStage.text=s;bootDetail.text=[NSString stringWithFormat:@"%llu / %llu",(unsigned long long)done,(unsigned long long)total];
+  if(total){bootProgress.hidden=NO;bootProgress.progress=(float)((double)done/(double)total);}
+ });
+}
 void runtime_boot_status(const char *stage,const char *detail){
  if(bootStartNS)fprintf(stderr,"[totk-boot] %.3f %s — %s\n",(runtime_now_ns()-bootStartNS)/1e9,stage?stage:"startup",detail?detail:"");
  NSString *s=[NSString stringWithUTF8String:stage?stage:TOTK_UI("正在启动","Starting")];

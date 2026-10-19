@@ -13,6 +13,9 @@ from xcode_dir import developer_dir
 from compile_seed import METAL_FLAGS
 
 TOTK = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(TOTK/'scripts'))
+from shader_list import ShaderList   # noqa: E402
+SHADER_LIST = TOTK/'assets/shader_list.tsv'
 VARIANT = re.compile(r'^([0-9a-f]{64})-[0-9a-f]{12}$')
 HEX = re.compile(r'^(?:[0-9a-f]{2})+$')
 MAX_CODE = 16 << 20   # the runtime's own limit on a shader's code area
@@ -144,6 +147,9 @@ def main():
         failed = translate(rqs, tree, out, ch)
         variants = sorted({rq['variant'] for rq in rqs} - failed)
         if not variants: raise RuntimeError('no variant could be translated')
+        # What this device needed goes into the one shared list, so every later build carries it (docs/shader-list.md).
+        shared = ShaderList.load(SHADER_LIST); before = len(shared.variants); shared.add_cache(out); shared.save(SHADER_LIST)
+        print(f'shared shader list: {len(shared.variants) - before} new variants ({SHADER_LIST}; send them in a pull request)')
         name = time.strftime('%Y%m%d-%H%M%S'); pack = work/name; pack.mkdir()
         count = build_pack(pack, out, variants, ch, env)
         print(f'pack {name}: {len(variants)} variants, {count} files' + (f', {len(failed)} failed' if failed else ''))

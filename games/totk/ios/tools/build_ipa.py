@@ -113,9 +113,9 @@ def main():
     copy_tree(seed,res/'shader-seed')
     # The first frame waits only for the title screen's shaders (pso_title.tsv); the runtime looks for the list next to
     # DM_NVN_SHMAP, which is in shader-seed on iOS. Without it the first frame waits for the whole warm-up.
-    title=next((p for p in (tree/'build/pso_title.tsv',tree/'assets/pso_title.tsv') if p.is_file()),None)
-    if not title: raise RuntimeError('missing pso_title.tsv (games/totk/assets)')
-    clone(title,res/'shader-seed/pso_title.tsv')
+    # Exported from the one shared shader list (games/totk/assets/shader_list.tsv, docs/shader-list.md).
+    run([sys.executable,tree/'scripts/shader_list.py','export',tree/'assets/shader_list.tsv',logs/'pso_manifest.tsv',
+         res/'shader-seed/pso_title.tsv'],tree,logs/'shader-list.log',env)
     # Keep the player's first install self-contained; the app stores saves and writable shader cache in Documents.
     payload=tree/'build/ios-payload';shutil.rmtree(payload,ignore_errors=True);(payload/'Payload').mkdir(parents=True)
     copy_tree(app,payload/'Payload/TOTK.app')

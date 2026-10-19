@@ -2,6 +2,8 @@
 // Kept independent of the renderer so validation can run without a GPU/game.
 #pragma once
 #import <Foundation/Foundation.h>
+#include <sys/clonefile.h>
+#include <unistd.h>
 #include <CommonCrypto/CommonDigest.h>
 #include "dmsh_chain.h"
 
@@ -23,6 +25,9 @@ static NSString *totk_seed_fingerprint(NSDictionary *m, NSArray<NSString *> *nam
     return totk_seed_hash([s dataUsingEncoding:NSUTF8StringEncoding]);
 }
 
+// Progress of a running import, pass 0 checking the source, pass 1 copying it (tens of thousands of files: minutes on a
+// phone); set by the runtime (totk_shader_rt.m), nil in tests.
+static void (*totk_seed_progress)(int pass, NSUInteger done, NSUInteger total);
 // marker: a receipt in the cache that skips re-importing the same files; nil imports every time (fill packs).
 static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NSString *marker, NSError **error) {
     NSFileManager *fm = NSFileManager.defaultManager;
@@ -52,20 +57,50 @@ static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NS
         }
         if (installed) return @{@"available": @YES, @"shaders": m[@"shaders"], @"imported_files": @0};
         // Validate the complete source before changing any existing cache entry.
+        NSUInteger checked = 0;
         for (NSString *name in names) {
-            NSData *data = [NSData dataWithContentsOfFile:[source stringByAppendingPathComponent:name] options:0 error:error];
-            if (!data || ![totk_seed_hash(data) isEqual:files[name]]) { problem = @"Startup shader seed integrity check failed"; goto fail; }
+            @autoreleasepool {
+                NSData *data = [NSData dataWithContentsOfFile:[source stringByAppendingPathComponent:name] options:0 error:error];
+                if (!data || ![totk_seed_hash(data) isEqual:files[name]]) { problem = @"Startup shader seed integrity check failed"; goto fail; }
+            }
+            if (totk_seed_progress && (++checked % 256 == 0 || checked == names.count)) totk_seed_progress(0, checked, names.count);
         }
         if (![fm createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:error]) return nil;
-        NSUInteger imported = 0;
+        NSUInteger imported = 0, copied = 0;
         // Make shader files available before publishing their variant indexes.
         for (NSNumber *indexes in @[@NO, @YES]) for (NSString *name in names) {
             BOOL isIndex = [name hasSuffix:@".variants"];
             if (isIndex != indexes.boolValue) continue;
-            NSString *target = [cache stringByAppendingPathComponent:name];
-            NSData *data = [NSData dataWithContentsOfFile:[source stringByAppendingPathComponent:name] options:0 error:error];
+            if (totk_seed_progress && (++copied % 256 == 0 || copied == names.count)) totk_seed_progress(1, copied, names.count);
+            NSString *target = [cache stringByAppendingPathComponent:name], *from = [source stringByAppendingPathComponent:name];
+            if (!isIndex) {
+                if ([fm fileExistsAtPath:target]) {
+                    // Preserve shaders collected on this Mac. A device library (iOS) is only ever made from its source on
+                    // the Mac, so a different one is a rebuild, e.g. with safe math instead of Metal's default fast math.
+                    if (![name hasSuffix:@".metallib"]) continue;
+                    NSData *data = [NSData dataWithContentsOfFile:from options:0 error:error];
+                    if (!data) return nil;
+                    if ([[NSData dataWithContentsOfFile:target] isEqualToData:data]) continue;
+                }
+                // Clone, not read and write: the app bundle and the cache share an APFS volume, so tens of thousands of
+                // files cost metadata only (2026-10-19: reading and writing 44,744 took 59 s on an M4, two minutes on a
+                // phone). Another volume falls back to a copy. A temporary name and a rename keep a half-written file
+                // out of the cache.
+                NSString *temp = [target stringByAppendingFormat:@".%d.import", getpid()];
+                unlink(temp.fileSystemRepresentation);
+                if (clonefile(from.fileSystemRepresentation, temp.fileSystemRepresentation, 0) &&
+                    ![fm copyItemAtPath:from toPath:temp error:error]) return nil;
+                if (rename(temp.fileSystemRepresentation, target.fileSystemRepresentation)) {
+                    if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
+                    unlink(temp.fileSystemRepresentation);
+                    return nil;
+                }
+                imported++;
+                continue;
+            }
+            NSData *data = [NSData dataWithContentsOfFile:from options:0 error:error];
             if (!data) return nil;
-            if (isIndex) {
+            {
                 id seed = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:error];
                 NSData *existing = [NSData dataWithContentsOfFile:target];
                 id user = existing ? [NSJSONSerialization JSONObjectWithData:existing options:NSJSONReadingMutableContainers error:error] : nil;
@@ -84,10 +119,6 @@ static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NS
                 if (!changed) continue;
                 data = [NSJSONSerialization dataWithJSONObject:merged options:NSJSONWritingSortedKeys error:error];
                 if (!data) return nil;
-            } else if ([fm fileExistsAtPath:target]) {
-                // Preserve shaders collected on this Mac. A device library (iOS) is only ever made from its source on the
-                // Mac, so a different one is a rebuild, e.g. with safe math instead of Metal's default fast math.
-                if (![name hasSuffix:@".metallib"] || [[NSData dataWithContentsOfFile:target] isEqualToData:data]) continue;
             }
             if (![data writeToFile:target options:NSDataWritingAtomic error:error]) return nil;
             imported++;
