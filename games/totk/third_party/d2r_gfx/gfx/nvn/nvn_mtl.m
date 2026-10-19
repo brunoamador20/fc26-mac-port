@@ -9288,7 +9288,7 @@ static int mfxup_dock(__unsafe_unretained NvShader *fs) {
     if (!why && hv && ((cv->set_levels && cv->base_level) || (cv->set_layers && cv->min_layer))) why = 1;   // the canvas's own level 0 / layer 0 (its view names layer 0: still the whole texture)
     int tid = (int)(S.tex[1][0] & 0xfffff);
     id<MTLTexture> src = !why && tid > 0 ? (__bridge id<MTLTexture>)tex_fast(tid) : nil, dst = src ? attachment_texture(R.rt.color[0], cv, hv) : nil;
-    if (!why && (!src || !dst || src.textureType != MTLTextureType2D || dst.textureType != MTLTextureType2D || src.width >= dst.width || src.height >= dst.height)) why = 3;
+    if (!why && (!src || !dst || src.textureType != MTLTextureType2D || dst.textureType != MTLTextureType2D)) why = 3;
     if (!why && ((S.has_vp && !(S.vp[0][0] == 0 && S.vp[0][1] == 0 && S.vp[0][2] == (float)dst.width && S.vp[0][3] == (float)dst.height)) ||
                  !scissor_full(R.rt.color[0], cv, hv))) why = 4;
     NSUInteger cw = 0, ch = 0; float k[20] = {0}; uint32_t ow = 0, oh = 0;
@@ -9308,6 +9308,9 @@ static int mfxup_dock(__unsafe_unretained NvShader *fs) {
         MLOG("[mfx-up] 主机模式放大点 %.8s（%s）：源 %lux%lu（格式 %lu）→ 画布 %lux%lu（格式 %lu）；常量 con0 %g %g %g %g、输出 %ux%u → 有效区域 %lux%lu%s",
              fs->key, hdr ? "HDR" : "perceptual", (unsigned long)src.width, (unsigned long)src.height, (unsigned long)src.pixelFormat, (unsigned long)dst.width, (unsigned long)dst.height, (unsigned long)dst.pixelFormat,
              k[0], k[1], k[2], k[3], ow, oh, (unsigned long)cw, (unsigned long)ch, why ? "：常量不符，保留游戏自己的放大" : ""); } }
+    // the scene's content, not its texture, must be smaller than the canvas: a reused scene texture can be allocated
+    // larger than the content the game drew (dynamic resolution, a size changed while playing) (from PR #42)
+    if (!why && (cw >= dst.width || ch >= dst.height)) why = 3;
     if (why) {
         static int told[6]; if (!told[why]++)   // the first refusal of each kind, with what was seen
             MLOG("[mfx-up] 主机模式放大点 %.8s 不替换（原因 %d：1 目标 / 2 混合掩码深度 / 3 贴图 / 4 视口剪裁 / 5 常量）：附件 %d 个，视图 %d（级 %d:%u 层 %d:%u），"
