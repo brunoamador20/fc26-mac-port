@@ -171,6 +171,12 @@ NVN(nvnDeviceGetInteger, void, const NVNdevice *d, NVNdeviceInfo what, int *out)
     // 0x5F separate sampler binding count and 0x60/0x61 are not in the table measured on SMO: 0x5F is given 4096 per the sampler pool limit, unverified; 0x60/0x61 report a failure and return 0
     if (w >= sizeof g_devinfo / sizeof *g_devinfo) { die("unsupported NVN device property %#x", w); }
     *out = g_devinfo[w];
+    /* DM_NVN_GPU_CODE_MAX_MINOR (14..31): the newest GLSLC GPU code minor version accepted. The measured driver says 14;
+       Bayonetta 3 mixes 1.15, 1.16 and maybe newer binaries, and its runtime sets 31. TOTK keeps the measured value. */
+    if (w == NVN_DEVICE_INFO_GLSLC_MAX_SUPPORTED_GPU_CODE_MINOR_VERSION) {
+        const char *e = getenv("DM_NVN_GPU_CODE_MAX_MINOR");
+        if (e) { int v = atoi(e); if (v < 14 || v > 31) die("DM_NVN_GPU_CODE_MAX_MINOR must be 14..31"); *out = v; }
+    }
     OLOG("DeviceGetInteger %#x -> %d", w, *out);
 }
 /* Metal chooses fast-clear encodings itself; this backend has no programmable
@@ -268,6 +274,11 @@ NVN(nvnTexturePoolRegisterTexture, void, const NVNtexturePool *tp, int id, const
     totk_life_reg(id, (const tex_t *)t);
     mtl_reg_tex(id, (const tex_t *)t, (const view_t *)v); }
 
+// Images and textures share one registration here (an image handle is the texture pool index, nvnDeviceGetImageHandle),
+// so registering an image is registering the texture. TOTK never calls it; Bayonetta 3 does.
+NVN(nvnTexturePoolRegisterImage, void, const NVNtexturePool *tp, int id, const NVNtexture *t, const NVNtextureView *v) {
+    h_nvnTexturePoolRegisterTexture(tp, id, t, v);
+}
 NVN(nvnSamplerPoolInitialize, NVNboolean, NVNsamplerPool *sp, const NVNmemoryPool *p, ptrdiff_t off, int n) {
     *(dpool_t *)sp = (dpool_t){(const pool_t *)p, off, n}; OLOG("SamplerPool n=%d", n); return 1;
 }
@@ -576,6 +587,9 @@ static int sync_chain_left(int k) {
     if (lim == -2) { const char *e = getenv("TOTK_SYNC_CHAIN"); lim = e ? atoi(e) : 0; from = e && strchr(e, ':') ? strtoull(strchr(e, ':') + 1, NULL, 10) : 0; }
     return lim > 0 && g_frame >= from && atomic_fetch_add(&used[k], 1) < lim;
 }
+// A queue waiting on a sync: replay runs every queue's work in submission order on the single Metal queue, so the work
+// that signals the sync has already been replayed (as nvnCommandBufferWaitSync). TOTK never calls it; Bayonetta 3 does.
+NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) { (void)q; (void)s; return 1; }
 NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; (void)f; int tok; uint64_t v = fence_now(&tok); ((sync_t *)s)->fenced = tok ? 5 : 1; ((sync_t *)s)->fence = v;
     if (sync_chain_left(0)) { char w[96]; snprintf(w, sizeof w, "FenceSync sync=%p fence=%llu cond=%d flags=%d", (void *)s, (unsigned long long)v, (int)c, f); guest_chain(w); } }
 // 没围栏过的同步对象按真机行为等到超时；已围栏的只在 GPU 真正完成到该栅栏值后放行
@@ -1036,6 +1050,17 @@ NVN(nvnCommandBufferCopyBufferToBuffer, void, NVNcommandBuffer *c, NVNbufferAddr
     (void)flags;
     uint8_t *p = cmd_alloc(CB(c), 32); put_hdr(p, OP_COPY_B2B, 32); uint64_t nn = n;
     memcpy(p + 8, &src, 8); memcpy(p + 16, &dst, 8); memcpy(p + 24, &nn, 8);
+}
+// Buffer clear (Bayonetta 3; TOTK never calls it): recorded as an inline buffer write of the 32-bit value repeated, so it
+// takes the uniform-update path on the GPU timeline (ordering with draws and copies included). The recording grows by the
+// cleared size; a dedicated fill op would avoid that. Command memory used counts a short pushbuffer method, like other ops.
+NVN(nvnCommandBufferClearBuffer, void, NVNcommandBuffer *c, NVNbufferAddress buf, size_t n, uint32_t value) {
+    if (n % 4 || n > (64u << 20)) die("ClearBuffer of %zu bytes", n);
+    uint32_t sz = (uint32_t)(24 + n);
+    uint8_t *p = cmd_alloc(CB(c), sz); put_hdr(p, OP_UPDATE_UB, (sz + 7) & ~7u);
+    uint64_t dst = buf, nn = n; memcpy(p + 8, &dst, 8); memcpy(p + 16, &nn, 8);
+    for (size_t k = 0; k < n; k += 4) memcpy(p + 24 + k, &value, 4);
+    hw_fix(CB(c), 24);
 }
 // uniform 更新：数据在录制时拷进命令内存（NVN 语义：录制后调用方可改原数据），提交时写进缓冲
 // uniform update: the data is copied into command memory at record time (NVN semantics: the caller may modify the original data after recording) and written into the buffer at submit
@@ -2043,6 +2068,9 @@ static const char *const g_nops[] = {
     "nvnCommandBufferSetShaderScratchMemory",
     "nvnCommandBufferWaitEvent",
     "nvnWindowFinalize",
+    // Bayonetta 3: Maxwell colour reduction is a framebuffer bandwidth optimisation that does not change what is drawn.
+    "nvnCommandBufferSetColorReductionEnable",
+    "nvnCommandBufferSetColorReductionThresholds",
 };
 __attribute__((constructor)) static void nvn_nops_register(void) {
     // 空实现在槽表初始化后覆盖未实现桩；名字写错（不在 main 名字表里）启动即报红中止

@@ -120,6 +120,10 @@ __attribute__((constructor)) static void register_system_services(void) {
     /* Bayonetta 3 makes one 1348 MiB NVN memory pool at start; the shared graphics layer refuses zero-copy GPU buffers
        above 1 GiB unless told otherwise (nvn_mtl.m pool_buffer_max). A value the user set wins. */
     setenv("DM_POOL_BUFFER_MAX_MIB", "2048", 0);
+    /* Its shader binaries mix GLSLC GPU code versions (1.15 and 1.16 seen first); the graphics layer's measured driver
+       table stops at 1.14. The layer reads only three control-section fields (code length, stage, compute group size)
+       and stops on implausible values, so a newer layout would show at once. */
+    setenv("DM_NVN_GPU_CODE_MAX_MINOR", "31", 0);
     runtime_ipc_register("set", settings_handler, NULL, NULL);
     runtime_ipc_register("bsd:u", bsd_handler, NULL, NULL);
 }
