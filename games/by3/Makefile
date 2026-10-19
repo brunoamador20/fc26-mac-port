@@ -108,5 +108,13 @@ app: runtime shader-tools $(OUT)/launcher $(OUT)/AppIcon.icns
 	codesign --force --sign - "$(APP)"
 	@echo "built $(APP) (game data stay in $(abspath $(WORK)))"
 
+# Install the (small) app where Launchpad and Spotlight look: /Applications, or ~/Applications when that is not writable.
+INSTALL_DIR ?= $(shell [ -w /Applications ] && echo /Applications || echo $(HOME)/Applications)
+.PHONY: install
+install: app
+	mkdir -p "$(INSTALL_DIR)" && rm -rf "$(INSTALL_DIR)/$(APP)" && cp -R "$(APP)" "$(INSTALL_DIR)/"
+	/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$(INSTALL_DIR)/$(APP)"
+	@echo "installed $(INSTALL_DIR)/$(APP)"
+
 clean:
 	rm -rf "$(OUT)/obj" "$(OUT)/by3-native"

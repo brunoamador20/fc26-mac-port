@@ -280,3 +280,21 @@ Open:
 - Controllers: supported by the host; not yet tried with this game.
 
 Commits: `e0c96a0` (graphics: title screen), `2706d98` (sound, patches, pacing, full screen), `ae8c86a` (app, HUD).
+
+### 2026-10-19: stage 5, launcher options (monitor, output, MetalFX), installed app
+
+- `make install` copies the small app to /Applications (or ~/Applications) and registers it with LaunchServices, so
+  Launchpad and Spotlight find it. Settings are saved at every change and synchronised before the launcher execs the
+  game (the exec could drop unsynchronised preferences).
+- Monitor choice (`BY3_DISPLAY`, the window placed and centred on that `NSScreen`; full screen opens there), remembered
+  by the monitor's name. Full-screen output resolution: native, or a 16:9 height that fits (`TOTK_DRAWABLE_SCALE`).
+- MetalFX spatial upscaling of the game's frame to the output (`TOTK_MFX_UPSCALE` / `TOTK_MFX_OUTPUT`, the TotK output
+  stage, generic: colour only): 1600x900 -> 3356x1880 at 0.86 ms GPU; on a 3840x2160 240 Hz monitor in full screen,
+  1600x900 -> 3840x2160 at about 120 fps with the 120 Hz base and the 60 fps patch. MetalFX frame interpolation is not
+  available: it needs TotK's scene/UI split, G-buffer depth and camera block, which Bayonetta's engine lays out
+  differently.
+- Internal resolution: `scripts/make_res_patch.py W H` writes `patches/res-WxH.tsv` (display size by mode, NVN window,
+  largest render size, the 7 dynamic-resolution render targets and table; each site checked). 1600x900 works (the
+  launcher's fixed 900p now uses it). 1920x1080 and 2560x1440 stop in the game's render setup (`main+0x69de80`): a
+  texture creation fails (`main+0x69ea3c`, half the largest render size), most likely the game's fixed render-target
+  heap; 1280x720 also fails. Open: find and enlarge that heap.

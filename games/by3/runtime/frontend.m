@@ -212,7 +212,10 @@ void runtime_front_run(void(*callback)(void)){
   runtime_gamepad_start();
   /* Default window: the docked output size, 1920x1080, scaled down (16:9 kept) when the screen's visible area is smaller. */
   /* TOTK_WINDOW_SIZE=<w>x<h> (test scripts only, e.g. the 2K output test; the desktop launcher never sets it): another starting size. */
-  NSRect vis=NSScreen.mainScreen?NSScreen.mainScreen.visibleFrame:NSMakeRect(0,0,1920,1080+28);CGFloat ww=1920,wh=1080;
+  /* BY3_DISPLAY=<n> (the launcher's monitor choice): NSScreen.screens[n] holds the window, and full screen opens there. */
+  NSScreen *screen=NSScreen.mainScreen;
+  {const char *d=getenv("BY3_DISPLAY");NSArray<NSScreen *> *all=NSScreen.screens;if(d&&*d){unsigned long i=strtoul(d,NULL,10);if(i<all.count)screen=all[i];}}
+  NSRect vis=screen?screen.visibleFrame:NSMakeRect(0,0,1920,1080+28);CGFloat ww=1920,wh=1080;
   {const char *e=getenv("TOTK_WINDOW_SIZE");int w=0,h=0;if(e&&sscanf(e,"%dx%d",&w,&h)==2&&w>=320&&h>=180&&w<=8192&&h<=8192){ww=w;wh=h;}}
   CGFloat k=fmin(1,fmin(vis.size.width/ww,(vis.size.height-28)/wh));ww=floor(ww*k);wh=floor(wh*k);
   window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,ww,wh) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
@@ -244,7 +247,9 @@ void runtime_front_run(void(*callback)(void)){
   [window.contentView addSubview:shortcutHelp positioned:NSWindowBelow relativeTo:bootOverlay];
   [(TOTKShortcutHelp *)shortcutHelp position];
   /* The FPS, shader and load lines: in the corner panel above (compact HUD), or with TOTK_HUD=corners drawn into the game picture's corners by the present encoder (gfx/nvn/fps_overlay.c). */
-  [window makeFirstResponder:window.contentView];[window center];front_sync_drawable();
+  [window makeFirstResponder:window.contentView];
+  {NSRect f=window.frame;f.origin.x=NSMidX(vis)-f.size.width/2;f.origin.y=NSMidY(vis)-f.size.height/2;[window setFrame:f display:NO];}   /* centred on the chosen screen */
+  front_sync_drawable();
   if(assume_focus()){[window orderFrontRegardless];}else{[window makeKeyAndOrderFront:nil];[NSApp activateIgnoringOtherApps:YES];}   /* in front of other apps' windows, keyboard left alone */
   /* BY3_FULLSCREEN=1 (the launcher's "Full screen"): macOS full screen from the start; the green button or ⌃⌘F leaves it. */
   {const char *fs=getenv("BY3_FULLSCREEN");if(fs&&!strcmp(fs,"1"))dispatch_async(dispatch_get_main_queue(),^{if(!(window.styleMask&NSWindowStyleMaskFullScreen))[window toggleFullScreen:nil];});}
