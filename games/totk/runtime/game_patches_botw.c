@@ -1,11 +1,132 @@
-/* Breath of the Wild game-code patches (botw.md). None yet: the game runs as shipped. The functions the shared runtime
-   calls (frame step, output size, key 3 / key 4) answer "not available" until BotW's own sites are found. */
+/* Breath of the Wild game-code patches (botw.md): exclusive loads with acquire, the real-time frame step, and the
+   TOTK_JQ_CHECK diagnostics. The functions the shared runtime calls for the output size and keys 3 / 4 answer
+   "not available" until BotW's own sites are found. */
+#include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include "game_patches.h"
 #include "game_version.h"
 
-void runtime_frame_step_pin(double ms) { (void)ms; }
-void runtime_frame_step_update(uint64_t now_ns) { (void)now_ns; }
+/* Real-time frame step (TOTK_REALTIME=0: as shipped). ksys::VFR (singleton pointer main+0x2d1e170, built at main+0x183eb98)
+   keeps one frame ratio at +0x3c: the frame's length in 30 fps frames. Every per-core step the game reads derives from it:
+   delta frames (+0x108, about 1,500 readers) = time-speed multiplier x ratio, delta time (+0x138) = that x 1/30 s (+0x158).
+   The per-frame update main+0x1c01180 sets the ratio from the present interval (interval / 2: 1.0 at the shipped 30 fps)
+   and writes +0x3c only when it changes, so the game ran at twice its speed at 60 fps. Two of its instructions now take the
+   ratio from the loader's data page after main, which the host refreshes at each present with the measured frame time x 30
+   (the page layout of Tears of the Kingdom's patch: low float ratio, high float seconds):
+     main+0x1c0120c  fcmp s1, s0       -> adrp x9, <data page>
+     main+0x1c01214  b.eq #0x1c01220   -> ldr s1, [x9]
+   and the store of s1 to +0x3c after them now runs every frame. The interval bookkeeping (+0x28 changed, +0x30 / +0x34
+   interval ratio and interval, +0x38 / +0x40 previous) stays as shipped.
+   One more reader steps by the interval itself instead of the ratio: a fade (0 -> 1 in 5 frames at 30 fps; main+0x1821548
+   reads the VFR's interval, +0x48 per core) adds max(interval, 1) x 0.5 x 0.2 per frame. It now adds ratio x 0.2, the
+   same value at the shipped 30 fps:
+     main+0x1821568  ldr w8, [x8]               -> adrp x8, <data page>
+     main+0x182156c  cmp w8, #0                 -> ldr s0, [x8]
+     main+0x1821570  csinc w8, w8, wzr, ne      -> nop
+     main+0x1821574  ucvtf s0, w8               -> nop
+     main+0x1821588  fmul s0, s0, s11 (x 0.5)   -> nop
+   (x8 is reloaded two instructions later, the flags are not read again.) MacNativeGames games/botw/scripts/
+   verify_realtime_patch.py runs both with Unicorn. */
+static _Atomic uint64_t *frame_step_data;
+static uint8_t *frame_step_main;
+static uint64_t last_present_ns, report_ns, report_frames;
+static double frame_samples[5], report_seconds;
+static unsigned frame_sample_count, frame_sample_next;
+static _Atomic uint32_t pinned_step_us;
+enum { VFR_INSTANCE = 0x2d1e170, VFR_RATIO = 0x3c, VFR_DELTA_TIME = 0x138 };
+
+static int realtime_enabled(void) { const char *e = getenv("TOTK_REALTIME"); return !(e && !strcmp(e, "0")); }
+static uint64_t frame_step_bits(float seconds) {
+    float ratio = seconds * 30.0f; uint32_t lo, hi;
+    memcpy(&lo, &ratio, 4); memcpy(&hi, &seconds, 4);
+    return (uint64_t)lo | ((uint64_t)hi << 32);
+}
+/* Diagnostics (TOTK_INPUT_FILE "framestep <ms>"): pin the frame step to a fixed length, 0 back to real time. */
+void runtime_frame_step_pin(double ms) {
+    uint32_t us = ms > 0 ? (uint32_t)(ms * 1000.0 + 0.5) : 0;
+    atomic_store(&pinned_step_us, us);
+    if (frame_step_data && us) atomic_store_explicit(frame_step_data, frame_step_bits((float)(us / 1e6)), memory_order_release);
+    if (!us) fprintf(stderr, "[botw] frame step back to real time\n");
+    else fprintf(stderr, "[botw] frame step pinned at %.3f ms (ratio %.3f, diagnostics)%s\n", us / 1000.0, us / 1e6 * 30.0,
+                 frame_step_data ? "" : " -- but the real-time patch is off, nothing changes");
+}
+/* Every 30 s one line with what the game actually reads: the VFR's ratio and core 0's delta time. */
+static void frame_step_report(uint64_t now_ns) {
+    if (!report_ns) { report_ns = now_ns; return; }
+    if (now_ns - report_ns < 30000000000ull) return;
+    float ratio = -1, delta = -1;
+    uint64_t vfr = *(const uint64_t *)(const void *)(frame_step_main + VFR_INSTANCE);
+    if (vfr) {
+        memcpy(&ratio, (const void *)(uintptr_t)(vfr + VFR_RATIO), 4);
+        uint64_t p = *(const uint64_t *)(uintptr_t)(vfr + VFR_DELTA_TIME);
+        if (p) memcpy(&delta, (const void *)(uintptr_t)p, 4);
+    }
+    double span = (double)(now_ns - report_ns) * 1e-9;
+    fprintf(stderr, "[botw] real-time frame step: %llu frames in %.1f s (%.1f fps, frames %.2f ms apart on average)%s; "
+                    "the game's VFR ratio %.3f, delta time %.2f ms\n", (unsigned long long)report_frames, span,
+            report_frames / span, report_frames ? report_seconds / report_frames * 1e3 : 0,
+            atomic_load(&pinned_step_us) ? ", step pinned" : "", ratio, delta * 1e3);
+    report_ns = now_ns; report_frames = 0; report_seconds = 0;
+}
+void runtime_frame_step_update(uint64_t now_ns) {
+    if (!frame_step_data || !now_ns) return;
+    frame_step_report(now_ns);
+    uint64_t prev = last_present_ns;
+    last_present_ns = now_ns;
+    if (!prev) return;
+    double dt = (double)(now_ns - prev) * 1e-9;
+    if (dt > 0.25 || dt < 0.001) { frame_sample_count = frame_sample_next = 0; return; }
+    report_frames++; report_seconds += dt;
+    if (atomic_load_explicit(&pinned_step_us, memory_order_relaxed)) return;
+    if (dt < 1.0 / 120.0) dt = 1.0 / 120.0;
+    if (dt > 1.0 / 15.0) dt = 1.0 / 15.0;
+    frame_samples[frame_sample_next++ % 5] = dt;
+    if (frame_sample_count < 5) frame_sample_count++;
+    double sum = 0;
+    for (unsigned i = 0; i < frame_sample_count; i++) sum += frame_samples[i];
+    atomic_store_explicit(frame_step_data, frame_step_bits((float)(sum / frame_sample_count)), memory_order_release);
+}
+static uint32_t adrp_reg(unsigned rd, uint64_t site, uint64_t target) {
+    int64_t pages = (int64_t)(target >> 12) - (int64_t)(site >> 12);
+    if (pages < -(1 << 20) || pages >= (1 << 20)) runtime_fail("real-time frame-step data outside ADRP range");
+    uint32_t imm = (uint32_t)pages & 0x1fffff;
+    return 0x90000000u | ((imm & 3u) << 29) | ((imm >> 2) << 5) | (rd & 31u);
+}
+static void patch_realtime(Module *m) {
+    /* The loader reserved a writable page immediately after main's image; nothing else uses it in this game. */
+    uint64_t data_off = (m->file_size + 0x3fff) & ~0x3fffULL;
+    if (data_off + 0x4000 != m->size || data_off & 0xfff) runtime_fail("real-time frame-step page layout");
+    /* Every word of both sequences, the replaced ones and their neighbours, must be the 1.6.0 original. */
+    static const struct { uint32_t off, original; } check[] = {
+        {0x1c0120cu, 0x1e202020u}, {0x1c01210u, 0x3900a008u}, {0x1c01214u, 0x54000060u}, {0x1c01218u, 0xbd003c01u},
+        {0x1821564u, 0xf9400108u}, {0x1821568u, 0xb9400108u}, {0x182156cu, 0x7100011fu}, {0x1821570u, 0x1a9f1508u},
+        {0x1821574u, 0x1e230100u}, {0x1821578u, 0x1e2c100bu}, {0x182157cu, 0xb0006f68u}, {0x1821580u, 0xbd409109u},
+        {0x1821584u, 0xbd435ee1u}, {0x1821588u, 0x1e2b0800u}, {0x182158cu, 0x1e290800u},
+    };
+    for (size_t i = 0; i < sizeof check / sizeof *check; i++) {
+        uint32_t w; memcpy(&w, m->base + check[i].off, 4);
+        if (w != check[i].original) {
+            fprintf(stderr, "[botw] real-time frame step main+%#x: found %08x expected %08x\n", check[i].off, w, check[i].original);
+            runtime_fail("real-time frame step requires the 1.6.0 VFR update instructions");
+        }
+    }
+    const uint64_t page = (uintptr_t)m->base + data_off;
+    const uint32_t nop = 0xd503201fu;
+    const struct { uint32_t off, word; } put[] = {
+        {0x1c0120cu, adrp_reg(9, (uintptr_t)m->base + 0x1c0120c, page)}, {0x1c01214u, 0xbd400121u},   /* ldr s1, [x9] */
+        {0x1821568u, adrp_reg(8, (uintptr_t)m->base + 0x1821568, page)}, {0x182156cu, 0xbd400100u},   /* ldr s0, [x8] */
+        {0x1821570u, nop}, {0x1821574u, nop}, {0x1821588u, nop},
+    };
+    for (size_t i = 0; i < sizeof put / sizeof *put; i++) memcpy(m->base + put[i].off, &put[i].word, 4);
+    frame_step_main = m->base;
+    frame_step_data = (_Atomic uint64_t *)(void *)(m->base + data_off);
+    atomic_store(frame_step_data, frame_step_bits(1.0f / 30.0f));
+    fprintf(stderr, "[botw] real-time frame step: the VFR ratio and one interval-stepped fade follow the measured frame time "
+                    "(%zu instructions, %zu verified); initial 33.33 ms, sampled at each present (TOTK_REALTIME=0: as shipped)\n",
+            sizeof put / sizeof *put, sizeof check / sizeof *check);
+}
 /* Diagnostics (TOTK_JQ_CHECK=1): random crashes look like one job run twice (two threads in the same skinning job, a list
    item consumed twice). brk instructions replace a few instructions of sead::JobQueue::run (main+0x12c0dc0) and of the
    worker manager's wake (main+0x13a0150) and sync (main+0x13a03d0); the SIGTRAP handler (loader.c crash -> botw_jq_hook)
@@ -56,7 +177,9 @@ static unsigned excl_acquire(uint8_t *code, size_t n) {
     return done;
 }
 void runtime_game_patches(Module *m) {
-    fprintf(stderr, "[botw] %s: no game-code patches\n", TOTK_GAME_VERSION);
+    fprintf(stderr, "[botw] %s game-code patches\n", TOTK_GAME_VERSION);
+    if (realtime_enabled()) patch_realtime(m);
+    else fprintf(stderr, "[botw] real-time frame step off (TOTK_REALTIME=0): the game advances by its present interval\n");
     { const char *a = getenv("TOTK_EXCL_ACQUIRE");
       if (!a || strcmp(a, "0")) {
           unsigned t = excl_acquire(m->base, m->text_end), p = excl_acquire(m->base + m->patch_off, m->file_size - m->patch_off);
