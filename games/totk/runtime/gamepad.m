@@ -32,7 +32,8 @@ static void load_controller_map(void) {
     text[n] = 0;
     const char *error = NULL; int line = controller_map_parse(text, controllerMap, controllerModes, &error);
     if (line) { fprintf(stderr, "[totk-input] %s line %d: %s\n", path, line, error); runtime_fail("controller layout file"); }
-    int changed = 0; for (int i = 0; i < CONTROLLER_BUTTONS; i++) changed += controllerMap[i] != (uint16_t)(1u << i);
+    uint16_t defaults[CONTROLLER_BUTTONS]; uint8_t defaultModes[CONTROLLER_BUTTONS]; controller_map_default(defaults, defaultModes);
+    int changed = 0; for (int i = 0; i < CONTROLLER_BUTTONS; i++) changed += controllerMap[i] != defaults[i];
     fprintf(stderr, "[totk-input] controller layout: %s (%d buttons changed)\n", path, changed);
 }
 
@@ -68,6 +69,8 @@ static uint64_t gamepad_buttons(GCExtendedGamepad *pad) {
     if (pad.dpad.up.isPressed) buttons |= 1ULL << 13;
     if (pad.dpad.right.isPressed) buttons |= 1ULL << 14;
     if (pad.dpad.down.isPressed) buttons |= 1ULL << 15;
+    if ([pad isKindOfClass:GCDualSenseGamepad.class] && ((GCDualSenseGamepad *)pad).touchpadButton.isPressed) buttons |= 1ULL << 16;
+    if ([pad isKindOfClass:GCDualShockGamepad.class] && ((GCDualShockGamepad *)pad).touchpadButton.isPressed) buttons |= 1ULL << 16;
     return buttons;
 }
 

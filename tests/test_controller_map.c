@@ -46,7 +46,10 @@ int main(void) {
     expect(mode_of("south = b tap extra\n", 0, &line) == -1 && line == 1, "two modes");
     expect(mode_of("south = b turbo\n", 0, &line) == -1 && line == 1, "unknown mode");
     expect(mode_of("menu = none tap\n", 10, &line) == -1 && line == 1, "none takes no mode");
-    expect(mode_of("l2 = zr aim r2\n", 8, &line) == (CONTROLLER_AIM | 9 << 4) && !line, "aim with its fire button");
+    expect(mode_of("l2 = zr aim r2\n", 8, &line) == (CONTROLLER_AIM | 9 << 3) && !line, "aim with its fire button");
+    expect(mode_of("l2 = zr aim touchpad\n", 8, &line) == (CONTROLLER_AIM | 16 << 3) && controller_mode_fire((uint8_t)(CONTROLLER_AIM | 16 << 3)) == 16 && !line, "the touchpad as a fire button");
+    expect(press("", 1ULL << 16, &line) == 0 && !line, "the touchpad drives nothing by default");
+    expect(press("touchpad = minus\n", 1ULL << 16, &line) == (1ULL << 11) && !line, "the touchpad opens the Purah Pad");
     expect(mode_of("l2 = zr aim\n", 8, &line) == -1 && line == 1, "aim without a fire button");
     expect(mode_of("l2 = zr aim l2\n", 8, &line) == -1 && line == 1, "aim fired by itself");
     expect(mode_of("l2 = zr aim r2 extra\n", 8, &line) == -1 && line == 1, "aim with an extra word");

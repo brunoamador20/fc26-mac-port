@@ -1,13 +1,14 @@
 /* Controller button layout: each physical button of a Mac controller (named by its position, the same on a DualSense and an
-   Xbox controller) drives one Switch Pro Controller button, or none. Physical button i is FullKey bit i of the default
-   layout, so the default map is the identity: south -> A, east -> B, west -> X, north -> Y, as macOS names them.
+   Xbox controller) drives one Switch Pro Controller button, or none. Physical button i < 16 is FullKey bit i of the default
+   layout, so the default map is the identity: south -> A, east -> B, west -> X, north -> Y, as macOS names them. The
+   touchpad click (DualSense, DualShock 4) is physical button 16 and drives nothing by default.
    A layout file has one "physical = switch [mode]" line per change; '#' starts a comment; names are case-insensitive;
    "none" leaves a button unused; lines not given keep the default. The optional mode says how long the Switch button is
    held: "hold" (default) while the physical button is down, "tap" for 400 ms after each press (tap again to keep
    running), "toggle" on and off at each press (cleared when the stick returns to center), "aim <fire button>" while
    the button is down, except while the fire button is also down (hold L2 to draw the bow, press R2 to shoot it; the
-   fire button's own line applies only while the aim button is up). A mode byte keeps the kind in its low 4 bits and,
-   for aim, the fire button's index in its high 4 bits.
+   fire button's own line applies only while the aim button is up). A mode byte keeps the kind in its low 3 bits and,
+   for aim, the fire button's index in its high 5 bits.
    Pure C: app/launcher.m checks the file before the game starts (an alert names the bad line), runtime/gamepad.m
    applies it, tests/test_controller_map.c covers the parser. */
 #ifndef TOTK_CONTROLLER_MAP_H
@@ -16,23 +17,24 @@
 #include <string.h>
 #include <strings.h>
 
-enum { CONTROLLER_BUTTONS = 16 };
+enum { CONTROLLER_BUTTONS = 17, CONTROLLER_SWITCH_BUTTONS = 16 };
 static const char *const controller_physical_names[CONTROLLER_BUTTONS] = {
-    "south", "east", "west", "north", "l3", "r3", "l1", "r1", "l2", "r2", "menu", "view", "left", "up", "right", "down"};
-static const char *const controller_switch_names[CONTROLLER_BUTTONS] = {
+    "south", "east", "west", "north", "l3", "r3", "l1", "r1", "l2", "r2", "menu", "view", "left", "up", "right", "down",
+    "touchpad"};
+static const char *const controller_switch_names[CONTROLLER_SWITCH_BUTTONS] = {
     "a", "b", "x", "y", "lstick", "rstick", "l", "r", "zl", "zr", "plus", "minus", "left", "up", "right", "down"};
 
 enum { CONTROLLER_HOLD = 0, CONTROLLER_TAP = 1, CONTROLLER_TOGGLE = 2, CONTROLLER_AIM = 3 };
-static inline int controller_mode_kind(uint8_t mode) { return mode & 15; }
-static inline int controller_mode_fire(uint8_t mode) { return mode >> 4; }
+static inline int controller_mode_kind(uint8_t mode) { return mode & 7; }
+static inline int controller_mode_fire(uint8_t mode) { return mode >> 3; }
 
 static inline void controller_map_default(uint16_t map[CONTROLLER_BUTTONS], uint8_t modes[CONTROLLER_BUTTONS]) {
-    for (int i = 0; i < CONTROLLER_BUTTONS; i++) { map[i] = (uint16_t)(1u << i); modes[i] = CONTROLLER_HOLD; }
+    for (int i = 0; i < CONTROLLER_BUTTONS; i++) { map[i] = i < CONTROLLER_SWITCH_BUTTONS ? (uint16_t)(1u << i) : 0; modes[i] = CONTROLLER_HOLD; }
 }
 
-/* Index of name [s, s + n) in names, or -1. */
-static inline int controller_name_index(const char *const names[CONTROLLER_BUTTONS], const char *s, size_t n) {
-    for (int i = 0; i < CONTROLLER_BUTTONS; i++)
+/* Index of name [s, s + n) in the count names, or -1. */
+static inline int controller_name_index(const char *const names[], int count, const char *s, size_t n) {
+    for (int i = 0; i < count; i++)
         if (strlen(names[i]) == n && !strncasecmp(names[i], s, n)) return i;
     return -1;
 }
@@ -60,10 +62,10 @@ static inline int controller_map_parse(const char *text, uint16_t map[CONTROLLER
             while (value_end < stop && *value_end != ' ' && *value_end != '\t') value_end++;
             for (const char *q = value_end; q < stop; q++) if (*q != ' ' && *q != '\t') { mode = q; break; }
             if (mode) { mode_end = mode; while (mode_end < stop && *mode_end != ' ' && *mode_end != '\t') mode_end++; }
-            int physical = controller_name_index(controller_physical_names, p, (size_t)(key_end - p));
-            if (physical < 0) { *error = "unknown controller button (south east west north l1 r1 l2 r2 l3 r3 menu view up down left right)"; return line; }
+            int physical = controller_name_index(controller_physical_names, CONTROLLER_BUTTONS, p, (size_t)(key_end - p));
+            if (physical < 0) { *error = "unknown controller button (south east west north l1 r1 l2 r2 l3 r3 menu view up down left right touchpad)"; return line; }
             size_t n = (size_t)(value_end - value);
-            int target = n == 4 && !strncasecmp(value, "none", 4) ? CONTROLLER_BUTTONS : controller_name_index(controller_switch_names, value, n);
+            int target = n == 4 && !strncasecmp(value, "none", 4) ? CONTROLLER_SWITCH_BUTTONS : controller_name_index(controller_switch_names, CONTROLLER_SWITCH_BUTTONS, value, n);
             if (target < 0) { *error = "unknown Switch button (a b x y l r zl zr plus minus lstick rstick up down left right none)"; return line; }
             uint8_t how = CONTROLLER_HOLD;
             if (mode) {
@@ -76,16 +78,16 @@ static inline int controller_map_parse(const char *text, uint16_t map[CONTROLLER
                 const char *extra = mode_end; while (extra < stop && (*extra == ' ' || *extra == '\t')) extra++;
                 if (how == CONTROLLER_AIM) {
                     const char *fire_end = extra; while (fire_end < stop && *fire_end != ' ' && *fire_end != '\t') fire_end++;
-                    int fire = extra < stop ? controller_name_index(controller_physical_names, extra, (size_t)(fire_end - extra)) : -1;
+                    int fire = extra < stop ? controller_name_index(controller_physical_names, CONTROLLER_BUTTONS, extra, (size_t)(fire_end - extra)) : -1;
                     if (fire < 0) { *error = "aim needs a fire button, e.g. \"l2 = zr aim r2\""; return line; }
                     if (fire == physical) { *error = "the fire button must be another button"; return line; }
-                    how = (uint8_t)(CONTROLLER_AIM | fire << 4);
+                    how = (uint8_t)(CONTROLLER_AIM | fire << 3);
                     extra = fire_end; while (extra < stop && (*extra == ' ' || *extra == '\t')) extra++;
                 }
                 if (extra < stop) { *error = "too many words after the Switch button"; return line; }
-                if (target == CONTROLLER_BUTTONS && how != CONTROLLER_HOLD) { *error = "none takes no mode"; return line; }
+                if (target == CONTROLLER_SWITCH_BUTTONS && how != CONTROLLER_HOLD) { *error = "none takes no mode"; return line; }
             }
-            next[physical] = target == CONTROLLER_BUTTONS ? 0 : (uint16_t)(1u << target);
+            next[physical] = target == CONTROLLER_SWITCH_BUTTONS ? 0 : (uint16_t)(1u << target);
             nextMode[physical] = how;
         }
         p = end ? end + 1 : NULL;
