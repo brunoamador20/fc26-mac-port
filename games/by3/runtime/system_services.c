@@ -128,6 +128,11 @@ __attribute__((constructor)) static void register_system_services(void) {
     /* Bayonetta 3 makes one 1348 MiB NVN memory pool at start; the shared graphics layer refuses zero-copy GPU buffers
        above 1 GiB unless told otherwise (nvn_mtl.m pool_buffer_max). A value the user set wins. */
     setenv("DM_POOL_BUFFER_MAX_MIB", "2048", 0);
+    /* Present pacing as on the Switch: a 60 Hz base, the game's present interval on top (1 = 60 fps, 2 = 30 fps). The
+       TotK host follows the display (120 Hz on ProMotion) and runs uncapped, which relies on TotK's real-time frame step
+       patch; without it a game that advances per frame would run twice as fast. */
+    setenv("DM_PRESENT_HZ", "60", 0);
+    setenv("TOTK_UNCAPPED", "0", 0);
     /* Its shader binaries mix GLSLC GPU code versions (1.15 and 1.16 seen first); the graphics layer's measured driver
        table stops at 1.14. The layer reads only three control-section fields (code length, stage, compute group size)
        and stops on implausible values, so a newer layout would show at once. */

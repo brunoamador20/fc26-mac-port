@@ -1,10 +1,12 @@
-/* audout:u — nn::audio AudioOut, which Bayonetta 3's Wwise uses (TOTK only uses the audio renderer, audren:u).
-   Commands and layouts follow the public switchbrew description ("Audio services": IAudioOutManager, IAudioOut).
-   Stage 1 of this service: buffers are consumed at real time and given back, but not heard yet; a playback thread
-   holds each buffer for its duration (samples / rate), releases it and signals the buffer event, so the game's audio
-   thread runs at the speed it would on the console. Sending the samples to Core Audio is the next step. */
+/* audout:u — nn::audio AudioOut, which Bayonetta 3's Wwise uses for its final mix (TOTK only uses the audio renderer,
+   audren:u). Commands and layouts follow the public switchbrew description ("Audio services": IAudioOutManager, IAudioOut).
+   Each AudioOut is a Core Audio AudioQueue: an appended buffer's samples are copied and enqueued; when the device has
+   played it, the queue's callback gives the buffer back (GetReleasedAudioOutBuffers) and signals the buffer event, so
+   the game is paced by the real output. 5.1 output is mixed down to stereo (Switch order FL FR FC LFE BL BR).
+   BY3_AUDIO=0 keeps the silent real-time sink (each buffer held for its duration) for tests without a sound device. */
 #include "runtime.h"
 #include "ipc.h"
+#include <AudioToolbox/AudioToolbox.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,36 +18,69 @@ typedef struct { uint64_t next, sample_buffer, capacity, data_size, data_offset;
 _Static_assert(sizeof(AudioOutBuffer) == 0x28, "AudioOutBuffer");
 typedef struct { uint64_t tag, bytes; } Queued;
 typedef struct {
-    pthread_mutex_t lock; pthread_t thread; int running;
+    pthread_mutex_t lock; pthread_t thread; int running, silent;
     uint32_t rate, channels, state, event; float volume;
+    AudioQueueRef aq;
     Queued queue[QUEUE_MAX]; unsigned nqueue;          /* appended, not yet played (head first) */
     uint64_t released[QUEUE_MAX]; unsigned nreleased;  /* played, not yet collected by GetReleasedAudioOutBuffers */
     uint64_t played_samples;
 } AudioOut;
 
 static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
-static void *playback(void *arg) {
+static void need(int ok, const char *what) { if (!ok) runtime_fail(what); }
+
+/* The head of the queue has been played: hand its tag back. Called with the lock held. */
+static void release_head(AudioOut *o) {
+    if (!o->nqueue) return;
+    const Queued head = o->queue[0];
+    memmove(o->queue, o->queue + 1, (--o->nqueue) * sizeof *o->queue);
+    if (o->nreleased < QUEUE_MAX) o->released[o->nreleased++] = head.tag;
+    o->played_samples += head.bytes / (2ull * o->channels);
+}
+static void played(void *user, AudioQueueRef q, AudioQueueBufferRef b) {   /* Core Audio thread */
+    AudioOut *o = user;
+    pthread_mutex_lock(&o->lock); release_head(o); pthread_mutex_unlock(&o->lock);
+    AudioQueueFreeBuffer(q, b);
+    runtime_event_signal(o->event);
+}
+static void *silent_playback(void *arg) {
     AudioOut *o = arg; uint64_t due = 0;
     for (;;) {
         pthread_mutex_lock(&o->lock);
         if (!o->running) { pthread_mutex_unlock(&o->lock); return NULL; }
         uint64_t now = now_ns();
-        if (o->state == STATE_STARTED && o->nqueue && o->nreleased < QUEUE_MAX) {
-            const Queued head = o->queue[0];
-            uint64_t samples = head.bytes / (2ull * o->channels);
-            if (!due) due = now + samples * 1000000000ull / o->rate;
-            if (now >= due) {
-                memmove(o->queue, o->queue + 1, (--o->nqueue) * sizeof *o->queue);
-                o->released[o->nreleased++] = head.tag; o->played_samples += samples; due = 0;
-                pthread_mutex_unlock(&o->lock); runtime_event_signal(o->event); continue;
-            }
+        if (o->state == STATE_STARTED && o->nqueue) {
+            if (!due) due = now + o->queue[0].bytes / (2ull * o->channels) * 1000000000ull / o->rate;
+            if (now >= due) { release_head(o); due = 0; pthread_mutex_unlock(&o->lock); runtime_event_signal(o->event); continue; }
         } else due = 0;
         pthread_mutex_unlock(&o->lock);
         struct timespec ts = {0, 1000000}; nanosleep(&ts, NULL);
     }
 }
+static void open_device(AudioOut *o) {
+    const char *e = getenv("BY3_AUDIO");
+    o->silent = e && !strcmp(e, "0");
+    if (!o->silent) {
+        AudioStreamBasicDescription f = {.mSampleRate = o->rate, .mFormatID = kAudioFormatLinearPCM,
+            .mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked, .mBytesPerPacket = 4, .mFramesPerPacket = 1,
+            .mBytesPerFrame = 4, .mChannelsPerFrame = 2, .mBitsPerChannel = 16};
+        OSStatus s = AudioQueueNewOutput(&f, played, o, NULL, kCFRunLoopCommonModes, 0, &o->aq);
+        if (s) { fprintf(stderr, "[totk-audio] AudioOut: no Core Audio output (%d); continuing silent\n", (int)s); o->silent = 1; }
+    }
+    if (o->silent) need(pthread_create(&o->thread, NULL, silent_playback, o) == 0, "AudioOut playback thread");
+}
+/* Interleaved PCM16 of the client's layout -> stereo PCM16 (the queue's format). */
+static void to_stereo(const int16_t *in, int16_t *out, uint64_t frames, uint32_t channels) {
+    for (uint64_t i = 0; i < frames; i++) {
+        const int16_t *s = in + i * channels;
+        if (channels == 2) { out[2 * i] = s[0]; out[2 * i + 1] = s[1]; continue; }
+        if (channels == 1) { out[2 * i] = out[2 * i + 1] = s[0]; continue; }
+        float c = s[2] * 0.7071f, l = s[0] + c + s[4] * 0.7071f, r = s[1] + c + s[5] * 0.7071f;   /* ITU-style 5.1 downmix, LFE left out */
+        l *= 0.5f; r *= 0.5f;
+        out[2 * i] = (int16_t)(l > 32767 ? 32767 : l < -32768 ? -32768 : l); out[2 * i + 1] = (int16_t)(r > 32767 ? 32767 : r < -32768 ? -32768 : r);
+    }
+}
 
-static void need(int ok, const char *what) { if (!ok) runtime_fail(what); }
 static const IpcBuffer *in_buffer(const IpcRequest *rq) { return rq->na && rq->a[0].size ? &rq->a[0] : rq->nx && rq->x[0].size ? &rq->x[0] : NULL; }
 static const IpcBuffer *out_buffer(const IpcRequest *rq, int *pointer) {
     if (rq->nb && rq->b[0].size) { *pointer = 0; return &rq->b[0]; }
@@ -56,10 +91,19 @@ static void append(AudioOut *o, const IpcRequest *rq) {
     const IpcBuffer *b = in_buffer(rq); need(b && b->size >= sizeof(AudioOutBuffer), "AppendAudioOutBuffer descriptor");
     AudioOutBuffer d; memcpy(&d, ipc_guest(b->addr, sizeof d), sizeof d);
     uint64_t tag = IPC_ARG(rq, uint64_t, 0);
+    need(d.data_offset + d.data_size <= d.capacity || !d.capacity, "AudioOut buffer bounds");
     pthread_mutex_lock(&o->lock);
     need(o->nqueue < QUEUE_MAX, "AudioOut queue full");
     o->queue[o->nqueue++] = (Queued){tag, d.data_size};
     pthread_mutex_unlock(&o->lock);
+    if (o->silent) return;
+    uint64_t frames = d.data_size / (2ull * o->channels);
+    AudioQueueBufferRef qb;
+    need(AudioQueueAllocateBuffer(o->aq, (UInt32)(frames * 4 ? frames * 4 : 4), &qb) == 0, "AudioOut queue buffer");
+    to_stereo(ipc_guest(d.sample_buffer + d.data_offset, d.data_size), qb->mAudioData, frames, o->channels);
+    qb->mAudioDataByteSize = (UInt32)(frames * 4);
+    if (!frames) { memset(qb->mAudioData, 0, 4); qb->mAudioDataByteSize = 4; }   /* an empty buffer still has to come back */
+    need(AudioQueueEnqueueBuffer(o->aq, qb, 0, NULL) == 0, "AudioOut enqueue");
 }
 static void released(AudioOut *o, const IpcRequest *rq, IpcResponse *rs) {
     int pointer; const IpcBuffer *b = out_buffer(rq, &pointer); need(b != NULL, "GetReleasedAudioOutBuffers buffer");
@@ -72,12 +116,16 @@ static void released(AudioOut *o, const IpcRequest *rq, IpcResponse *rs) {
     if (pointer) rs->xout[rs->nxout++] = (IpcBuffer){b->addr, (uint64_t)n * 8, 0};
     IPC_OUT(rs, n);
 }
+static void set_state(AudioOut *o, uint32_t state) {
+    pthread_mutex_lock(&o->lock); o->state = state; pthread_mutex_unlock(&o->lock);
+    if (o->aq) { if (state == STATE_STARTED) AudioQueueStart(o->aq, NULL); else AudioQueuePause(o->aq); }
+}
 static void audio_out_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
     AudioOut *o = s->state;
     switch (rq->cmd) {
     case 0: { uint32_t v = o->state; IPC_OUT(rs, v); return; }                                   /* GetAudioOutState */
-    case 1: pthread_mutex_lock(&o->lock); o->state = STATE_STARTED; pthread_mutex_unlock(&o->lock); return;   /* Start */
-    case 2: pthread_mutex_lock(&o->lock); o->state = STATE_STOPPED; pthread_mutex_unlock(&o->lock); return;   /* Stop */
+    case 1: set_state(o, STATE_STARTED); return;                                                /* Start */
+    case 2: set_state(o, STATE_STOPPED); return;                                                /* Stop */
     case 3: case 7: append(o, rq); return;                                                     /* AppendAudioOutBuffer(Auto) */
     case 4: rs->copy[rs->ncopy++] = runtime_event_readable(o->event); return;                   /* RegisterBufferEvent */
     case 5: case 8: released(o, rq, rs); return;                                               /* GetReleasedAudioOutBuffers(Auto) */
@@ -90,14 +138,15 @@ static void audio_out_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *
     }
     case 9: { pthread_mutex_lock(&o->lock); uint32_t v = o->nqueue; pthread_mutex_unlock(&o->lock); IPC_OUT(rs, v); return; }   /* GetAudioOutBufferCount */
     case 10: { pthread_mutex_lock(&o->lock); uint64_t v = o->played_samples; pthread_mutex_unlock(&o->lock); IPC_OUT(rs, v); return; }   /* GetAudioOutPlayedSampleCount */
-    case 11: {                                                                                  /* FlushAudioOutBuffers: queued ones count as released */
+    case 11: {                                                                                  /* FlushAudioOutBuffers */
         pthread_mutex_lock(&o->lock); uint8_t any = o->nqueue != 0;
-        for (unsigned i = 0; i < o->nqueue && o->nreleased < QUEUE_MAX; i++) o->released[o->nreleased++] = o->queue[i].tag;
-        o->nqueue = 0; pthread_mutex_unlock(&o->lock);
+        while (o->nqueue) release_head(o);
+        pthread_mutex_unlock(&o->lock);
+        if (o->aq) AudioQueueReset(o->aq);   /* its callbacks then find nothing left to release */
         if (any) runtime_event_signal(o->event);
         IPC_OUT(rs, any); return;
     }
-    case 12: o->volume = IPC_ARG(rq, float, 0); return;                                         /* SetAudioOutVolume */
+    case 12: o->volume = IPC_ARG(rq, float, 0); if (o->aq) AudioQueueSetParameter(o->aq, kAudioQueueParam_Volume, o->volume); return;   /* SetAudioOutVolume */
     case 13: { float v = o->volume; IPC_OUT(rs, v); return; }                                   /* GetAudioOutVolume */
     default: ipc_unimplemented(s, rq);
     }
@@ -105,7 +154,9 @@ static void audio_out_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *
 static void audio_out_close(void *p) {
     AudioOut *o = p;
     pthread_mutex_lock(&o->lock); o->running = 0; pthread_mutex_unlock(&o->lock);
-    pthread_join(o->thread, NULL); pthread_mutex_destroy(&o->lock); free(o);
+    if (o->aq) AudioQueueDispose(o->aq, true);
+    if (o->silent) pthread_join(o->thread, NULL);
+    pthread_mutex_destroy(&o->lock); free(o);
 }
 
 static const char device_name[] = "DeviceOut";
@@ -129,11 +180,11 @@ static void manager_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs
         AudioOut *o = calloc(1, sizeof *o); need(o != NULL, "AudioOut allocation");
         pthread_mutex_init(&o->lock, NULL); o->rate = rate; o->channels = channels; o->state = STATE_STOPPED; o->volume = 1.0f;
         o->event = runtime_event_new(); o->running = 1;
-        need(pthread_create(&o->thread, NULL, playback, o) == 0, "AudioOut playback thread");
+        open_device(o);
         write_name(rq, rs);
         uint32_t out[4] = {rate, channels, FORMAT_PCM16, STATE_STOPPED}; ipc_out(rs, out, sizeof out);
         rs->move[rs->nmove++] = runtime_ipc_new_session("IAudioOut", audio_out_handler, o, audio_out_close);
-        fprintf(stderr, "[totk-audio] AudioOut open %u Hz x%u PCM16 (consumed at real time, not heard yet)\n", rate, channels);
+        fprintf(stderr, "[totk-audio] AudioOut open %u Hz x%u PCM16 -> %s\n", rate, channels, o->silent ? "silent sink" : "Core Audio (stereo)");
         return;
     }
     default: ipc_unimplemented(s, rq);
