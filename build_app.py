@@ -108,6 +108,14 @@ def prerequisites(args):
         raise BuildError(f'needs macOS 26 or later (Metal 4); this is macOS {platform.mac_ver()[0]}')
     if subprocess.run(['xcrun', '--find', 'clang'], capture_output=True).returncode:
         raise BuildError('the Xcode command line tools are missing: xcode-select --install')
+    # SPIRV-Cross is C++: without the SDK's libc++ headers the build stops much later at "'string' file not found" (#41)
+    cxx = subprocess.run(['xcrun', 'clang++', '-std=c++11', '-x', 'c++', '-fsyntax-only', '-'], input='#include <string>\n',
+                         capture_output=True, text=True)
+    if cxx.returncode:
+        raise BuildError('clang++ finds no C++ standard library headers, so the developer tools or their SDK are incomplete. '
+                         'With Xcode: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer; with the command line '
+                         'tools only: sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install '
+                         f'(xcode-select -p and xcrun --show-sdk-path show what is used). clang++ said: {cxx.stderr.strip()[:300]}')
     brew = Path('/opt/homebrew')
     missing = [p for p in ('opus', 'libvpx') if not (brew / 'opt' / p / 'lib').is_dir()]
     if missing:
