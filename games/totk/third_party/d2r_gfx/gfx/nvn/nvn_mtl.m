@@ -22,6 +22,7 @@
 #include "../tex/nvn_deswizzle.h"
 #include "../tex/nvn_deswizzle_gpu.h"
 #include "totk_shader_rt.h"
+#include "totk_serial_set.h"
 #include "totk_mfx.h"
 #include "totk_mfx_up.h"
 #include "totk_sysload.h"
@@ -2145,18 +2146,18 @@ static void ser_bump(uint64_t serial) { pthread_mutex_lock(&g_smu); ser_bump_loc
    stored it under the serial, where nothing ever deleted it: about 4.6 textures (~18 MB) leaked per frame, the
    residency set grew without bound and the GPU driver ran out of wired memory (kernel panics). A texture created
    for a dead serial is now deleted again when the submission that used it completes. */
-static nvn_hmap g_dead_serial = {.klen = 8};   // serial -> (void *)1 once finalized
+static totk_serial_set g_dead_serial;   // serial -> (void *)1 once finalized
 /* TOTK: serials the GPU has rendered into. A mirrored (CPU-pool) texture that the game then uses as a render target is owned by
    the GPU from that point: dirty-page re-uploads from the (stale) pool memory would wipe the rendered content. */
-static nvn_hmap g_gpu_owned = {.klen = 8};
+static totk_serial_set g_gpu_owned;
 static _Atomic uint64_t g_owned_gen = 1;   // TOTK: bumped whenever a serial joins g_gpu_owned (entries are never removed)
 static void pkg_owned_locked(uint64_t k);
-static void gpu_owned_mark(uint64_t k) { pthread_mutex_lock(&g_smu); int had = nvn_hm_get(&g_gpu_owned, &k) != NULL; if (!had) { nvn_hm_put(&g_gpu_owned, &k, (void *)1); atomic_fetch_add(&g_owned_gen, 1); pkg_owned_locked(k); } pthread_mutex_unlock(&g_smu);
+static void gpu_owned_mark(uint64_t k) { pthread_mutex_lock(&g_smu); int had = totk_serial_has(&g_gpu_owned, k); if (!had) { totk_serial_add(&g_gpu_owned, k); atomic_fetch_add(&g_owned_gen, 1); pkg_owned_locked(k); } pthread_mutex_unlock(&g_smu);
 }
-static int gpu_owned(uint64_t k) { pthread_mutex_lock(&g_smu); int d = nvn_hm_get(&g_gpu_owned, &k) != NULL; pthread_mutex_unlock(&g_smu); return d; }
+static int gpu_owned(uint64_t k) { pthread_mutex_lock(&g_smu); int d = totk_serial_has(&g_gpu_owned, k); pthread_mutex_unlock(&g_smu); return d; }
 
 static uint64_t *g_dead_put; static int g_dead_put_n, g_dead_put_cap; static uint64_t g_dead_put_total;
-static int serial_is_dead(uint64_t k) { pthread_mutex_lock(&g_smu); int d = nvn_hm_get(&g_dead_serial, &k) != NULL; pthread_mutex_unlock(&g_smu); return d; }
+static int serial_is_dead(uint64_t k) { pthread_mutex_lock(&g_smu); int d = totk_serial_has(&g_dead_serial, k); pthread_mutex_unlock(&g_smu); return d; }
 static void dead_put_note(uint64_t k) {
     pthread_mutex_lock(&g_smu);
     if (g_dead_put_n == g_dead_put_cap) { g_dead_put_cap = g_dead_put_cap ? g_dead_put_cap * 2 : 256; g_dead_put = realloc(g_dead_put, g_dead_put_cap * sizeof *g_dead_put); if (!g_dead_put) MDIE("dead-serial list"); }
@@ -3439,8 +3440,9 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     int live = 0, peak = 0, cap = 0; nvn_dirty_stat(&live, &peak, &cap);
     MLOG("内存 至帧 %llu：常驻 %llu MB，显卡已分配 %llu MB，延迟释放队列 %lu，驻留集 %lu 个，内存池 %d 个（峰值 %d / 跟踪表容量 %d），贴图重传累计 %llu 次", frame, rss_mb, gpu, nd, nr, live, peak, cap, (unsigned long long)g_pkg_reuploads);
     MLOG("已死序号纹理累计 %llu 张（替换前即为泄漏来源）", (unsigned long long)g_dead_put_total);
-    pthread_mutex_lock(&g_smu); unsigned dead_n = g_dead_serial.n, owned_n = g_gpu_owned.n; pthread_mutex_unlock(&g_smu);
-    MLOG("序号表：已销毁 %u 个，GPU 画过 %u 个（两张表都只增不减，见 mtl_dead_forget）", dead_n, owned_n);
+    pthread_mutex_lock(&g_smu); uint64_t dead_n = g_dead_serial.n, owned_n = g_gpu_owned.n;
+    uint64_t serial_bytes = g_dead_serial.bytes + g_gpu_owned.bytes, serial_pages = g_dead_serial.pages + g_gpu_owned.pages; pthread_mutex_unlock(&g_smu);
+    MLOG("[serial-history] dead=%llu owned=%llu pages=%llu bytes=%llu; exact paged bitmaps, no full-table rehash", (unsigned long long)dead_n, (unsigned long long)owned_n, (unsigned long long)serial_pages, (unsigned long long)serial_bytes);
     pthread_mutex_lock(&g_smu); int ndet = g_stor_ndet; pthread_mutex_unlock(&g_smu);
     MLOG("可压缩贴图跨格式换主 %llu 次（其中换回原贴图 %llu 次），暂存旧登记 %d 个（TOTK_COMPRESSED_ALIAS=1 恢复跨格式共用）", (unsigned long long)g_stor_handover, (unsigned long long)g_stor_taken_back, ndet);
     MLOG("共享存储贴图：条目 %llu，共用 %llu 次，格式视图 %llu 次，重建 %llu 次，闲置回收 %llu，随内存池释放 %llu", (unsigned long long)g_stor_entries, (unsigned long long)g_stor_shared, (unsigned long long)g_stor_viewed, (unsigned long long)g_stor_recreated, (unsigned long long)g_stor_swept, (unsigned long long)g_stor_dropped);
@@ -3467,7 +3469,7 @@ uint64_t mtl_pkg_miss(void) { return g_pkg_miss; }
 void mtl_tex_release(tex_t *t) {
     if (!t->serial) return;
     serial_del(t->serial);
-    pthread_mutex_lock(&g_smu); nvn_hm_put(&g_dead_serial, &t->serial, (void *)1); ser_bump_locked(t->serial); pthread_mutex_unlock(&g_smu);   // view caches of this serial look again (dead-serial follow)
+    pthread_mutex_lock(&g_smu); totk_serial_add(&g_dead_serial, t->serial); ser_bump_locked(t->serial); pthread_mutex_unlock(&g_smu);   // view caches of this serial look again (dead-serial follow)
     treg_drop_serial(t->serial);
 }
 /* TOTK (2026-10-17): not yet. A finalized serial must stay remembered while a texture-pool slot still names it: tex_by_id
@@ -11921,6 +11923,15 @@ void mtl_args_stats(uint64_t *enc, uint64_t *reuse) { *enc = g_stat_args_enc; *r
     if (frame && !(frame % 300) && frame != logged) { logged = frame;
         MLOG("[drv-cache] hit=%llu miss=%llu verified=%llu", (unsigned long long)g_driver_hit, (unsigned long long)g_driver_miss, (unsigned long long)g_driver_check);
         MLOG("[texture-plan] enabled=%d total=%llu selected=%llu verified=%llu", texture_plan_on(), (unsigned long long)g_texture_plan_total, (unsigned long long)g_texture_plan_selected, (unsigned long long)g_texture_plan_verified);
+        if (!(frame % 3000)) {
+            pthread_mutex_lock(&g_smu);
+            uint64_t bytes = g_dead_serial.bytes + g_gpu_owned.bytes, pages = g_dead_serial.pages + g_gpu_owned.pages;
+            uint64_t dead = g_dead_serial.n, owned = g_gpu_owned.n;
+            pthread_mutex_unlock(&g_smu);
+            MLOG("[serial-history] frame=%llu dead=%llu owned=%llu pages=%llu bytes=%llu",
+                (unsigned long long)frame, (unsigned long long)dead, (unsigned long long)owned,
+                (unsigned long long)pages, (unsigned long long)bytes);
+        }
     }
 }
 void mtl_use_stats(uint64_t *call, uint64_t *skip) { *call = 0; *skip = 0; }
