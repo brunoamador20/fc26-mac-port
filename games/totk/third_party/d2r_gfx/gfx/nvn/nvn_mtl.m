@@ -10625,7 +10625,7 @@ void mtl_shot_at_present(const tex_t *t) {
         if (src) { mtl_finish_gpu(); shot(src, g_shotq[i].path, 1, NULL); MLOG("[shot] F%ld %s", cur, g_shotq[i].path); } else MLOG("【红】截图：出图纹理不可用，丢弃 %s", g_shotq[i].path);
         g_shotq[i] = g_shotq[--g_nshotq];
     } else i++;
-    pthread_mutex_unlock(&g_shotq_mu);
+    BOTW_ASHOT_POLL(t, cur) pthread_mutex_unlock(&g_shotq_mu);
     if (!nshot) return;
     for (int i = 0; i < nshot; i++) if (!done[i] && cur >= shots[i]) {
         done[i] = 1; id<MTLTexture> src = tex_mtl(t); if (!src) { MLOG("【红】截图：出图纹理不可用"); continue; }
@@ -13472,3 +13472,62 @@ int mtl_probe_arg_epoch(void) {
 
 #include "nvn_pool_retire_probe.h"
 #include "nvn_cube_group_probe.h"
+#ifdef GAME_BOTW
+/* "ashot <path>" (botw.md, game-speed checks; at the end of the file so TOTK's line numbers stay as they were): the next
+   game frame like "shot", but only the read-back runs on the game's present thread (wait for the GPU, one blit: a few
+   ms); the picture is scaled to 480 wide and written as PNG on a background queue, so a sequence of them barely moves the
+   frame timing, and it is taken whether the window is visible or not. The log line "[ashot] F<frame> t=<ns> <path> ok"
+   carries the frame's present time (CLOCK_UPTIME_RAW), which the alignment uses instead of when the command was read
+   (the command file is polled every 100 ms). */
+static struct { uint64_t frame; char path[1024]; } g_ashotq[SHOTQ_MAX]; static int g_nashotq;
+void dm_gfx_ashot(const char *path) {
+    pthread_mutex_lock(&g_shotq_mu);
+    if (g_nashotq < SHOTQ_MAX) { g_ashotq[g_nashotq].frame = atomic_load(&g_cur_frame) + 1; strlcpy(g_ashotq[g_nashotq].path, path, sizeof g_ashotq[0].path); g_nashotq++; }
+    else MLOG("【红】ashot 请求超过 %d 个，丢弃 %s", SHOTQ_MAX, path);
+    pthread_mutex_unlock(&g_shotq_mu);
+}
+static void ashot_take(id<MTLTexture> src, const char *path, long frame) { @autoreleasepool {
+    uint64_t t = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    MTLPixelFormat pf = src.pixelFormat;
+    if (pf != MTLPixelFormatRGBA8Unorm && pf != MTLPixelFormatRGBA8Unorm_sRGB && pf != MTLPixelFormatBGRA8Unorm && pf != MTLPixelFormatBGRA8Unorm_sRGB) {
+        MLOG("【红】ashot：不支持格式 %lu", (unsigned long)pf); return;
+    }
+    size_t w = src.width, h = src.height, row = w * 4;
+    id<MTLBuffer> buf = [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared];
+    mtl_finish_gpu();
+    id<MTLCommandBuffer> cb = q_cb();
+    id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+    [b copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
+              toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row * h];
+    [b endEncoding]; cb_commit(cb); cb_wait(cb);
+    NSData *pixels = [NSData dataWithBytes:buf.contents length:row * h];
+    int bgra = pf == MTLPixelFormatBGRA8Unorm || pf == MTLPixelFormatBGRA8Unorm_sRGB;
+    char *p = strdup(path);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool {
+        CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+        CGBitmapInfo bi = bgra ? (kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little) : (CGBitmapInfo)kCGImageAlphaNoneSkipLast;
+        CGDataProviderRef dp = CGDataProviderCreateWithCFData((__bridge CFDataRef)pixels);
+        CGImageRef img = dp ? CGImageCreate(w, h, 8, 32, row, cs, bi, dp, NULL, false, kCGRenderingIntentDefault) : NULL;
+        size_t ow = 480, oh = h * ow / (w ? w : 1);
+        CGContextRef small = img ? CGBitmapContextCreate(NULL, ow, oh, 8, 0, cs, kCGImageAlphaNoneSkipLast) : NULL;
+        CGImageRef out = NULL;
+        if (small) { CGContextSetInterpolationQuality(small, kCGInterpolationMedium); CGContextDrawImage(small, CGRectMake(0, 0, ow, oh), img); out = CGBitmapContextCreateImage(small); }
+        CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)p, (CFIndex)strlen(p), false);
+        CGImageDestinationRef dst = url && out ? CGImageDestinationCreateWithURL(url, (__bridge CFStringRef)UTTypePNG.identifier, 1, NULL) : NULL;
+        int ok = 0;
+        if (dst) { CGImageDestinationAddImage(dst, out, NULL); ok = CGImageDestinationFinalize(dst); CFRelease(dst); }
+        if (url) CFRelease(url);
+        CGImageRelease(out); CGContextRelease(small); CGImageRelease(img); if (dp) CGDataProviderRelease(dp); CGColorSpaceRelease(cs);
+        MLOG("[ashot] F%ld t=%llu %s %s", frame, (unsigned long long)t, p, ok ? "ok" : "failed");
+        free(p);
+    } });
+} }
+void botw_ashot_poll(const void *tv, long cur) {
+    const tex_t *t = tv;
+    for (int i = 0; i < g_nashotq;) if ((uint64_t)cur >= g_ashotq[i].frame) {
+        id<MTLTexture> src = tex_mtl(t);
+        if (src) ashot_take(src, g_ashotq[i].path, cur); else MLOG("【红】ashot：出图纹理不可用，丢弃 %s", g_ashotq[i].path);
+        g_ashotq[i] = g_ashotq[--g_nashotq];
+    } else i++;
+}
+#endif

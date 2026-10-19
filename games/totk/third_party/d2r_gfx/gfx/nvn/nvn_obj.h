@@ -148,11 +148,15 @@ static inline int rt_dup_of(const p_set_rt *r, int i) {
 #define BOTW_RT_DUP_PREDICT(r, cf) { for (int i_ = 1; i_ < (r)->n && i_ < 8; i_++) if (rt_dup_of(r, i_) >= 0) (cf)[i_] = 0; }
 /* a clear of a slot left unattached: clear the slot holding the same image */
 #define BOTW_RT_DUP_CLEAR_TO_FIRST(c) p_clear_color botw_to_first_; { int f_ = rt_dup_of(&R.rt, (c)->index); if (f_ >= 0) { botw_to_first_ = *(c); botw_to_first_.index = f_; (c) = &botw_to_first_; } }
+/* "ashot <path>" requests (end of nvn_mtl.m), taken at the game's present call with the screenshot queue lock held */
+void botw_ashot_poll(const void *t, long cur);
+#define BOTW_ASHOT_POLL(t, cur) botw_ashot_poll((t), (cur));
 #else
 #define BOTW_RT_DUP_CLEARS()
 #define BOTW_RT_DUP_SKIP(i)
 #define BOTW_RT_DUP_PREDICT(r, cf)
 #define BOTW_RT_DUP_CLEAR_TO_FIRST(c)
+#define BOTW_ASHOT_POLL(t, cur)
 #endif
 typedef struct { float depth; int32_t depth_mask, stencil, stencil_mask; } p_clear_ds;
 typedef struct { int32_t first, n; float v[16][6]; } p_viewports;          // x, y, w, h, 近, 远（近远由 DEPTH_RANGE 覆盖） | x, y, w, h, near, far (near and far are overridden by DEPTH_RANGE)

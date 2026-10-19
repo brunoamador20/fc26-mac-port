@@ -32,8 +32,8 @@
 static _Atomic uint64_t *frame_step_data;
 static uint8_t *frame_step_main;
 static uint64_t last_present_ns, report_ns, report_frames;
-static double frame_samples[5], report_seconds;
-static unsigned frame_sample_count, frame_sample_next;
+static double frame_samples[5], report_seconds, report_game, report_short_ms, report_long_ms;
+static unsigned frame_sample_count, frame_sample_next, report_short, report_long;
 static _Atomic uint32_t pinned_step_us;
 enum { VFR_INSTANCE = 0x2d1e170, VFR_RATIO = 0x3c, VFR_DELTA_TIME = 0x138 };
 
@@ -52,7 +52,9 @@ void runtime_frame_step_pin(double ms) {
     else fprintf(stderr, "[botw] frame step pinned at %.3f ms (ratio %.3f, diagnostics)%s\n", us / 1000.0, us / 1e6 * 30.0,
                  frame_step_data ? "" : " -- but the real-time patch is off, nothing changes");
 }
-/* Every 30 s one line with what the game actually reads: the VFR's ratio and core 0's delta time. */
+/* Every 30 s one line: frames and their real time, the game time the steps added up to, what the game actually reads (the
+   VFR's ratio and core 0's delta time), and the intervals outside 1/120..1/15 s with what clamping each of them on its own
+   would have added or dropped. */
 static void frame_step_report(uint64_t now_ns) {
     if (!report_ns) { report_ns = now_ns; return; }
     if (now_ns - report_ns < 30000000000ull) return;
@@ -64,11 +66,14 @@ static void frame_step_report(uint64_t now_ns) {
         if (p) memcpy(&delta, (const void *)(uintptr_t)p, 4);
     }
     double span = (double)(now_ns - report_ns) * 1e-9;
-    fprintf(stderr, "[botw] real-time frame step: %llu frames in %.1f s (%.1f fps, frames %.2f ms apart on average)%s; "
-                    "the game's VFR ratio %.3f, delta time %.2f ms\n", (unsigned long long)report_frames, span,
-            report_frames / span, report_frames ? report_seconds / report_frames * 1e3 : 0,
-            atomic_load(&pinned_step_us) ? ", step pinned" : "", ratio, delta * 1e3);
-    report_ns = now_ns; report_frames = 0; report_seconds = 0;
+    char game[96];
+    if (atomic_load(&pinned_step_us)) snprintf(game, sizeof game, "step pinned");
+    else snprintf(game, sizeof game, "steps add up to %.2f s (%.4f of the frames' time)", report_game, report_seconds > 0 ? report_game / report_seconds : 0);
+    fprintf(stderr, "[botw] real-time frame step: %llu frames in %.1f s (%.1f fps, %.2f ms apart on average), %s; the game's VFR ratio "
+                    "%.3f, delta time %.2f ms; %u intervals under 1/120 s (clamping each: +%.0f ms), %u over 1/15 s (-%.0f ms)\n",
+            (unsigned long long)report_frames, span, report_frames / span, report_frames ? report_seconds / report_frames * 1e3 : 0, game,
+            ratio, delta * 1e3, report_short, report_short_ms, report_long, report_long_ms);
+    report_ns = now_ns; report_frames = 0; report_seconds = report_game = report_short_ms = report_long_ms = 0; report_short = report_long = 0;
 }
 void runtime_frame_step_update(uint64_t now_ns) {
     if (!frame_step_data || !now_ns) return;
@@ -79,14 +84,22 @@ void runtime_frame_step_update(uint64_t now_ns) {
     double dt = (double)(now_ns - prev) * 1e-9;
     if (dt > 0.25 || dt < 0.001) { frame_sample_count = frame_sample_next = 0; return; }
     report_frames++; report_seconds += dt;
+    if (dt < 1.0 / 120.0) { report_short++; report_short_ms += (1.0 / 120.0 - dt) * 1e3; }
+    if (dt > 1.0 / 15.0) { report_long++; report_long_ms += (dt - 1.0 / 15.0) * 1e3; }
     if (atomic_load_explicit(&pinned_step_us, memory_order_relaxed)) return;
-    if (dt < 1.0 / 120.0) dt = 1.0 / 120.0;
-    if (dt > 1.0 / 15.0) dt = 1.0 / 15.0;
+    /* The raw intervals are averaged and the average is clamped, not each interval: at about 95 fps under the 120 Hz
+       clock, intervals shorter than 1/120 s alternate with longer ones, and raising each short one to 1/120 s made the
+       game run 6% fast (measured: botw.md). Averaged, the steps add up to the real time while the average stays inside
+       1/120..1/15 s; a hitch is spread over the next frames instead of being cut. */
     frame_samples[frame_sample_next++ % 5] = dt;
     if (frame_sample_count < 5) frame_sample_count++;
     double sum = 0;
     for (unsigned i = 0; i < frame_sample_count; i++) sum += frame_samples[i];
-    atomic_store_explicit(frame_step_data, frame_step_bits((float)(sum / frame_sample_count)), memory_order_release);
+    double step = sum / frame_sample_count;
+    if (step < 1.0 / 120.0) step = 1.0 / 120.0;
+    if (step > 1.0 / 15.0) step = 1.0 / 15.0;
+    report_game += step;
+    atomic_store_explicit(frame_step_data, frame_step_bits((float)step), memory_order_release);
 }
 static uint32_t adrp_reg(unsigned rd, uint64_t site, uint64_t target) {
     int64_t pages = (int64_t)(target >> 12) - (int64_t)(site >> 12);
