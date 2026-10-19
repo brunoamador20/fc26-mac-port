@@ -445,7 +445,10 @@ int runtime_module_offset(uint64_t pc,const char **name,uint64_t *off) {
 }
 uintptr_t runtime_frame_controller_return_pc(void) {
 #ifdef TOTK_GAME_V143
- return 0; /* The older graphics diagnostic reads the pre-1.4 controller layout. */
+ /* The older graphics diagnostic reads the pre-1.4 controller layout. The survey only needs the system object (caller's x19
+    at x29 + 0x38, same frame as 1.2.1) for its frame-end fence, so 1.4.3 finds it only while TOTK_SURVEY is on. */
+ const char *survey=getenv("TOTK_SURVEY");
+ return survey&&!strcmp(survey,"1")?(uintptr_t)modules[0].base+GAME_ADDR(0x8f6cbc):0;
 #else
  return (uintptr_t)modules[0].base + GAME_ADDR(0x8f6cbc);
 #endif
