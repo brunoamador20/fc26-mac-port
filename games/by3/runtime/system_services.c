@@ -88,6 +88,12 @@ static void execute_program(int index, const void *param, uint64_t size) {
     (void)param; fprintf(stderr, "[totk] nn::oe::ExecuteProgram(%d, %llu bytes)\n", index, (unsigned long long)size);
     runtime_fail("the game asked to start its program index 1 (title 01004A4010FEA001), which is not supported yet");
 }
+/* Open users kept across a program jump (PushOpenUsers before ExecuteProgram, PopOpenUsers in the next program). A
+   fresh start has none; the game then opens its user the usual way (runtime/account.c). */
+static void push_open_users(void) {}
+static uint32_t pop_open_users(int32_t *count, void *handles, int32_t max) {
+    (void)handles; (void)max; if (!count) runtime_fail("PopOpenUsers count pointer"); *count = 0; return 0;
+}
 void *runtime_by3_override(const char *name) {
     static const struct { const char *name; void *fn; } entries[] = {
         {"_ZN2nn2oe13MuteRecordingEv", nop}, {"_ZN2nn2oe15UnmuteRecordingEv", nop},
@@ -111,6 +117,8 @@ void *runtime_by3_override(const char *name) {
         {"_ZN2nn3nsd24GetEnvironmentIdentifierEPNS0_21EnvironmentIdentifierE", environment_identifier},
         {"_ZN2nn5prepo10InitializeEv", nop},
         {"_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", nop},
+        {"_ZN2nn7account13PushOpenUsersEv", push_open_users},
+        {"_ZN2nn7account12PopOpenUsersEPiPNS0_10UserHandleEi", pop_open_users},
     };
     for (size_t i = 0; i < sizeof entries / sizeof *entries; i++) if (!strcmp(name, entries[i].name)) return entries[i].fn;
     return NULL;

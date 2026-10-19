@@ -41,6 +41,26 @@ $(OUT)/by3-native: $(RUNTIME_SRC) $(RUNTIME_HEADERS) $(GENERATED) $(GFX_OBJECTS)
 
 runtime: $(OUT)/by3-native
 
+# The runtime shader translation the graphics layer starts on first use: <work>/build/shader-service/totk_xlate (the
+# repository's prebuilt NativeAOT translator, checked against its SHA-256) and <work>/build/spirv-cross/spirv-cross,
+# built like build_app.py does (same pinned commit, sources and flags as SPIRV-Cross's CMake Release build).
+SPIRV_CROSS_COMMIT := aa217aeb6c9f0ace7a0ab233b28807edf45eb165
+SPIRV_CROSS_SOURCES := main.cpp spirv_cfg.cpp spirv_cpp.cpp spirv_cross.cpp spirv_cross_parsed_ir.cpp spirv_cross_util.cpp \
+  spirv_glsl.cpp spirv_hlsl.cpp spirv_msl.cpp spirv_parser.cpp spirv_reflect.cpp
+.PHONY: shader-tools
+shader-tools: $(OUT)/shader-service/totk_xlate $(OUT)/spirv-cross/spirv-cross
+$(OUT)/shader-service/totk_xlate: $(TOTK)/prebuilt/macos-arm64/totk_xlate $(TOTK)/prebuilt/macos-arm64/totk_xlate.sha256
+	@mkdir -p "$(dir $@)"
+	test "$$(shasum -a 256 "$<" | cut -d' ' -f1)" = "$$(cut -d' ' -f1 "$(TOTK)/prebuilt/macos-arm64/totk_xlate.sha256")"
+	cp "$<" "$@" && chmod +x "$@"
+$(OUT)/spirv-cross/spirv-cross:
+	@mkdir -p "$(WORK)/src" "$(dir $@)obj"
+	test -d "$(WORK)/src/SPIRV-Cross" || git clone -q https://github.com/KhronosGroup/SPIRV-Cross.git "$(WORK)/src/SPIRV-Cross"
+	git -C "$(WORK)/src/SPIRV-Cross" checkout -q $(SPIRV_CROSS_COMMIT)
+	for f in $(SPIRV_CROSS_SOURCES); do xcrun clang++ -O3 -DNDEBUG -std=c++11 -arch arm64 -Wno-deprecated-declarations \
+	  -c "$(WORK)/src/SPIRV-Cross/$$f" -o "$(dir $@)obj/$$f.o" & done; wait
+	xcrun clang++ -arch arm64 $(addprefix $(dir $@)obj/,$(addsuffix .o,$(SPIRV_CROSS_SOURCES))) -o "$@"
+
 # BY3_LOG: where the boot's stderr goes (the host is loud on purpose; every abort names what is missing).
 BY3_LOG ?= $(WORK)/logs/boot.log
 boot: runtime

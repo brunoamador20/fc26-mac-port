@@ -14,8 +14,8 @@ named by hash and subject. Game data, keys and saves are never committed (see th
 | 0 | Feasibility: does the game fit the TotK architecture? | done 2026-10-19 |
 | 1 | Code and data out of the dump; code rewritten for Apple silicon | done 2026-10-19 |
 | 2 | A runtime target with the TotK-only parts compiled out, booting to `nnMain` | done 2026-10-19 |
-| 3 | Follow every unknown service / command / NVN call until the first `nvnQueuePresentTexture` | in progress |
-| 4 | Audio (Wwise), input, saves; the 1.2.0 patches (60 fps, 900p) applied to the native code | open |
+| 3 | Follow every unknown service / command / NVN call until the first `nvnQueuePresentTexture` | done 2026-10-19 |
+| 4 | A picture, audio (Wwise), input, saves; the 1.2.0 patches (60 fps, 900p) applied to the native code | in progress |
 | 5 | Performance, shaders, packaging as an app | open |
 
 ## Log
@@ -184,3 +184,37 @@ crashes in its own shutdown path finalizing a subsystem that never started (`mai
 
 Pitfalls: `TOTK_HEADLESS` is tested for presence, so an empty value still means headless. A game-side null
 dereference in a shutdown path is a symptom; the cause is the init step that failed before it.
+
+### 2026-10-19: stage 3 done, the first frame is presented
+
+Upstream `main` was merged first (sampler border colour emulation, #49, reaches Bayonetta through the shared graphics
+layer; the TotK runtime fixes stay in `games/totk`). The merged `hle_nvn.c` reads `runtime_survey_sync`, which the
+fork's survey stub now defines.
+
+The game's init failed while creating its shader programs. Following the `cbz w0` chain down: `main+0xd0d998` checks a
+shader binary's header (`VSO\0`, GPU code major/minor at bytes 6/7) against the range `nvnDeviceGetInteger` reports.
+The graphics layer's table was measured on an older driver (Super Mario Odyssey) and stops at 1.14; Bayonetta 3's
+binaries are 1.15, 1.16 and maybe newer. `DM_NVN_GPU_CODE_MAX_MINOR` (the Bayonetta runtime sets 31) opens that; the
+layer reads only three control-section fields (code length, stage, compute group size), each checked, so a layout
+change would show at once. Then, one at a time, NVN calls TotK never makes: `nvnTexturePoolRegisterImage` (images share
+the texture registration), `nvnQueueWaitSync` (replay is in submission order on one Metal queue),
+`nvnCommandBufferClearBuffer` (an inline buffer write of the repeated value), colour reduction (no-op).
+
+The host keeps GPU submission off unless `TOTK_GPU_ALLOW_SUBMIT=1` (the TotK launcher sets it); with it the game
+reports **"first presented frame" at 0.64 s**. That is stage 3's goal.
+
+Past it, so far:
+
+- `audout:u` (`runtime/audio_out.c`): Wwise's AudioOut. Buffers are consumed at real time (a playback thread holds each
+  one for its duration, releases it and signals the buffer event) but not heard yet; Core Audio output is stage 4.
+  Wwise also opens `audren:u`, which the host already has.
+- `nn::account::PopOpenUsers` / `PushOpenUsers`: users kept across a program jump; a fresh start has none.
+- Runtime shader translation: `make shader-tools` puts the repository's prebuilt `totk_xlate` (SHA-256 checked) and
+  SPIRV-Cross (pinned commit, built like `build_app.py` does) where the graphics layer looks for them.
+
+State: the game runs about 6 s (137 frames), draws, translates its first pixel shader, then stops at
+`nvnCommandBufferDispatchComputeIndirect`. Frames 2 and 137 are black (`TOTK_INPUT_FILE` "shot" captures). Seen in
+the log, not handled yet: a draw with no program bound, and logic op 3 / alpha test 5 (Metal has neither; drawn
+without). Still unseen: system fonts.
+
+Commits: `1ce8e8b` (first frame), and this entry's commit (AudioOut, open users, shader tools).
