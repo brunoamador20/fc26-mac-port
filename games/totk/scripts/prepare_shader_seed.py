@@ -407,12 +407,17 @@ def prepare(romfs, output, translator, spirv_cross, version, shader_list=LIST, m
         wanted.update([variant+'_b.metal', variant+'_b.json', variant.split('-')[0]+'.variants'])
     for p in staging.iterdir():
         if p.name not in wanted:
-            p.unlink()
+            p.unlink(missing_ok=True)
     (staging/'pso_manifest.tsv').write_text('# Prepared from this app\'s local game data; '+CHAIN+'\n'+'\n'.join(rows)+'\n')
+    # On filesystems without native extended-attribute support (exFAT, FAT32), macOS can
+    # transparently create "._name" AppleDouble sidecar files for anything written here,
+    # including pso_manifest.tsv itself. Exclude them so the manifest's own file list never
+    # ships a name the runtime's strict filename check (totk_shader_seed.h) would reject.
+    wanted_final = wanted | {'pso_manifest.tsv'}
     report = dict(**identity, shaders=len(completed), discovered=len(shaders), located=len(extra), startup_shaders=ready,
                   listed_variants=sum(1 for _, _, _, why in jobs if why == 'listed'), skipped=failed,
                   archives=archives, seconds=time.monotonic()-started,
-                  files={p.name: digest(p.read_bytes()) for p in sorted(staging.iterdir())})
+                  files={p.name: digest(p.read_bytes()) for p in sorted(staging.iterdir()) if p.name in wanted_final})
     (staging/'seed-manifest.json').write_text(json.dumps(report, indent=2)+'\n')
     if output.exists():
         shutil.rmtree(output)
