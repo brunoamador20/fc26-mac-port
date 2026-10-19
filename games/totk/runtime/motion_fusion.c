@@ -8,7 +8,11 @@
    up. The orientation is integrated from the gyro and, while the controller is not being accelerated (|a| within 15 %
    of 1 G), pulled toward the measured gravity (Mahony, gain 0.5/s: about 2 s), as the Switch's sensor fusion does; yaw
    has no reference and drifts with the gyro's bias (well under a degree a minute on a DualSense at rest). The newest 64
-   samples are kept; the game reads up to 16, newest first, and goes by their sampling numbers. */
+   samples are kept; the game reads up to 16, newest first, and goes by their sampling numbers.
+   Dead zone (2026-10-19): rotation slower than TOTK_GYRO_DEADZONE deg/s (default 1.2; 0 = none) counts as none, and the
+   dead zone is taken off faster rotation, so the rate never jumps at its edge. An 8BitDo Pro Controller lying on the desk
+   read 0.83 deg/s on average (bias 0.05, 0.73, 0.38 deg/s after its factory calibration), at most 1.07 deg/s, in 616
+   samples: enough for the aim to creep. */
 #include "runtime.h"
 #include <math.h>
 #include <pthread.h>
@@ -25,6 +29,7 @@ static double angle[3];
 static int restart = 1, live;
 static int from[3] = {0, 1, 2};
 static double sign[3] = {1, 1, 1}, det = 1;
+static double deadzone = -1;   /* rad/s; -1 until read from TOTK_GYRO_DEADZONE */
 
 /* TOTK_GYRO_AXES: reference axis i = sign * controller axis from[i]. 0 if unset, -1 if malformed. */
 int runtime_motion_axes(const char *spec) {
@@ -89,6 +94,14 @@ void runtime_motion_feed(const double raw_acc[3], const double raw_gyro[3], uint
     double acc[3], gyro[3];
     pthread_mutex_lock(&lock);
     for (int i = 0; i < 3; i++) { acc[i] = sign[i] * raw_acc[from[i]]; gyro[i] = det * sign[i] * raw_gyro[from[i]]; }
+    if (deadzone < 0) {
+        const char *e = getenv("TOTK_GYRO_DEADZONE"); double v = 1.2;
+        if (e) { char *end; v = strtod(e, &end); if (end == e || *end || !(v >= 0) || v > 20) runtime_fail("TOTK_GYRO_DEADZONE must be a number of degrees a second in [0, 20]"); }
+        deadzone = v * M_PI / 180;
+        if (e) fprintf(stderr, "[gyro] dead zone %.2f deg/s (TOTK_GYRO_DEADZONE)\n", v);
+    }
+    double rate = norm3(gyro), keep = rate > deadzone ? (rate - deadzone) / rate : 0;
+    for (int i = 0; i < 3; i++) gyro[i] *= keep;
     double dt = last_ns && now > last_ns ? (now - last_ns) / 1e9 : 0.004;
     if (dt > 0.05) dt = 0.004;   /* a gap (sensors were off, the app was in the background): no integration across it */
     last_ns = now; live = 1;
