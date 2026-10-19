@@ -226,15 +226,23 @@ static void patch_output_res(Module *m){
    Every path that picks the render size converges through main+0x585e48 (the branch at 0x585f50 only reloads w11/w10
    and jumps back), so the four sites cover all of them. x3 is scratch and untouched by this function; x9 must NOT be
    used here because w9 still holds the output size for main+0x585e64. The size comes from the loader's data page +16
-   (the page patch_realtime reserves); TOTK_RENDER_RES unset = the game's own size and nothing is patched. */
+   (the page patch_realtime reserves); TOTK_RENDER_RES unset = the game's own size and nothing is patched.
+   iOS cannot write code at run time: the iOS export (TOTK_EXPORT_IOS, runtime/loader.c) runs this patch on the Mac, so
+   the phone's embedded code carries it only when TOTK_RENDER_RES was set for the export. The phone checks the embedded
+   words and writes the size on the data page itself: its own TOTK_RENDER_RES, or the game's handheld 1280x720 when unset
+   (the phone always reports handheld mode). Embedded code without the patch keeps the game's own size. */
 static int render_res(unsigned *w,unsigned *h){
     const char *e=getenv("TOTK_RENDER_RES");
     if(!e||!*e||!strcmp(e,"0"))return 0;
-    if(sscanf(e,"%ux%u",w,h)!=2||*w<64||*h<64||*w>4096||*h>4096)runtime_fail("TOTK_RENDER_RES must be <width>x<height>");
+    char rest;
+    if(sscanf(e,"%ux%u%c",w,h,&rest)!=2||*w<64||*h<64||*w>4096||*h>4096)runtime_fail("TOTK_RENDER_RES must be <width>x<height>");
     return 1;
 }
 static void patch_render_res(Module *m){
-    unsigned w,h;if(!render_res(&w,&h))return;
+    unsigned w=1280,h=720;int set=render_res(&w,&h);
+#if !TARGET_OS_IPHONE
+    if(!set)return;   /* Mac (and the iOS export): the game's own size unless asked */
+#endif
     uint64_t data=(m->file_size+0x3fff)&~0x3fffULL;
     if(data+24>m->size)runtime_fail("1.4.3 render-resolution patch layout");
     const Patch sites[]={
@@ -245,6 +253,14 @@ static void patch_render_res(Module *m){
     };
     uint32_t want[4]={adrp(3,(uintptr_t)m->base+sites[0].off,(uintptr_t)m->base+data),
                       sites[1].replacement,sites[2].replacement,sites[3].replacement};
+#if TARGET_OS_IPHONE
+    uint32_t first;memcpy(&first,m->base+sites[0].off,4);
+    if(first==sites[0].original){fprintf(stderr,"[totk] 1.4.3 render resolution: the game's own (not patched at build)\n");return;}
+    for(unsigned i=0;i<sizeof sites/sizeof *sites;i++){
+        uint32_t got;memcpy(&got,m->base+sites[i].off,4);
+        if(got!=want[i])runtime_fail("1.4.3 embedded render-resolution patch mismatch");
+    }
+#else
     for(unsigned i=0;i<sizeof sites/sizeof *sites;i++){
         uint32_t word;memcpy(&word,m->base+sites[i].off,4);
         if(word!=sites[i].original){
@@ -254,9 +270,11 @@ static void patch_render_res(Module *m){
         }
     }
     for(unsigned i=0;i<sizeof sites/sizeof *sites;i++)memcpy(m->base+sites[i].off,&want[i],4);
+#endif
     float v[2]={(float)w,(float)h};
     memcpy(m->base+data+16,v,sizeof v);
-    fprintf(stderr,"[totk] 1.4.3 render resolution patch: scene render size %ux%u (4 instructions at main+0x585e48, value on the data page)\n",w,h);
+    fprintf(stderr,"[totk] 1.4.3 render resolution patch: scene render size %ux%u%s (4 instructions at main+0x585e48, value on the data page)\n",
+            w,h,set?"":" (the game's handheld size; TOTK_RENDER_RES not set)");
 }
 int runtime_output_res_toggle(void){
     if(!output_page)return 0;
