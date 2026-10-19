@@ -5461,20 +5461,39 @@ static int prog_fit(NvProg *pr) {
     }
     return changed;
 }
+// TOTK_PROBE_NEGATIVE for the prediction checks of probe-gfx (24-27: each breaks one rule below; the probe must fail).
+static int pred_negative(void) { static int neg = -1; if (neg < 0) { const char *e = getenv("TOTK_PROBE_NEGATIVE"); neg = e ? atoi(e) : 0; } return neg; }
 // Prediction must not translate/compile, or mutate a program's active binding.
 // Only the exact already-resolved variant is safe to predict. Unknown variants
 // are left for the authoritative draw path, without changing active bindings.
+// A program with a stage not translated yet (pr->missing, iOS) is skipped too: its draws are skipped (draw_inner), and
+// its fragment stage can be absent, which would predict a pipeline without a fragment function.
+// Negative 24 takes the active variant whatever the state; 26 ignores untranslated stages.
 static int prog_prediction_stages(const prog_t *p, NvShader **vs, NvShader **fs) {
     NvProg *pr = p && p->serial ? (__bridge NvProg *)serial_ptr(p->serial) : nil;
-    if (!pr) return 0;
+    if (!pr || (pr->missing && pred_negative() != 26)) return 0;
     NvShader *stages[2] = {nil, nil};
     for (int st = 0; st < 2; st++) {
         if (!pr->sh[st]) { if (!st) return 0; continue; }
         uint64_t sig = stage_sig(st);
-        stages[st] = sig == pr->sig[st] ? pr->sh[st] : pr->alt[st][@(sig)];
+        stages[st] = sig == pr->sig[st] || pred_negative() == 24 ? pr->sh[st] : pr->alt[st][@(sig)];
         if (!stages[st]) return 0;
     }
     *vs = stages[0]; *fs = stages[1]; return 1;
+}
+// Attach modes pso_predict_rest guesses for one draw: v = 0 the pass's own depth / stencil, 1 neither, 2 stencil only,
+// 3 depth only (ds_scan drops the planes no draw uses, which is only known at replay).
+static const uint8_t PRED_DEPTH[4] = {1, 0, 0, 1}, PRED_STENCIL[4] = {1, 0, 1, 0};
+// A fragment function that exports depth makes ds_scan attach the pass's depth buffer, so a guess without it is never
+// used -- and pso_desc would compile that variant's library (fs_fn_without_depth) on the submit thread for nothing.
+// Negative 27 guesses it anyway.
+static int pred_guess_wanted(int v, uint32_t dfull, uint32_t sfull, __unsafe_unretained NvShader *fs) {
+    uint32_t d = PRED_DEPTH[v] ? dfull : 0, s = PRED_STENCIL[v] ? sfull : 0;
+    if (v && d == dfull && s == sfull) return 0;   // same as the pass's own
+    if (v == 2 && !sfull) return 0;
+    if (v == 3 && (!dfull || !sfull)) return 0;
+    if (dfull && !d && fs && fs->writes_depth && pred_negative() != 27) return 0;
+    return 1;
 }
 // Compute thread group size lives in the control section; not located yet, so compute shaders stop with this message.
 /* Compute thread group size: control+0x748/0x74c/0x750. Evidence (12 TOTK kernels): the triple exists only in compute
@@ -5881,13 +5900,16 @@ static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t 
 static struct { pso_key k; id<MTLRenderPipelineState> ps; uint64_t submit; int used, done; } g_pp[PSO_PEND_MAX];
 static pthread_mutex_t g_pp_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_pp_cv = PTHREAD_COND_INITIALIZER;
 static uint64_t g_pp_submit_mark, g_pp_kicked, g_pp_taken;   // 本次提交是否已预测过（按提交序号）；累计丢出 / 领用条数 | Whether this submission has already been predicted (by submission serial); cumulative kicked / taken counts
+// Statistics line (pso_predict_rest, every 100 scans): guesses refused because the table was full, stale guesses freed,
+// time draws waited for a background compile, scans and which budget ended them.
+static uint64_t g_pp_full, g_pp_reclaimed, g_pp_waits, g_pp_wait_ns, g_pp_scans, g_pp_scan_ns, g_pp_stop[3];
 static void pso_predict_rest(void);
 static int pso_pend_find(const pso_key *k) { for (int i = 0; i < PSO_PEND_MAX; i++) if (g_pp[i].used && !memcmp(&g_pp[i].k, k, sizeof *k)) return i; return -1; }
 // Called only with g_pp_mu held. An in-flight worker still owns its slot:
-// completion must be published before that slot can ever be reused.
+// completion must be published before that slot can ever be reused. Negative 25 frees every slot.
 static void pso_pend_reclaim(uint64_t submit) {
-    for (int i = 0; i < PSO_PEND_MAX; i++) if (g_pp[i].used && g_pp[i].done && submit - g_pp[i].submit > 2) {
-        g_pp[i].ps = nil; g_pp[i].used = 0;
+    for (int i = 0; i < PSO_PEND_MAX; i++) if (g_pp[i].used && ((g_pp[i].done && submit - g_pp[i].submit > 2) || pred_negative() == 25)) {
+        g_pp[i].ps = nil; g_pp[i].used = 0; g_pp_reclaimed++;
     }
 }
 static void pso_pend_kick(const pso_key *k, NvShader *vs, NvShader *fs) {   // 提交线程调：没在缓存、没在表里才丢 | Called by the submit thread: kick only if it is neither in the cache nor in the table
@@ -5897,6 +5919,7 @@ static void pso_pend_kick(const pso_key *k, NvShader *vs, NvShader *fs) {   // �
     int at = pso_pend_find(k), slot = -1;
     if (at < 0) for (int i = 0; i < PSO_PEND_MAX; i++) if (!g_pp[i].used) { slot = i; break; }
     if (at < 0 && slot >= 0) { g_pp[slot].k = *k; g_pp[slot].ps = nil; g_pp[slot].done = 0; g_pp[slot].used = 1; g_pp[slot].submit = g_sub_serial; }
+    if (at < 0 && slot < 0) g_pp_full++;
     pthread_mutex_unlock(&g_pp_mu);
     if (at >= 0 || slot < 0) return;
     MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0); g_pp_kicked++;
@@ -5908,7 +5931,10 @@ static void pso_pend_kick(const pso_key *k, NvShader *vs, NvShader *fs) {   // �
 static id<MTLRenderPipelineState> pso_pend_take(const pso_key *k) {   // 提交线程调：表里有就等它编完并取走；没有返回 nil | Called by the submit thread: if it is in the table, wait for it to finish compiling and take it; otherwise return nil
     pthread_mutex_lock(&g_pp_mu);
     int at = pso_pend_find(k); id<MTLRenderPipelineState> ps = nil;
-    if (at >= 0) { while (!g_pp[at].done) pthread_cond_wait(&g_pp_cv, &g_pp_mu); ps = g_pp[at].ps; g_pp[at].ps = nil; g_pp[at].used = 0; }
+    if (at >= 0) { uint64_t t0 = bp_now(); int waited = !g_pp[at].done;
+        while (!g_pp[at].done) pthread_cond_wait(&g_pp_cv, &g_pp_mu);
+        if (waited) { g_pp_waits++; g_pp_wait_ns += bp_now() - t0; }
+        ps = g_pp[at].ps; g_pp[at].ps = nil; g_pp[at].used = 0; }
     pthread_mutex_unlock(&g_pp_mu);
     return ps;
 }
@@ -7271,16 +7297,28 @@ static void pso_predict_rest(void) {
     static int enabled = -1; if (enabled < 0) { const char *e = getenv("TOTK_PSO_PREDICT"); enabled = !e || atoi(e); }
     if (!enabled) return;
     if (!g_exec_next) return;
+    // Bound speculative work. Submit likely keys as they are found instead of
+    // making the current draw wait for the entire scan before any worker starts.
+    // Budget per scan: commands, keys (each of the two queues), microseconds -- TOTK_PSO_PREDICT_SCAN / _KEYS / _US.
+    enum { QN = 160 }; static int max_ops = -1, max_keys, max_us;
+    if (max_ops < 0) {
+        const char *e = getenv("TOTK_PSO_PREDICT_SCAN"); int ops = e ? atoi(e) : 8192;
+        e = getenv("TOTK_PSO_PREDICT_KEYS"); max_keys = e ? atoi(e) : 32; if (max_keys < 1) max_keys = 1; if (max_keys > QN) max_keys = QN;
+        e = getenv("TOTK_PSO_PREDICT_US"); max_us = e ? atoi(e) : 2000; if (max_us < 1) max_us = 1;
+        max_ops = ops < 1 ? 1 : ops;
+        MLOG("[totk] pipeline prediction: after a submission's first pipeline miss, scans at most %d commands, %d keys, %d us", max_ops, max_keys, max_us);
+    }
     static typeof(S) Ssave; memcpy(&Ssave, &S, sizeof S); typeof(R) Rsave = R;
     int pso_dirty = g_pso_dirty, dss_dirty = g_dss_dirty;
     uint32_t cf[8]; memcpy(cf, g_pass.cfmt, sizeof cf); uint32_t df = g_pass.dfmt, sf = g_pass.sfmt, samples = g_pass.samples, dfull = df, sfull = sf; int kicked0 = (int)g_pp_kicked, draws = 0;
     fz_cursor cur = {.p = g_exec_next};
-    // Bound speculative work. Submit likely keys as they are found instead of
-    // making the current draw wait for the entire scan before any worker starts.
     uint64_t started = bp_now();
-    enum { QN = 32 }; static struct { pso_key k; void *vs, *fs; } qa[QN], qb[QN]; int na = 0, nb = 0;
-    for (int guard = 0; guard < 8192 && na < QN; guard++) {
-        if (bp_now() - started > 2000000ull) break;
+    static struct { pso_key k; void *vs, *fs; } qa[QN], qb[QN]; int na = 0, nb = 0;
+    int guard = 0, stop = 0;   // which budget ended the scan: 1 commands, 2 keys, 3 time (0: end of the submission)
+    for (; ; guard++) {
+        if (guard >= max_ops) { stop = 1; break; }
+        if (na >= max_keys) { stop = 2; break; }
+        if (bp_now() - started > (uint64_t)max_us * 1000ull) { stop = 3; break; }
         const uint8_t *q; op_hdr hq; const void *aq;
         if (!fz_next(&cur, &q, &hq, &aq)) break;
         if (hq.op == OP_SET_RT) {
@@ -7300,17 +7338,15 @@ static void pso_predict_rest(void) {
             draws++;
             NvShader *vs = nil, *fs = nil;
             if (!prog_prediction_stages(S.prog, &vs, &fs)) continue;
-            const uint32_t dv[4] = {dfull, 0, 0, dfull}, sv[4] = {sfull, 0, sfull, 0};
             for (int v = 0; v < 4; v++) {
-                if (v && dv[v] == dv[0] && sv[v] == sv[0]) continue;
-                if (v == 2 && !sfull) continue; if (v == 3 && (!dfull || !sfull)) continue;
-                pso_key k; pso_key_fill(&k, vs, fs, cf, dv[v], sv[v], samples, 0);
+                if (!pred_guess_wanted(v, dfull, sfull, fs)) continue;
+                pso_key k; pso_key_fill(&k, vs, fs, cf, PRED_DEPTH[v] ? dfull : 0, PRED_STENCIL[v] ? sfull : 0, samples, 0);
                 if (hm_get_id(&g_pso, &k)) continue;
                 int dup = 0; for (int i = 0; i < (v ? nb : na) && !dup; i++) dup = !memcmp(&(v ? qb : qa)[i].k, &k, sizeof k);
                 if (dup) continue;
-                if (!v && na < QN) { qa[na].k = k; qa[na].vs = (__bridge void *)vs; qa[na].fs = (__bridge void *)fs; na++;
+                if (!v && na < max_keys) { qa[na].k = k; qa[na].vs = (__bridge void *)vs; qa[na].fs = (__bridge void *)fs; na++;
                     pso_pend_kick(&k, vs, fs); }
-                else if (v && nb < QN) { qb[nb].k = k; qb[nb].vs = (__bridge void *)vs; qb[nb].fs = (__bridge void *)fs; nb++; }
+                else if (v && nb < max_keys) { qb[nb].k = k; qb[nb].vs = (__bridge void *)vs; qb[nb].fs = (__bridge void *)fs; nb++; }
             }
             continue;
         }
@@ -7321,6 +7357,16 @@ static void pso_predict_rest(void) {
     for (int i = 0; i < nb; i++) pso_pend_kick(&qb[i].k, (__bridge NvShader *)qb[i].vs, (__bridge NvShader *)qb[i].fs);
     memcpy(&S, &Ssave, sizeof S); R = Rsave; args_dirty_all(); g_pso_dirty = pso_dirty; g_dss_dirty = dss_dirty;
     static int logged; if (g_pp_kicked > (uint64_t)kicked0 && logged++ < 20) MLOG("并行预编：本次提交余下 %d 次绘制，丢给后台 %d 条管线", draws, (int)g_pp_kicked - kicked0);
+    g_pp_scans++; g_pp_scan_ns += bp_now() - started; if (stop) g_pp_stop[stop - 1]++;
+    if (g_pp_scans % 100 == 0) {
+        pthread_mutex_lock(&g_pp_mu); uint64_t full = g_pp_full, freed = g_pp_reclaimed, waits = g_pp_waits, wait_ns = g_pp_wait_ns; int busy = 0;
+        for (int i = 0; i < PSO_PEND_MAX; i++) busy += g_pp[i].used; pthread_mutex_unlock(&g_pp_mu);
+        MLOG("并行预编 至提交 %llu：扫描 %llu 次（平均 %.2f ms；到上限：命令 %llu、键 %llu、时间 %llu），后台开编 %llu 条，绘制领用 %llu 条（等后台 %llu 次共 %.1f ms），表满没收 %llu 条，回收没用上的 %llu 条，表里现有 %d 条",
+             (unsigned long long)g_sub_serial, (unsigned long long)g_pp_scans, g_pp_scan_ns / 1e6 / (double)g_pp_scans,
+             (unsigned long long)g_pp_stop[0], (unsigned long long)g_pp_stop[1], (unsigned long long)g_pp_stop[2],
+             (unsigned long long)g_pp_kicked, (unsigned long long)g_pp_taken, (unsigned long long)waits, wait_ns / 1e6,
+             (unsigned long long)full, (unsigned long long)freed, busy);
+    }
 }
 
 /* Prediction visits later scissor commands but must leave the active draw's state untouched. */
@@ -7337,7 +7383,7 @@ void dm_nvn_probe_prediction(void) {
     struct {op_hdr h;p_render_cond c;op_hdr end;} cond={{OP_RENDER_COND,8+sizeof(p_render_cond)},{0},{OP_END,8}};
     const void *op=&cond;unsigned slot=((uintptr_t)op>>3)&1023;cond_cache_ent cache=g_cond_cache[slot];uint64_t unknown=g_draw_skip[14];
     g_exec_next=(const uint8_t *)&cond;pso_predict_rest();
-    if(getenv("TOTK_PROBE_NEGATIVE"))state_op(OP_RENDER_COND,&cond.c);
+    if(pred_negative()>0&&pred_negative()<24)state_op(OP_RENDER_COND,&cond.c);   // older negative numbers; 24-27 are the checks below
     if(memcmp(&cache,&g_cond_cache[slot],sizeof cache)||g_draw_skip[14]!=unknown)MDIE("pipeline prediction evaluated a future conditional counter");
     // A speculative future program need not be resolved. Calling prog_get here
     // would try to translate its absent bytes (or compile real future shaders).
@@ -7365,7 +7411,20 @@ void dm_nvn_probe_prediction(void) {
     [pr->alt[0] removeAllObjects];
     if (prog_prediction_stages(&cached, &vs, &fs) || pr->sh[0] != active)
         MDIE("pipeline prediction resolved a missing binding variant");
+    // A program with a stage not translated yet (iOS) draws nothing; its fragment stage can be absent.
+    pr->sig[0] = signature; pr->missing = 2;
+    if (prog_prediction_stages(&cached, &vs, &fs))
+        MDIE("pipeline prediction predicted a program with an untranslated stage");
     serial_del(cached.serial);
+    // A depth-exporting fragment function gets the pass's depth buffer: guesses without it are never used.
+    NvShader *depth_fs = [NvShader new], *color_fs = [NvShader new]; depth_fs->writes_depth = 1;
+    const uint32_t d32 = MTLPixelFormatDepth32Float, ds8 = MTLPixelFormatDepth32Float_Stencil8;
+    if (!pred_guess_wanted(0, d32, 0, depth_fs) || pred_guess_wanted(1, d32, 0, depth_fs) || pred_guess_wanted(2, ds8, ds8, depth_fs)
+        || !pred_guess_wanted(3, ds8, ds8, depth_fs) || !pred_guess_wanted(0, 0, 0, depth_fs))
+        MDIE("pipeline prediction guessed a pass without depth for a depth-exporting fragment function");
+    if (!pred_guess_wanted(1, d32, 0, color_fs) || !pred_guess_wanted(2, ds8, ds8, color_fs) || pred_guess_wanted(3, d32, 0, color_fs)
+        || pred_guess_wanted(2, d32, 0, color_fs))
+        MDIE("pipeline prediction attach-mode guesses changed");
 
     // Reclaim completed stale guesses, but retain recent completions and even
     // very old unfinished jobs (their workers can still publish into the slot).
