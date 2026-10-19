@@ -2294,8 +2294,8 @@ static int uncapped_now(void) { int m = mfx_enabled(); return g_uncapped && (m =
 /* 30+30 on a display whose rate is not a multiple of 30 (the user's 100 Hz): the game is paced by our own clock at exactly
    30 fps instead of by the display link (3 refreshes would be 33 fps); the display link still shows each picture at a refresh. */
 static int mfx_own_clock(void) { return mfx_enabled() == MFX_30 && (g_paced_hz <= 0 || g_paced_hz % 30); }
-/* Opt-in until live scene/clock validation. Only applies to the existing Mac
-   real-time uncapped path; original timing, MetalFX and deterministic tests
+/* Opt-in until live scene/clock validation (Breath of the Wild: on by default, UNCAPPED_INTERVAL_FROM_ENV in nvn_obj.h).
+   Only applies to the existing Mac real-time uncapped path; original timing, MetalFX and deterministic tests
    retain the guest interval. GPU/texture lifetime waits are unchanged. */
 static _Atomic int g_uncapped_interval = -1;
 void nvn_set_uncapped_interval(int on) {
@@ -2304,7 +2304,7 @@ void nvn_set_uncapped_interval(int on) {
 }
 static int uncapped_interval_on(void) {
     int v = atomic_load(&g_uncapped_interval);
-    if (v < 0) { const char *e = getenv("TOTK_UNCAPPED_INTERVAL"); v = e && atoi(e); atomic_store(&g_uncapped_interval, v); }
+    if (v < 0) { const char *e = getenv("TOTK_UNCAPPED_INTERVAL"); v = UNCAPPED_INTERVAL_FROM_ENV(e); atomic_store(&g_uncapped_interval, v); }
     return v;
 }
 static double g_rt_comp_ms;   // 当前声明的实时计算量（ms；0 = 未声明） | Currently declared real-time computation amount (ms; 0 = not declared)
