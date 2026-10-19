@@ -6,6 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef TOTK_SERIAL_SET_FAIL   // out of memory; nvn_mtl.m logs it as FATAL first
+#define TOTK_SERIAL_SET_FAIL() abort()
+#endif
 #define TOTK_SERIAL_PAGE_BITS 16
 #define TOTK_SERIAL_WORDS (1u << (TOTK_SERIAL_PAGE_BITS - 6))
 typedef struct totk_serial_node { void *child[256]; } totk_serial_node;
@@ -21,7 +24,7 @@ static inline uint64_t *totk_serial_page(totk_serial_set *s, uint64_t key, int c
         return s->cache[ci].bits;
     uint64_t *bits = NULL;
     if (!s->root && create) {
-        s->root = calloc(1, sizeof *s->root); if (!s->root) abort();
+        s->root = calloc(1, sizeof *s->root); if (!s->root) TOTK_SERIAL_SET_FAIL();
         s->nodes++; s->bytes += sizeof *s->root;
     }
     totk_serial_node *node = s->root;
@@ -31,7 +34,7 @@ static inline uint64_t *totk_serial_page(totk_serial_set *s, uint64_t key, int c
         unsigned idx = (key >> shift) & 255;
         if (!node->child[idx] && create) {
             size_t bytes = shift ? sizeof *node : TOTK_SERIAL_WORDS * sizeof(uint64_t);
-            node->child[idx] = calloc(1, bytes); if (!node->child[idx]) abort();
+            node->child[idx] = calloc(1, bytes); if (!node->child[idx]) TOTK_SERIAL_SET_FAIL();
             s->bytes += bytes; if (shift) s->nodes++; else s->pages++;
         }
         if (shift) node = node->child[idx];

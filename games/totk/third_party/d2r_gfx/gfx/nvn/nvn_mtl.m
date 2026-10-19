@@ -22,7 +22,6 @@
 #include "../tex/nvn_deswizzle.h"
 #include "../tex/nvn_deswizzle_gpu.h"
 #include "totk_shader_rt.h"
-#include "totk_serial_set.h"
 #include "totk_mfx.h"
 #include "totk_mfx_up.h"
 #include "totk_sysload.h"
@@ -69,6 +68,8 @@ extern __thread sigjmp_buf *runtime_fault_guard;   // runtime/loader.c: a guarde
 
 #define MLOG(...) do { flockfile(stderr); fprintf(stderr, "[dm] [nvn-mtl] " __VA_ARGS__); fputc('\n', stderr); funlockfile(stderr); } while (0)   // one whole line even when the warm-up threads log at once
 #define MDIE(...) do { MLOG("FATAL " __VA_ARGS__); abort(); } while (0)
+#define TOTK_SERIAL_SET_FAIL() MDIE("serial history: out of memory")
+#include "totk_serial_set.h"
 
 static void warm_start(void);
 static void warm_claim(void);
@@ -3447,7 +3448,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     MLOG("已死序号纹理累计 %llu 张（替换前即为泄漏来源）", (unsigned long long)g_dead_put_total);
     pthread_mutex_lock(&g_smu); uint64_t dead_n = g_dead_serial.n, owned_n = g_gpu_owned.n;
     uint64_t serial_bytes = g_dead_serial.bytes + g_gpu_owned.bytes, serial_pages = g_dead_serial.pages + g_gpu_owned.pages; pthread_mutex_unlock(&g_smu);
-    MLOG("[serial-history] dead=%llu owned=%llu pages=%llu bytes=%llu; exact paged bitmaps, no full-table rehash", (unsigned long long)dead_n, (unsigned long long)owned_n, (unsigned long long)serial_pages, (unsigned long long)serial_bytes);
+    MLOG("序号表：已销毁 %llu 个，GPU 画过 %llu 个（两张表都只增不减，见 mtl_dead_forget；分页位图 %llu 页，%llu 字节）", (unsigned long long)dead_n, (unsigned long long)owned_n, (unsigned long long)serial_pages, (unsigned long long)serial_bytes);
     pthread_mutex_lock(&g_smu); int ndet = g_stor_ndet; pthread_mutex_unlock(&g_smu);
     MLOG("可压缩贴图跨格式换主 %llu 次（其中换回原贴图 %llu 次），暂存旧登记 %d 个（TOTK_COMPRESSED_ALIAS=1 恢复跨格式共用）", (unsigned long long)g_stor_handover, (unsigned long long)g_stor_taken_back, ndet);
     MLOG("共享存储贴图：条目 %llu，共用 %llu 次，格式视图 %llu 次，重建 %llu 次，闲置回收 %llu，随内存池释放 %llu", (unsigned long long)g_stor_entries, (unsigned long long)g_stor_shared, (unsigned long long)g_stor_viewed, (unsigned long long)g_stor_recreated, (unsigned long long)g_stor_swept, (unsigned long long)g_stor_dropped);
