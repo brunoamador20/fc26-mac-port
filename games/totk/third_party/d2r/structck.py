@@ -478,11 +478,12 @@ def _writes(ins):
     _, ww = ins.regs_access()
     return {'x29' if ins.reg_name(r) == 'fp' else 'x30' if ins.reg_name(r) == 'lr' else re.sub(r'^[wx]', 'x', ins.reg_name(r))
             for r in ww if ins.reg_name(r) not in ('sp', 'pc')}
-def _mem_sp(ins, load):
+def _mem_sp(ins, load, alias=None):
+    """alias: a register holding the block's unchanged entry sp (mov xT, sp before any sp write; see site_spset)."""
     if (load and not ins.mnemonic.startswith('ld')) or (not load and not ins.mnemonic.startswith('st')):
         return None
     for op in ins.operands:
-        if op.type == capstone.arm64_const.ARM64_OP_MEM and ins.reg_name(op.mem.base) == 'sp':
+        if op.type == capstone.arm64_const.ARM64_OP_MEM and ins.reg_name(op.mem.base) in ('sp', alias):
             if op.mem.disp < 0: return op.mem.disp
             if load and ins.mnemonic == 'ldp' and op.mem.disp == 0: return -16
     return None
@@ -510,22 +511,28 @@ for a, allowed in static_entries:
             allowed.update(('x0', 'x1'))
     saved = {}
     restored = {}
+    alias, sp_written, restore_at = None, False, set()
     for i, ins in enumerate(block):
+        if alias and alias in _writes(ins) and _mem_sp(ins, True, alias) is None: alias = None
+        if ins.mnemonic == 'mov' and re.fullmatch(r'x\d+, sp', ins.op_str) and not sp_written:
+            alias = ins.op_str.split(',')[0]
+        if 'sp' in {ins.reg_name(r) for r in ins.regs_access()[1]} and _mem_sp(ins, False) is None: sp_written = True
         d = _mem_sp(ins, False)
         if d is not None:
             regs = [op.reg for op in ins.operands[:2] if op.type == capstone.arm64_const.ARM64_OP_REG]
             for reg in regs:
                 name = ins.reg_name(reg); name = 'x29' if name == 'fp' else 'x30' if name == 'lr' else re.sub(r'^[wx]', 'x', name)
                 saved.setdefault(name, []).append((d, i))
-        d = _mem_sp(ins, True)
+        d = _mem_sp(ins, True, alias)
         if d is not None:
+            restore_at.add(i)
             regs = [op.reg for op in ins.operands[:2] if op.type == capstone.arm64_const.ARM64_OP_REG]
             for reg in regs:
                 name = ins.reg_name(reg); name = 'x29' if name == 'fp' else 'x30' if name == 'lr' else re.sub(r'^[wx]', 'x', name)
                 restored.setdefault(name, []).append((d, i))
     writes = set().union(*(_writes(ins) for ins in block)) if block else set()
     for reg in sorted(writes - allowed):
-        wi = [i for i, ins in enumerate(block) if reg in _writes(ins) and not (i > 0 and _mem_sp(ins, True) is not None)]
+        wi = [i for i, ins in enumerate(block) if reg in _writes(ins) and not (i > 0 and i in restore_at)]
         dead = any(ins.mnemonic in ('br', 'blr') and ins.operands and ins.reg_name(ins.operands[0].reg) in (reg, reg[1:]) for ins in block)
         ok = dead or any(sd == rd and si < min(wi, default=10**9) and ri > max(wi, default=-1)
                  for sd, si in saved.get(reg, []) for rd, ri in restored.get(reg, []))
