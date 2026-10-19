@@ -4,12 +4,16 @@
 Each code site is matched by the instructions around it in a known version (by default 1.1.2, then 1.0.0):
 PC-relative fields (B/BL, B.cond, CBZ/TBZ, ADR/ADRP, LDR literal) and the page offsets that follow an ADRP
 are masked; the window grows until exactly one place in the new main matches. Data sites are found through
-code that addresses them (ADRP + LDR/ADD) or, for a GOT slot, through the import's JUMP_SLOT relocation.
+code that addresses them (ADRP + LDR/ADD); the GOT slot or PLT stub of an imported function through its
+JUMP_SLOT relocation (by symbol name); a function entry whose surroundings changed through its direct callers
+(every caller that maps must branch to the same place).
 The original instruction words at every code site are printed for both versions: runtime patches still
 check them before writing, so a moved site with a different word needs a new expected value, not just an offset.
 
-usage: map_version_sites.py --to v121 [--root <tree with extracted/<version>/exefs/main>] [--from v112]
-Prints a report and, with --header, the #define lines for a new game_version.h block. Reads only local images.
+usage: map_version_sites.py --to v121 [--root <tree with extracted/<version>/exefs/main>] [--from v112] [--header]
+       map_version_sites.py --to v121 --code 0x80b3a0,...   (other code offsets of the --from version, e.g. test windows)
+Self-check first: --from v0 --to v112 must reproduce the 1.1.2 block (2026-10-19: 32 of 32). Exit status 1 when a site
+is not found or disagrees with the target version's block if it already has one. Reads only local images.
 """
 import argparse
 import re
