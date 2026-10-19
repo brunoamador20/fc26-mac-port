@@ -6,13 +6,14 @@
 /* Layout inside the safe area (clear of the iPhone's notch, rounded corners and home indicator), like a Switch
    controller: ZL/L and R/ZR along the top with − and + between them, and two columns mirroring each other: on the left
    the d-pad above the left stick, on the right A/B/X/Y above the camera stick. Each stick is drawn at its resting place
-   until a finger takes it, with a smaller L3 / R3 (stick press) button just inside it.
+   until a finger takes it; the sticks sit a little toward the middle. L3 / R3 (stick press) are in the bottom corners,
+   under ZL / ZR.
    A touch that misses every button is a stick, centred where the finger went down: the left stick on the left half,
    the camera (right stick) on the right half. Bits are the Npad buttons. While a game controller is connected the layer
    is hidden; a touch shows it and works as usual, and it hides again 3 seconds after the last finger lifts. */
 typedef struct { CGPoint at; uint64_t bit; NSString *label; CGFloat size; } TouchButton;
 enum { kButtonCount = 16 };
-static const CGFloat kButtonSize = 46, kSmallButtonSize = 36;
+static const CGFloat kButtonSize = 46;
 static const NSTimeInterval kHideAfter = 3;   // seconds after the last finger lifts, with a controller connected
 
 @implementation TOTKTouchPad {
@@ -84,21 +85,21 @@ static const NSTimeInterval kHideAfter = 3;   // seconds after the last finger l
     return (side + self.area.size.width * .05 - kButtonSize / 2) / 2;
 }
 - (CGPoint)restingStick:(BOOL)right {
-    CGRect a = self.area; CGFloat inset = self.columnInset;
+    CGRect a = self.area; CGFloat inset = self.columnInset + self.stickRadius * 1.9;
     return CGPointMake(right ? CGRectGetMaxX(a) - inset : CGRectGetMinX(a) + inset, CGRectGetMinY(a) + a.size.height * .80);
 }
 
 - (void)buttons:(TouchButton *)b {
     CGRect a = self.area; CGFloat x = CGRectGetMinX(a), y = CGRectGetMinY(a), w = a.size.width, h = a.size.height, d = self.diamond;
-    CGFloat top = y + h * .12;
-    CGFloat inset = self.columnInset, shift = self.shoulderShift, press = self.stickRadius + kSmallButtonSize / 2 + 6;
-    CGPoint left = [self restingStick:NO], right = [self restingStick:YES], face = CGPointMake(x + w - inset, y + h * .42), pad = CGPointMake(x + inset, y + h * .42);
+    CGFloat top = y + h * .12, bottom = y + h * .88;
+    CGFloat inset = self.columnInset, shift = self.shoulderShift;
+    CGPoint face = CGPointMake(x + w - inset, y + h * .42), pad = CGPointMake(x + inset, y + h * .42);
     TouchButton all[kButtonCount] = {
         {{face.x + d, face.y}, 1, @"A", kButtonSize}, {{face.x, face.y + d}, 2, @"B", kButtonSize}, {{face.x, face.y - d}, 4, @"X", kButtonSize}, {{face.x - d, face.y}, 8, @"Y", kButtonSize},
         {{x + w * .05 - shift, top}, 256, @"ZL", kButtonSize}, {{x + w * .16 - shift, top}, 64, @"L", kButtonSize}, {{x + w * .84 + shift, top}, 128, @"R", kButtonSize}, {{x + w * .95 + shift, top}, 512, @"ZR", kButtonSize},
         {{x + w * .40, top}, 2048, @"−", kButtonSize}, {{x + w * .60, top}, 1024, @"+", kButtonSize},
         {{pad.x - d, pad.y}, 4096, @"◀", kButtonSize}, {{pad.x, pad.y - d}, 8192, @"▲", kButtonSize}, {{pad.x + d, pad.y}, 16384, @"▶", kButtonSize}, {{pad.x, pad.y + d}, 32768, @"▼", kButtonSize},
-        {{left.x + press, left.y}, 16, @"L3", kSmallButtonSize}, {{right.x - press, right.y}, 32, @"R3", kSmallButtonSize}};
+        {{x + w * .05 - shift, bottom}, 16, @"L3", kButtonSize}, {{x + w * .95 + shift, bottom}, 32, @"R3", kButtonSize}};
     for (int i = 0; i < kButtonCount; i++) b[i] = all[i];
 }
 
