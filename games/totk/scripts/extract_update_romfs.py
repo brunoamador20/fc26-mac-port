@@ -17,6 +17,10 @@ from extract_exefs import (load_keys, container_entries, common_tickets, nca_inv
                            program_nca, record_offset, require)
 from extract_romfs import index_romfs
 
+# Lockpick_RCM writes these as 17 bytes: the 16-byte source plus a trailing NUL.
+# hactool exits unless the value is exactly 16 bytes, before any BKTR check.
+_LOCKPICK_KEK_SOURCE = re.compile(r'(?:mariko_)?master_kek_source_[0-9a-f]{2}\Z')
+
 
 def copy_range(source, offset, size, target):
     with source.open('rb') as src, target.open('wb') as dst:
@@ -26,6 +30,35 @@ def copy_range(source, offset, size, target):
             require(bool(data), 'Truncated NCA')
             dst.write(data)
             size -= len(data)
+
+
+def hactool_prod_keys(source, target):
+    """Copy prod.keys for hactool. The caller's file is left unchanged.
+
+    A Lockpick trailing NUL on master_kek_source / mariko_master_kek_source is
+    dropped. Any other length is rejected without recording the key bytes.
+    """
+    lines = []
+    for number, line in enumerate(Path(source).read_text().splitlines(), 1):
+        body, sep, comment = line.partition('#')
+        if '=' not in body:
+            lines.append(line)
+            continue
+        name, value = body.split('=', 1)
+        keyname = name.strip().lower()
+        if _LOCKPICK_KEK_SOURCE.fullmatch(keyname) is None:
+            lines.append(line)
+            continue
+        hexvalue = value.strip()
+        require(re.fullmatch(r'[0-9a-fA-F]+', hexvalue) is not None, f'Invalid key encoding at line {number}')
+        if len(hexvalue) == 34 and hexvalue[-2:].lower() == '00':
+            hexvalue = hexvalue[:32]
+        require(len(hexvalue) == 32, f'{keyname} must be 16 bytes')
+        suffix = f' #{comment}' if sep else ''
+        lines.append(f'{name.strip()} = {hexvalue}{suffix}')
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        f.write('\n'.join(lines) + ('\n' if lines else ''))
 
 
 def merge(base, update, keys_path, hactool, output, *, base_romfs=None):
@@ -70,8 +103,10 @@ def merge(base, update, keys_path, hactool, output, *, base_romfs=None):
         if not base_romfs:
             environment.update(MNG_BASE_RANGE_OFFSET=str(record_offset(inputs[0][1])),
                                MNG_BASE_RANGE_SIZE=str(inputs[0][1]['size']))
+        hactool_keys = tmp/'hactool.keys'
+        hactool_prod_keys(keys_path, hactool_keys)
         command = [str(hactool.resolve()), '-x', '-y', '--disablekeywarns', '--suppresskeys',
-                   '-k', str(keys_path.resolve()), base_arg,
+                   '-k', str(hactool_keys.resolve()), base_arg,
                    f'--section{sections[0]}='+str(result/'romfs.bin'), str(tmp/'update.nca')]
         with (result/'merge.log').open('w') as log:
             code = subprocess.run(command, env=environment,
