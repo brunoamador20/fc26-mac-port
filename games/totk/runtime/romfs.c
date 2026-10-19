@@ -41,14 +41,18 @@ static char mount_name[32];
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t read_calls,read_bytes,read_ns,read_prepare_ns,read_report_ns;
 static uint64_t handles[NH]; /* file index + 1; 0 is free */
-/* Overlay (scripts/make_romfs_patches.py): files listed in <TOTK_ROMFS_PATCHES, default extracted/v0/romfs-patches>/manifest.tsv
-   are served in place of the originals. Each line names a RomFS path, the overlay's size and SHA-256 and the original's
-   SHA-256; a missing path, a size or hash mismatch or a changed original stops the start (regenerate the overlay).
-   TOTK_ROMFS_PATCHES=0 serves the originals. */
-#define NOVL 16
-static struct { uint64_t index,size; int fd; } overlays[NOVL];
-static unsigned noverlay;
-static uint8_t handle_ovl[NH]; /* overlay slot + 1 of an open handle, 0 = original */
+/* Overlays: files listed in a directory's manifest.tsv are served in place of the originals. Each line names a RomFS
+   path, the overlay's size and SHA-256 and the original's SHA-256; a missing path, a size or hash mismatch or a changed
+   original stops the start. The directories, in this order: the build's patches (scripts/make_romfs_patches.py;
+   TOTK_ROMFS_PATCHES, default extracted/<version>/romfs-patches, 0 = none), the true-2K HeapDef overlay
+   (scripts/make_output_res_overlay.py) and the player's mods (TOTK_ROMFS_MODS, which the launcher sets to
+   <data>/mods/<version>; no manifest there = none). Each file can be replaced once. An overlay file is opened when the
+   game opens it, so a mod can replace thousands of files (a dub's voice streams) without holding a descriptor each. */
+typedef struct { uint64_t index,size; char *path; } Overlay;
+static Overlay *overlays; /* sorted by RomFS index after overlay_init */
+static size_t noverlay,overlay_cap;
+static uint32_t handle_ovl[NH]; /* overlay slot + 1 of an open handle, 0 = original */
+static int handle_fd[NH];       /* the handle's open overlay file, when handle_ovl is set */
 typedef struct { uint64_t offset,size;uint32_t name,len; } Entry;
 _Static_assert(sizeof(Entry)==24,"index entry layout");
 static Entry entry(uint64_t i) {Entry e;memcpy(&e,index_bytes+24+i*24,24);return e;}
@@ -135,8 +139,8 @@ static void verify_image(int fd,const char *dir) {
   if(ok){if(rename(tmp,path)!=0)unlink(tmp);}else unlink(tmp);}
 }
 static void sha_range(int fd,uint64_t offset,uint64_t size,const char *expected,const char *what) {
- CC_SHA256_CTX c;CC_SHA256_Init(&c);uint8_t *buffer=malloc(8<<20);need(buffer!=NULL,"hash buffer");
- for(uint64_t done=0;done<size;){size_t chunk=size-done>(8u<<20)?(8u<<20):(size_t)(size-done);ssize_t n=src_pread(fd,buffer,chunk,(off_t)(offset+done));need(n>0,"read hash input");CC_SHA256_Update(&c,buffer,(CC_LONG)n);done+=(uint64_t)n;}
+ size_t cap=size<(8u<<20)?(size_t)size:(8u<<20);CC_SHA256_CTX c;CC_SHA256_Init(&c);uint8_t *buffer=malloc(cap?cap:1);need(buffer!=NULL,"hash buffer");
+ for(uint64_t done=0;done<size;){size_t chunk=size-done>cap?cap:(size_t)(size-done);ssize_t n=src_pread(fd,buffer,chunk,(off_t)(offset+done));need(n>0,"read hash input");CC_SHA256_Update(&c,buffer,(CC_LONG)n);done+=(uint64_t)n;}
  uint8_t d[32];char hex[65];CC_SHA256_Final(d,&c);free(buffer);for(unsigned i=0;i<32;i++)snprintf(hex+i*2,3,"%02x",d[i]);
  if(strcmp(hex,expected)){fprintf(stderr,"[totk] RomFS overlay: %s SHA-256 %s, manifest says %s\n",what,hex,expected);runtime_fail("RomFS overlay integrity mismatch");}
 }
@@ -146,26 +150,34 @@ static void overlay_load(const char *dir,int required) {
  char path[4096];need(snprintf(path,sizeof(path),"%s/manifest.tsv",dir)<(int)sizeof(path),"RomFS overlay path");FILE *m=fopen(path,"r");
  if(!m&&required){fprintf(stderr,"[totk] RomFS overlay: %s missing; build it with scripts/make_output_res_overlay.py <w>x<h>\n",path);runtime_fail("true-2K HeapDef overlay missing (make romfs-patches-out OUTPUT_RES=<w>x<h>)");}
  if(!m){fprintf(stderr,"[totk] RomFS overlay: none (%s)\n",path);return;}
- char line[8192];
+ char line[8192];size_t first=noverlay;
  while(fgets(line,sizeof(line),m)){
   if(line[0]=='#'||line[0]=='\n')continue;char name[4096],sha[65],orig[65];unsigned long long size=0;
   need(sscanf(line,"%4095[^\t]\t%llu\t%64[0-9a-f]\t%64[0-9a-f]",name,&size,sha,orig)==4&&strlen(sha)==64&&strlen(orig)==64,"RomFS overlay manifest line");
-  need(path_ok(name)&&noverlay<NOVL,"RomFS overlay path or count");uint64_t i=lower(name);need(i<file_count&&!strcmp(entry_name(entry(i)),name),"RomFS overlay names a file the RomFS lacks");
-  for(unsigned k=0;k<noverlay;k++)need(overlays[k].index!=i,"RomFS overlay: two overlays replace the same file");
+  need(path_ok(name),"RomFS overlay path");uint64_t i=lower(name);need(i<file_count&&!strcmp(entry_name(entry(i)),name),"RomFS overlay names a file the RomFS lacks");
   Entry e=entry(i);sha_range(image_fd,e.offset,e.size,orig,"original");
-  char file[8200];need(snprintf(file,sizeof(file),"%s/%s",dir,name)<(int)sizeof(file),"RomFS overlay file path");int fd=open(file,O_RDONLY);struct stat st;
-  need(fd>=0&&fstat(fd,&st)==0&&(uint64_t)st.st_size==size,"RomFS overlay file missing or wrong size");sha_range(fd,0,size,sha,name);
-  overlays[noverlay].index=i;overlays[noverlay].size=size;overlays[noverlay].fd=fd;noverlay++;
-  fprintf(stderr,"[totk] RomFS overlay: %s (%llu bytes) replaces the original\n",name,size);
+  char file[8200];need(snprintf(file,sizeof(file),"%s/%s",dir,name)<(int)sizeof(file),"RomFS overlay file path");int fd=open(file,O_RDONLY|O_CLOEXEC);struct stat st;
+  need(fd>=0&&fstat(fd,&st)==0&&(uint64_t)st.st_size==size,"RomFS overlay file missing or wrong size");sha_range(fd,0,size,sha,name);close(fd);
+  if(noverlay==overlay_cap){overlay_cap=overlay_cap?overlay_cap*2:16;overlays=realloc(overlays,overlay_cap*sizeof(*overlays));need(overlays!=NULL,"RomFS overlay table");}
+  char *copy=strdup(file);need(copy!=NULL,"RomFS overlay path copy");overlays[noverlay++]=(Overlay){i,size,copy};
+  if(noverlay-first<=16)fprintf(stderr,"[totk] RomFS overlay: %s (%llu bytes) replaces the original\n",name,size);
  }
  fclose(m);
+ if(noverlay-first>16)fprintf(stderr,"[totk] RomFS overlay: %zu files from %s (%zu more not listed)\n",noverlay-first,dir,noverlay-first-16);
 }
-/* TOTK_ROMFS_PATCHES (default extracted/v0/romfs-patches; 0 = none), and with a true-2K output bigger than 1920x1080 also
-   <TOTK_ROMFS_PATCHES_OUT, default extracted/v0/romfs-patches-out>/<w>x<h> (the HeapDef sizes, scripts/make_output_res_overlay.py). */
+static int overlay_order(const void *a,const void *b) {uint64_t x=((const Overlay *)a)->index,y=((const Overlay *)b)->index;return (x>y)-(x<y);}
+/* The overlay slot + 1 that replaces RomFS file i, or 0. */
+static uint32_t overlay_slot(uint64_t i) {size_t lo=0,hi=noverlay;while(lo<hi){size_t m=lo+(hi-lo)/2;if(overlays[m].index<i)lo=m+1;else hi=m;}return lo<noverlay&&overlays[lo].index==i?(uint32_t)(lo+1):0;}
+/* TOTK_ROMFS_PATCHES (default extracted/<version>/romfs-patches; 0 = none); with a true-2K output bigger than 1920x1080
+   also <TOTK_ROMFS_PATCHES_OUT, default extracted/<version>/romfs-patches-out>/<w>x<h> (the HeapDef sizes,
+   scripts/make_output_res_overlay.py); then the player's mods in TOTK_ROMFS_MODS (0 = none). */
 static void overlay_init(void) {
  const char *dir=getenv("TOTK_ROMFS_PATCHES");if(!dir||strcmp(dir,"0"))overlay_load(dir?dir:"extracted/" TOTK_GAME_DIR "/romfs-patches",0);
  unsigned w,h;if(runtime_output_res(&w,&h)&&runtime_output_res_extra_bytes()){const char *out=getenv("TOTK_ROMFS_PATCHES_OUT");char d[4096];
   need(snprintf(d,sizeof(d),"%s/%ux%u",out?out:"extracted/" TOTK_GAME_DIR "/romfs-patches-out",w,h)<(int)sizeof(d),"RomFS output overlay path");overlay_load(d,1);}
+ const char *mods=getenv("TOTK_ROMFS_MODS");if(mods&&*mods&&strcmp(mods,"0"))overlay_load(mods,0);
+ if(noverlay)qsort(overlays,noverlay,sizeof(*overlays),overlay_order);
+ for(size_t k=1;k<noverlay;k++)need(overlays[k].index!=overlays[k-1].index,"RomFS overlay: two overlays replace the same file");
 }
 void runtime_fs_init(void) {
  if(image_fd>=0)return;
@@ -206,14 +218,15 @@ void runtime_fs_log(const char *what,const char *path){fs_log(what,path);}
 unsigned runtime_romfs_open(uint64_t *out,const char *path,int mode) {
  fs_log("rom",path?path:"(null)");
  if(!out||mode!=1)return UNSUPPORTED;const char *p=rom_path(path);if(!p)return NOT_FOUND;uint64_t i=lower(p);if(i>=file_count||strcmp(p,entry_name(entry(i))))return NOT_FOUND;
- uint8_t ov=0;for(unsigned k=0;k<noverlay;k++)if(overlays[k].index==i)ov=(uint8_t)(k+1);
- pthread_mutex_lock(&lock);for(unsigned j=1;j<NH;j++)if(!handles[j]){handles[j]=i+1;handle_ovl[j]=ov;*out=0x100000000ULL+j;pthread_mutex_unlock(&lock);return 0;}pthread_mutex_unlock(&lock);runtime_fail("file handle table full");return INVALID;
+ uint32_t ov=overlay_slot(i);int fd=-1;
+ if(ov){fd=open(overlays[ov-1].path,O_RDONLY|O_CLOEXEC);struct stat st;need(fd>=0&&fstat(fd,&st)==0&&(uint64_t)st.st_size==overlays[ov-1].size,"RomFS overlay file missing or changed size");}
+ pthread_mutex_lock(&lock);for(unsigned j=1;j<NH;j++)if(!handles[j]){handles[j]=i+1;handle_ovl[j]=ov;handle_fd[j]=fd;*out=0x100000000ULL+j;pthread_mutex_unlock(&lock);return 0;}pthread_mutex_unlock(&lock);runtime_fail("file handle table full");return INVALID;
 }
 static int handle_entry(uint64_t h,Entry *e) {if(h<=0x100000000ULL||h>=0x100000000ULL+NH)return 0;pthread_mutex_lock(&lock);uint64_t i=handles[h-0x100000000ULL];pthread_mutex_unlock(&lock);if(!i)return 0;*e=entry(i-1);return 1;}
 /* Where an open handle's bytes come from: the overlay file, or the original's range of the image. */
 static void handle_source(uint64_t h,const Entry *e,int *fd,uint64_t *base,uint64_t *size) {
- pthread_mutex_lock(&lock);uint8_t ov=handle_ovl[h-0x100000000ULL];pthread_mutex_unlock(&lock);
- if(ov){*fd=overlays[ov-1].fd;*base=0;*size=overlays[ov-1].size;}else{*fd=image_fd;*base=e->offset;*size=e->size;}
+ pthread_mutex_lock(&lock);uint32_t ov=handle_ovl[h-0x100000000ULL];int ofd=handle_fd[h-0x100000000ULL];pthread_mutex_unlock(&lock);
+ if(ov){*fd=ofd;*base=0;*size=overlays[ov-1].size;}else{*fd=image_fd;*base=e->offset;*size=e->size;}
 }
 unsigned runtime_romfs_read(uint64_t *out,uint64_t h,int64_t offset,void *buffer,uint64_t size) {
  Entry e;if(!out||offset<0||!handle_entry(h,&e))return INVALID;int fd;uint64_t base,fsize;handle_source(h,&e,&fd,&base,&fsize);if((uint64_t)offset>fsize||(!buffer&&size))return INVALID;
@@ -231,7 +244,7 @@ unsigned runtime_romfs_read(uint64_t *out,uint64_t h,int64_t offset,void *buffer
  *out=done;return 0;
 }
 unsigned runtime_romfs_size(int64_t *out,uint64_t h) {Entry e;if(!out||!handle_entry(h,&e))return INVALID;int fd;uint64_t base,size;handle_source(h,&e,&fd,&base,&size);*out=(int64_t)size;return 0;}
-void runtime_romfs_close(uint64_t h) {Entry e;if(!handle_entry(h,&e))runtime_fail("close invalid file handle");pthread_mutex_lock(&lock);handles[h-0x100000000ULL]=0;handle_ovl[h-0x100000000ULL]=0;pthread_mutex_unlock(&lock);}
+void runtime_romfs_close(uint64_t h) {Entry e;if(!handle_entry(h,&e))runtime_fail("close invalid file handle");uint64_t j=h-0x100000000ULL;pthread_mutex_lock(&lock);int fd=handle_ovl[j]?handle_fd[j]:-1;handles[j]=0;handle_ovl[j]=0;handle_fd[j]=-1;pthread_mutex_unlock(&lock);if(fd>=0)close(fd);}
 unsigned runtime_romfs_entry_type(int *out,const char *path) {
  if(!out)return INVALID;const char *p=rom_path(path);if(!p)return NOT_FOUND;uint64_t i=lower(p);if(i<file_count&&!strcmp(entry_name(entry(i)),p)){*out=1;return 0;}
  char dir[4096];if(snprintf(dir,sizeof(dir),"%s/",p)>=(int)sizeof(dir))return INVALID;i=lower(dir);if(i<file_count&&!strncmp(entry_name(entry(i)),dir,strlen(dir))){*out=0;return 0;}return NOT_FOUND;
@@ -263,8 +276,9 @@ void runtime_fs_probe(void) {
   need(runtime_romfs_open(&h,"rom://../Sound/Resource/Stream/Dm_OP_0001.bwav",1)!=0,"reject traversal after repeated root separator");
  }
  for(uint64_t i=0;i<file_count;i+=file_count/64){Entry e=entry(i);char p[4096];need(snprintf(p,sizeof(p),"rom:/%s",entry_name(e))<(int)sizeof(p),"probe path");uint64_t h=0,n=0;int64_t size;need(!runtime_romfs_open(&h,p,1)&&!runtime_romfs_size(&size,h)&&(uint64_t)size==e.size,"probe open/size");need(!runtime_romfs_read(&n,h,0,buffer,sizeof(buffer)),"probe partial read");for(uint64_t j=0;j<n;j++)sum=sum*131+buffer[j];need(!runtime_romfs_read(&n,h,size,buffer,1)&&n==0,"probe EOF");runtime_romfs_close(h);count++;}
- for(unsigned k=0;k<noverlay;k++){Entry e=entry(overlays[k].index);char p[4096];need(snprintf(p,sizeof(p),"rom:/%s",entry_name(e))<(int)sizeof(p),"probe overlay path");uint64_t oh=0,n=0;int64_t size=0;uint8_t a[64],b[64];
-  need(!runtime_romfs_open(&oh,p,1)&&!runtime_romfs_size(&size,oh)&&(uint64_t)size==overlays[k].size,"probe overlay size");need(!runtime_romfs_read(&n,oh,size-64,a,64)&&n==64&&pread(overlays[k].fd,b,64,(off_t)(size-64))==64&&!memcmp(a,b,64),"probe overlay bytes");runtime_romfs_close(oh);}
+ for(size_t k=0;k<noverlay;k++){Entry e=entry(overlays[k].index);char p[4096];need(snprintf(p,sizeof(p),"rom:/%s",entry_name(e))<(int)sizeof(p),"probe overlay path");uint64_t oh=0,n=0;int64_t size=0;uint8_t a[64],b[64];
+  need(!runtime_romfs_open(&oh,p,1)&&!runtime_romfs_size(&size,oh)&&(uint64_t)size==overlays[k].size,"probe overlay size");uint64_t tail=overlays[k].size<64?overlays[k].size:64;int fd=open(overlays[k].path,O_RDONLY|O_CLOEXEC);
+  need(fd>=0&&!runtime_romfs_read(&n,oh,size-(int64_t)tail,a,tail)&&n==tail&&pread(fd,b,tail,(off_t)(size-(int64_t)tail))==(ssize_t)tail&&!memcmp(a,b,tail),"probe overlay bytes");close(fd);runtime_romfs_close(oh);}
  uint64_t h=0;need(runtime_romfs_open(&h,"rom:/../main",1)==NOT_FOUND,"reject traversal");need(runtime_romfs_open(&h,"rom:/absent",2)==UNSUPPORTED,"reject write open");
- printf("{\"status\":\"pass\",\"files\":%llu,\"sampled_files\":%u,\"overlays\":%u,\"read_digest\":\"%016llx\",\"scope\":\"read-only mount/open/size/read/EOF, verified overlays; no game startup\"}\n",(unsigned long long)file_count,count,noverlay,(unsigned long long)sum);
+ printf("{\"status\":\"pass\",\"files\":%llu,\"sampled_files\":%u,\"overlays\":%zu,\"read_digest\":\"%016llx\",\"scope\":\"read-only mount/open/size/read/EOF, verified overlays; no game startup\"}\n",(unsigned long long)file_count,count,noverlay,(unsigned long long)sum);
 }
