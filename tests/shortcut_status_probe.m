@@ -79,9 +79,16 @@ int main(int argc, const char **argv) { @autoreleasepool {
         NSSize fit = [panel.label sizeThatFits:panel.label.bounds.size];
         assert(fit.height <= panel.label.bounds.size.height);
     }
+    /* Key 1: all -> minimal (FPS only) -> off -> all. */
+    hud_publish(HUD_FPS, "FPS 60  2560x1440", 0); hud_publish(HUD_SHADER, "New shaders 3 / total 9", 0);
+    press(18); tick(); assert(fps_overlay_hints_enabled() && !fps_overlay_full_hud());
+    if (hud_compact()) {
+        assert(!panel.hidden); expect(panel, @"FPS 60  2560x1440");
+        assert(![panel.label.stringValue containsString:@"New shaders"] && ![panel.label.stringValue containsString:@"快捷键"]);
+    } else assert(panel.hidden);   // corners: the FPS corner stays in the picture, the shortcut box goes
     press(18); tick(); assert(panel.hidden && !fps_overlay_hints_enabled());
     mfx_set(MFX_MAX); mfx_latch(); tick();
-    press(18); tick(); assert(!panel.hidden && fps_overlay_hints_enabled());
+    press(18); tick(); assert(!panel.hidden && fps_overlay_full_hud());
     expect(panel, @"补帧：当前 不限帧");
     hud_publish(0, "60 FPS (30 + 30)", 0); tick();
     if (hud_compact()) expect(panel, @"60 FPS (30 + 30)");
@@ -93,6 +100,6 @@ int main(int argc, const char **argv) { @autoreleasepool {
                 writeToFile:@(argv[1]) atomically:YES]);
     }
     [panel.timer invalidate];
-    puts("pass: current modes, keyboard cycling, frame latch, localization, both layouts and hide/restore");
+    puts("pass: current modes, keyboard cycling, frame latch, localization, both layouts and key 1 all/minimal/off");
     return 0;
 }}
