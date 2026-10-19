@@ -21,11 +21,14 @@ typedef struct {
     uint8_t data[0x100]; uint32_t data_size;
     uint32_t copy[8], move[8]; unsigned ncopy, nmove;
     IpcBuffer xout[IPC_MAX_BUF]; unsigned nxout;  // out-pointer data placed by the service into client C buffers
+    uint32_t objects[8]; unsigned nobjects;       // domain object ids out (ipc.c fills them from moved sessions)
 } IpcResponse;
 
 struct IpcSession;
 typedef void (*IpcHandler)(struct IpcSession *s, const IpcRequest *rq, IpcResponse *rs);
-typedef struct IpcSession { const char *name; IpcHandler handler; void *state; void (*close)(void *state); } IpcSession;
+struct IpcDomain;
+/* domain: set once the client converts the session into a CMIF domain (ipc.c); its objects are sessions of their own. */
+typedef struct IpcSession { const char *name; IpcHandler handler; void *state; void (*close)(void *state); struct IpcDomain *domain; } IpcSession;
 
 /* Service registry: open(state out) creates per-session state for a named service. */
 typedef void *(*IpcOpen)(void);
@@ -44,6 +47,7 @@ _Noreturn void ipc_unimplemented(const IpcSession *s, const IpcRequest *rq);
 /* threads.c */
 uint32_t runtime_handle_new(int session, void *obj);
 void *runtime_handle_get(uint32_t h, int session);
+void *runtime_handle_take_session(uint32_t h);   /* removes the handle, keeps the session */
 uint32_t runtime_event_new(void);
 uint32_t runtime_event_readable(uint32_t writable);
 void runtime_event_signal(uint32_t writable);

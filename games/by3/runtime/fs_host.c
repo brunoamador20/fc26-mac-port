@@ -37,7 +37,8 @@ enum { OPEN_READ = 1, OPEN_WRITE = 2, OPEN_APPEND = 4 };
 
 typedef struct { int kind; char name[32]; char root[1024]; } Mount;
 typedef struct { int fd, mode, save; } File;   /* save: on a save-data mount (counts for runtime_fs_save_busy) */
-typedef struct { DIR *dir; char path[1024]; int mode; } Dir;
+/* A RomFS directory is a snapshot of its children taken at open (rom != NULL; dir stays NULL). */
+struct RomEntry; typedef struct { DIR *dir; char path[1024]; int mode; struct RomEntry *rom; int64_t nrom, pos; } Dir;
 static Mount mounts[16];
 static File files[NFILES];
 static Dir dirs[NDIRS];
@@ -175,6 +176,12 @@ static void unmount(const char *name) {
     pthread_mutex_unlock(&lock);
     if (!runtime_romfs_owns(name)) runtime_fail("unmount of unknown fs mount");
 }
+/* EnsureSaveData(uid) (Bayonetta 3): the profile's save folder is made when storage starts; only the local account owns one. */
+static unsigned ensure_save(const uint64_t *uid) {
+    ready(); uint64_t me[2]; runtime_account_uid(me);
+    if (!uid || uid[0] != me[0] || uid[1] != me[1]) runtime_fail("EnsureSaveData for an unknown account");
+    return 0;
+}
 static unsigned commit(const char *name) {
     pthread_mutex_lock(&lock); int found = 0, save = 0;
     for (int i = 0; i < 16; i++) if (mounts[i].kind && !strcmp(mounts[i].name, name)) { found = 1; save = mounts[i].kind == M_SAVE; }
@@ -278,18 +285,45 @@ typedef struct { char name[769]; uint8_t pad0[3]; int8_t type; uint8_t pad1[3]; 
 _Static_assert(sizeof(DirectoryEntry) == 0x310, "nn::fs::DirectoryEntry");
 static unsigned create_directory(const char *path) { char p[1100]; unsigned r = save_change_path(path, p, sizeof p); if (r) return r; return mkdir(p, 0700) ? errno_result() : 0; }
 static unsigned delete_recursive(const char *path) { char p[1100]; unsigned r = save_change_path(path, p, sizeof p); if (r) return r; struct stat st; if (stat(p, &st)) return R_PATH_NOT_FOUND; return remove_tree(p) ? R_INVALID_ARGUMENT : 0; }
+struct RomEntry { char name[769]; int is_dir; int64_t size; };
+typedef struct { struct RomEntry *list; int64_t n, cap; } RomList;
+static void rom_add(void *ctx, const char *name, int is_dir, int64_t size) {
+    RomList *l = ctx;
+    if (l->n == l->cap) { l->cap = l->cap ? l->cap * 2 : 64; l->list = realloc(l->list, (size_t)l->cap * sizeof *l->list); need(l->list != NULL, "RomFS directory listing"); }
+    struct RomEntry *e = &l->list[l->n++]; snprintf(e->name, sizeof e->name, "%s", name); e->is_dir = is_dir; e->size = size;
+}
+static unsigned open_rom_directory(uint64_t *out, const char *path, int mode) {
+    if (!out || mode < 1 || mode > 3) return R_INVALID_ARGUMENT;
+    RomList l = {0}; unsigned r = runtime_romfs_list(path, mode, rom_add, &l);
+    if (r) { fprintf(stderr, "[totk] RomFS directory %s: result %#x\n", path, r); free(l.list); return r; }
+    fprintf(stderr, "[totk] RomFS directory %s: %lld entries\n", path, (long long)l.n);
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < NDIRS; i++) if (!dirs[i].dir && !dirs[i].rom) {
+        dirs[i] = (Dir){.mode = mode, .rom = l.list ? l.list : calloc(1, sizeof *l.list), .nrom = l.n};
+        snprintf(dirs[i].path, sizeof dirs[i].path, "%s", path); *out = DIR_BASE + (uint64_t)i; pthread_mutex_unlock(&lock); return 0;
+    }
+    pthread_mutex_unlock(&lock); runtime_fail("host directory handle table full");
+}
 static unsigned open_directory(uint64_t *out, const char *path, int mode) {
-    if (runtime_romfs_owns(path)) { fprintf(stderr, "[totk] OpenDirectory on RomFS %s\n", path); runtime_fail("RomFS directory listing not implemented"); }
+    if (getenv("TOTK_FS_LOG")) fprintf(stderr, "[totk-fs] OpenDirectory %s mode %d\n", path ? path : "(null)", mode);
+    if (runtime_romfs_owns(path)) return open_rom_directory(out, path, mode);
     char p[1100]; unsigned r = host_path(path, p, sizeof p); if (r) return r; if (!out || mode < 1 || mode > 3) return R_INVALID_ARGUMENT;
     DIR *d = opendir(p); if (!d) return errno_result();
     pthread_mutex_lock(&lock);
-    for (int i = 0; i < NDIRS; i++) if (!dirs[i].dir) { dirs[i].dir = d; dirs[i].mode = mode; strcpy(dirs[i].path, p); *out = DIR_BASE + (uint64_t)i; pthread_mutex_unlock(&lock); return 0; }
+    for (int i = 0; i < NDIRS; i++) if (!dirs[i].dir && !dirs[i].rom) { dirs[i].dir = d; dirs[i].mode = mode; strcpy(dirs[i].path, p); *out = DIR_BASE + (uint64_t)i; pthread_mutex_unlock(&lock); return 0; }
     pthread_mutex_unlock(&lock); runtime_fail("host directory handle table full");
 }
 static unsigned read_directory(int64_t *count, DirectoryEntry *out, uint64_t h, int64_t max) {
     if (h < DIR_BASE || h >= DIR_BASE + NDIRS || !count || max < 0 || (!out && max)) return R_INVALID_ARGUMENT;
-    Dir *d = &dirs[h - DIR_BASE]; if (!d->dir) return R_INVALID_ARGUMENT;
+    Dir *d = &dirs[h - DIR_BASE]; if (!d->dir && !d->rom) return R_INVALID_ARGUMENT;
     int64_t n = 0; struct dirent *e;
+    if (d->rom) {
+        for (; n < max && d->pos < d->nrom; n++, d->pos++) {
+            const struct RomEntry *r = &d->rom[d->pos];
+            memset(&out[n], 0, sizeof *out); strcpy(out[n].name, r->name); out[n].type = r->is_dir ? 0 : 1; out[n].size = r->size;
+        }
+        *count = n; return 0;
+    }
     while (n < max && (e = readdir(d->dir))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || strlen(e->d_name) > 768) continue;
         char child[2048]; snprintf(child, sizeof child, "%s/%s", d->path, e->d_name); struct stat st; if (stat(child, &st)) continue;
@@ -299,8 +333,10 @@ static unsigned read_directory(int64_t *count, DirectoryEntry *out, uint64_t h, 
     *count = n; return 0;
 }
 static void close_directory(uint64_t h) {
-    if (h < DIR_BASE || h >= DIR_BASE + NDIRS || !dirs[h - DIR_BASE].dir) runtime_fail("close invalid directory handle");
-    pthread_mutex_lock(&lock); closedir(dirs[h - DIR_BASE].dir); dirs[h - DIR_BASE].dir = NULL; pthread_mutex_unlock(&lock);
+    if (h < DIR_BASE || h >= DIR_BASE + NDIRS || (!dirs[h - DIR_BASE].dir && !dirs[h - DIR_BASE].rom)) runtime_fail("close invalid directory handle");
+    pthread_mutex_lock(&lock); Dir *d = &dirs[h - DIR_BASE];
+    if (d->rom) { free(d->rom); d->rom = NULL; } else { closedir(d->dir); d->dir = NULL; }
+    pthread_mutex_unlock(&lock);
 }
 /* The fs priority only orders I/O inside the system fs process; host I/O is unordered. */
 static void set_priority(int priority) { (void)priority; }
@@ -354,6 +390,7 @@ void *runtime_fs_host_override(const char *name) {
         {"_ZN2nn2fs21MountSaveDataReadOnlyEPKcNS_13ApplicationIdERKNS_7account3UidE", mount_save_ro},
         {"_ZN2nn2fs18IsSaveDataExistingENS_13ApplicationIdERKNS_7account3UidE", save_exists},
         {"_ZN2nn2fs21MountTemporaryStorageEPKc", mount_temp}, {"_ZN2nn2fs7UnmountEPKc", unmount}, {"_ZN2nn2fs6CommitEPKc", commit},
+        {"_ZN2nn2fs14CommitSaveDataEPKc", commit}, {"_ZN2nn2fs14EnsureSaveDataERKNS_7account3UidE", ensure_save},   /* Bayonetta 3 */
         {"_ZN2nn2fs18CreateCacheStorageEill", create_cache}, {"_ZN2nn2fs18DeleteCacheStorageEi", delete_cache},
         {"_ZN2nn2fs17MountCacheStorageEPKci", mount_cache},
         {"_ZN2nn2fs20OpenCacheStorageListEPNS0_22CacheStorageListHandleE", open_cache_list},

@@ -80,6 +80,7 @@ extern __thread sigjmp_buf *runtime_fault_guard;
 void dm_guest_write_prepare(void *addr,size_t n);
 
 void runtime_trace_guest(uint64_t fp,uint64_t lr);
+uint64_t runtime_desired_language(void);   /* services.c: the game language as a Switch language code (8 bytes) */
 
 void runtime_front_run(void(*callback)(void));
 void runtime_boot_progress(const char *stage,uint64_t done,uint64_t total);
@@ -116,6 +117,7 @@ void runtime_input_key(unsigned code,int down);
 void runtime_input_clear(void);
 int runtime_handheld_mode(void);   /* TOTK_OPERATION_MODE=handheld (runtime/services.c) */
 void *runtime_input_override(const char *name);
+void *runtime_by3_override(const char *name);   /* runtime/system_services.c: Bayonetta 3 network and system functions */
 typedef struct { uint64_t buttons; int32_t lx,ly,rx,ry; int connected; } RuntimeGamepadState;
 void runtime_gamepad_start(void);
 void runtime_gamepad_read(RuntimeGamepadState *out);

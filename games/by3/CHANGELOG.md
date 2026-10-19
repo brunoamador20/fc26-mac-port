@@ -145,3 +145,42 @@ unimplemented stub too.
 
 Commits: `52edc0a` chore(by3): copy games/totk/runtime as the starting point; then feat(by3): a runtime that boots
 Bayonetta 3 to nnMain.
+
+### 2026-10-19: stage 3 (in progress), from `nnMain` into the game's own init
+
+Method: boot (headless until the game needs a window, then with one), read where the host stops, fix that, repeat.
+`scripts/symbolize.py` names sdk frames of a host failure (the SDK exports its functions; main mostly does not). When
+the game itself gives up, its init is a chain of `cbz w0, fail` calls: an lldb breakpoint on the failure label and the
+value of `lr` name the call that returned 0; repeat one level down. The game's own code is read with capstone.
+
+Answered so far (in order of appearance):
+
+- `set` (nn::settings) over IPC: language codes, region (`runtime/system_services.c`). `services.c`'s language choice is
+  now `runtime_desired_language()`, shared with it.
+- `bsd:u` offline: the client registers and its monitor starts; every socket fails with ENETDOWN.
+- **CMIF domains** in `ipc.c` (TotK never needed them): ConvertCurrentObjectToDomain, CopyFromCurrentDomain, domain
+  requests and closes, objects returned as ids instead of handles, clones sharing the domain (reference counted).
+  `threads.c` gained `runtime_handle_take_session` for that.
+- SDK functions answered by name: `nn::hid` single-state reads, touch screen (no touches), handheld activation, the
+  one-argument ShowControllerSupport (`input.c`); SDK 13's one-argument `MountRom` (`romfs.c`); `EnsureSaveData`,
+  `CommitSaveData` (`fs_host.c`); offline `nifm`, `ssl`, network-service-account, `friends` presence, network clock,
+  recording controls, `nsd` environment, `prepo` init (`system_services.c`, `runtime_by3_override`).
+  `nn::oe::ExecuteProgram` stops with a message: the game can start its program index 1 (`…A001`), not supported yet.
+- RomFS directory listing (`romfs.c` `runtime_romfs_list`, snapshot handles in `fs_host.c`): the game lists
+  `Contents:/` to find its 72 `.pkz` archives. The mount root is the empty path, which the strict file-path check
+  rejects; folders are trimmed and the root handled before it.
+- Shared graphics layer (`games/totk/third_party/d2r_gfx`, TOTK behaviour unchanged):
+  - `DM_POOL_BUFFER_MAX_MIB` (default 1024, the TotK guard against IOGPUFamily panics): Bayonetta 3 makes one 1348 MiB
+    NVN memory pool at start; its runtime sets 2048.
+  - Texture views can sample the stencil plane (`nvnTextureViewSetDepthStencilMode`): a spare bit of the packed 16-byte
+    view, and an `X32_Stencil8` Metal view of `Depth32Float_Stencil8`. Not verified yet: that the translated shader
+    declares that texture as unsigned integer, which Metal expects.
+
+Where it stands: Metal device, VI window and the NVN window (3-image swapchain, 1600x900) are up; 18 threads run; all
+`.pkz` archives are open and `shader2.dat` loads. The game's init (`main+0x6705c0`) now fails while creating its first
+shader programs by name (`hwfillcolor` at `main+0x69c7d8` → `main+0xcb5944` → … → `main+0xcff458`), and the game then
+crashes in its own shutdown path finalizing a subsystem that never started (`main+0xb8462c`). Not yet seen: audio
+(Wwise uses `AudioOut`, `audout:u`, which the host lacks), system fonts.
+
+Pitfalls: `TOTK_HEADLESS` is tested for presence, so an empty value still means headless. A game-side null
+dereference in a shutdown path is a symptom; the cause is the init step that failed before it.

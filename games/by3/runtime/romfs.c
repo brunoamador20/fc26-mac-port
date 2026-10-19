@@ -249,6 +249,7 @@ static unsigned mount_rom(const char *name,void *cache,uint64_t size) {
  (void)cache;(void)size;runtime_fs_init();if(!name||!path_ok(name)||strlen(name)>=sizeof(mount_name)||strchr(name,'/')||strchr(name,':'))return INVALID;
  if(*mount_name&&strcmp(name,mount_name))runtime_fail("second RomFS mount not implemented");strcpy(mount_name,name);return 0;
 }
+static unsigned mount_rom_name(const char *name) {return mount_rom(name,NULL,0);}   /* SDK 13 MountRom without a cache buffer (Bayonetta 3) */
 static unsigned cache_size(uint64_t *out) {if(!out)return INVALID;*out=0;return 0;}
 /* TOTK_FS_LOG=1: log every RomFS open with the time since start (shows how far the game gets without a picture). */
 static void fs_log(const char *what,const char *path){static int on=-1;static uint64_t t0;if(on<0){on=getenv("TOTK_FS_LOG")!=NULL;t0=runtime_now_ns();}if(on)fprintf(stderr,"[totk-fs] %8.3f %s %s\n",(runtime_now_ns()-t0)/1e9,what,path);}
@@ -289,12 +290,39 @@ unsigned runtime_romfs_entry_type(int *out,const char *path) {
  if(!out)return INVALID;const char *p=rom_path(path);if(!p)return NOT_FOUND;if(file_index(p)!=UINT64_MAX){*out=1;return 0;}
  char dir[4096];if(snprintf(dir,sizeof(dir),"%s/",p)>=(int)sizeof(dir))return INVALID;if(folder_exists(dir)){*out=0;return 0;}return NOT_FOUND;
 }
+/* Directory listing (Bayonetta 3 lists Contents:/): the immediate children of a folder, from the sorted index and the
+   added files. A name with no further '/' is a file; the first segment of a longer one is a subfolder, and the sorted
+   order keeps a subfolder's paths together, so each is reported once per source. */
+static void list_source(const char *prefix,size_t n,int mode,const char *(*name_at)(uint64_t),uint64_t (*size_at)(uint64_t),uint64_t from,uint64_t to,
+                        void (*add)(void *,const char *,int,int64_t),void *ctx,char *last_dir) {
+ for(uint64_t i=from;i<to;i++){const char *full=name_at(i);if(strncmp(full,prefix,n))break;const char *rest=full+n,*slash=strchr(rest,'/');
+  if(!slash){if(mode&2)add(ctx,rest,0,(int64_t)size_at(i));continue;}
+  size_t k=(size_t)(slash-rest);if(k>=768)continue;if(!strncmp(last_dir,rest,k)&&!last_dir[k])continue;
+  memcpy(last_dir,rest,k);last_dir[k]=0;if(mode&1)add(ctx,last_dir,1,0);}
+}
+static const char *list_index_name(uint64_t i){return entry_name(entry(i));}
+static uint64_t list_index_size(uint64_t i){return entry(i).size;}
+static const char *added_name(uint64_t k){return added[k];}
+static uint64_t added_size(uint64_t k){char full[4200];snprintf(full,sizeof full,"%s:/%s",mount_name,added[k]);uint64_t h;int64_t size=0;if(runtime_romfs_open(&h,full,1))return 0;runtime_romfs_size(&size,h);runtime_romfs_close(h);return (uint64_t)size;}
+unsigned runtime_romfs_list(const char *path,int mode,void (*add)(void *ctx,const char *name,int is_dir,int64_t size),void *ctx) {
+ /* A folder may be named with trailing slashes, and the mount root ("Contents:/") is the empty path; files keep the strict check. */
+ char trimmed[4096];if(!path||snprintf(trimmed,sizeof trimmed,"%s",path)>=(int)sizeof trimmed)return INVALID;
+ size_t tl=strlen(trimmed),ml=strlen(mount_name);while(tl>ml+2&&trimmed[tl-1]=='/')trimmed[--tl]=0;
+ int root=!strncmp(trimmed,mount_name,ml)&&trimmed[ml]==':'&&(!trimmed[ml+1]||(trimmed[ml+1]=='/'&&!trimmed[ml+2]));
+ const char *p=root?"":rom_path(trimmed);if(!p)return NOT_FOUND;char prefix[4096];
+ if(snprintf(prefix,sizeof prefix,"%s%s",p,*p&&p[strlen(p)-1]!='/'?"/":"")>=(int)sizeof prefix)return INVALID;
+ size_t n=strlen(prefix);if(n&&!folder_exists(prefix))return NOT_FOUND;
+ char last[768]="";list_source(prefix,n,mode,list_index_name,list_index_size,n?lower(prefix):0,file_count,add,ctx,last);
+ size_t lo=0,hi=nadded;while(lo<hi){size_t m=lo+(hi-lo)/2;if(strcmp(added[m],prefix)<0)lo=m+1;else hi=m;}
+ last[0]=0;list_source(prefix,n,mode,added_name,added_size,lo,nadded,add,ctx,last);
+ return 0;
+}
 int runtime_romfs_owns(const char *path) {size_t n=strlen(mount_name);return n&&path&&!strncmp(path,mount_name,n)&&path[n]==':';}
 int runtime_romfs_handle(uint64_t h) {return h>0x100000000ULL&&h<0x100000000ULL+NH;}
 unsigned runtime_romfs_read_options(uint64_t *out,uint64_t h,int64_t off,void *buf,uint64_t size) {return runtime_romfs_read(out,h,off,buf,size);}
 void *runtime_fs_override(const char *name) {
  static const struct{const char *name;void *fn;} map[]={
- {"_ZN2nn2fs8MountRomEPKcPvm",mount_rom},{"_ZN2nn2fs22QueryMountRomCacheSizeEPm",cache_size}};
+ {"_ZN2nn2fs8MountRomEPKcPvm",mount_rom},{"_ZN2nn2fs8MountRomEPKc",mount_rom_name},{"_ZN2nn2fs22QueryMountRomCacheSizeEPm",cache_size}};
  for(size_t i=0;i<sizeof(map)/sizeof(map[0]);i++)if(!strcmp(name,map[i].name))return map[i].fn;return runtime_fs_host_override(name);
 }
 void runtime_fs_probe(void) {

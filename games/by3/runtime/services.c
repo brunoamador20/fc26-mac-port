@@ -244,7 +244,7 @@ static void performance_config(int mode,int cfg) {if(mode<0||mode>1)runtime_fail
 /* The game's language: TOTK_LANG as given (a Switch language code), otherwise from a locale: TOTK_LOCALE, which the
    launcher sets to the app's first preferred language (BCP 47, e.g. "pt-BR"; it follows a per-app language), or else
    the Mac's current locale. Brazil maps to "pt-BR" only in the 1.4.3 build, whose RomFS has the official USpt text. */
-static uint64_t desired_language(void) {
+uint64_t runtime_desired_language(void) {
  const char *explicit=getenv("TOTK_LANG");char code[8]={0};
  if(explicit){if(strlen(explicit)>7)runtime_fail("language code too long");memcpy(code,explicit,strlen(explicit));}
  else {
@@ -289,7 +289,7 @@ void *runtime_observer(const char *name) {
 }
 void *runtime_override(const char *name) {
  static const struct {const char *name;void *fn;} entries[]={
-  {"_ZN2nn2oe18GetDesiredLanguageEv",desired_language},
+  {"_ZN2nn2oe18GetDesiredLanguageEv",runtime_desired_language},
   {"_ZN2nn2oe27SetPerformanceConfigurationENS0_15PerformanceModeEi",performance_config},
   {"_ZN2nn2oe15SetCpuBoostModeENS0_12CpuBoostModeE",cpu_boost},{"_ZN2nn2oe16GetOperationModeEv",operation_mode},{"_ZN2nn2oe18GetPerformanceModeEv",performance_mode},
   {"_ZN2nn2oe20SetFocusHandlingModeENS0_17FocusHandlingModeE",focus_mode},{"_ZN2nn2oe20GetCurrentFocusStateEv",focus_state},
@@ -299,6 +299,7 @@ void *runtime_override(const char *name) {
   {"_ZN2nn3err26InitializeContextWriterApiEv",host_error_init},{"_ZN2nn2fs24InitializeForApplicationEv",host_fs_init},
   {"_ZN2nn4pctl10InitializeEv",host_pctl_init},{"_ZN2nn4diag34InitializeApplicationAbortObserverEv",host_abort_init}};
  for(size_t i=0;i<sizeof(entries)/sizeof(entries[0]);i++)if(!strcmp(name,entries[i].name))return entries[i].fn;
+ void *by3=runtime_by3_override(name);if(by3)return by3;
  void *input=runtime_input_override(name);if(input)return input;void *font=runtime_font_override(name);if(font)return font;void *codec=runtime_codec_override(name);if(codec)return codec;void *movie=runtime_movie_override(name);if(movie)return movie;void *clock=runtime_time_override(name);if(clock)return clock;void *applet=runtime_applet_override(name);if(applet)return applet;void *swkbd=runtime_swkbd_override(name);if(swkbd)return swkbd;void *account=runtime_account_override(name);if(account)return account;void *fs=runtime_fs_override(name);if(fs)return fs;void *front=runtime_front_override(name);return front?front:runtime_gfx_override(name);
 }
 void runtime_core_checkpoint(void);
