@@ -1324,6 +1324,25 @@ static void pin_gone_flush(void) {   /* g_pin_mu not held */
     if (n) mtl_dead_forget(l, n);
     free(l);
 }
+#ifdef GAME_BOTW
+/* botw.md (the black save thumbnail): a recording copy whose serial was finalised is re-keyed to the texture now living at
+   its storage (botw_tex_follow, nvn_mtl.m): the copy's fields become the live texture's, and it moves to the live serial's
+   slot of the serial table (its address, which the ops hold, stays). 1 = copy was a pin and is re-keyed; 0 = not a pin. */
+int dm_nvn_pin_rekey(const tex_t *copy, const tex_t *live) {
+    pthread_mutex_lock(&g_pin_mu);
+    size_t j = 0; int found = 0;
+    if (g_pin_cap) for (j = pin_slot(copy->serial, g_pin_cap); g_pin_tab[j]; j = (j + 1) & (g_pin_cap - 1)) if (&g_pin_tab[j]->t == copy) { found = 1; break; }
+    if (found) {
+        pin_t *p = g_pin_tab[j];
+        probe_delete(g_pin_tab, g_pin_cap, j, home_serial);
+        p->t = *live;
+        for (j = pin_slot(p->t.serial, g_pin_cap); g_pin_tab[j]; j = (j + 1) & (g_pin_cap - 1)) {}
+        g_pin_tab[j] = p;
+    }
+    pthread_mutex_unlock(&g_pin_mu);
+    return found;
+}
+#endif
 int dm_nvn_pin_has_serial(uint64_t serial) {   /* nvn_mtl.m (texture finalize): a recording may still bring this serial to the replay */
     pthread_mutex_lock(&g_pin_mu);
     int has = 0;

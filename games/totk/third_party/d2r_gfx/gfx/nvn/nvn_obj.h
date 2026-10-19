@@ -154,7 +154,34 @@ void botw_ashot_poll(const void *t, long cur);
 /* Uncapped pacing ignores the game's present interval 2 by default (up to 120 fps; user 2026-10-19: "放开到120帧"); the
    real-time frame step keeps the game's speed (botw.md). TOTK_UNCAPPED_INTERVAL=0 keeps the interval (up to 60 fps). */
 #define UNCAPPED_INTERVAL_FROM_ENV(e) ((e) ? atoi(e) != 0 : 1)
+/* TOTK_T2B_LOG=1 (diagnostics, the black save thumbnail): every texture-to-buffer copy is logged with its source
+   texture and destination, and after the GPU is done with how many destination bytes are not zero (end of nvn_mtl.m) */
+void botw_t2b_note(const void *c, const void *tex, const void *mb, uint64_t mo, size_t n);
+#define BOTW_T2B_NOTE(c, t, mb, mo, n) botw_t2b_note((c), (__bridge const void *)(t), (mb), (mo), (n));
+/* A GPU copy into pool memory is newer than an earlier GPU rendering of a texture over the same bytes: that rendering's
+   write-back record (wb_note, written back at nvnMemoryPoolInvalidateMappedRange) is dropped, else it overwrote the copy
+   (the black save thumbnail, botw.md; end of nvn_mtl.m). */
+void botw_gpu_copy_supersedes(const void *mb, uint64_t mo, size_t n);
+#define BOTW_GPU_COPY_SUPERSEDES(mb, mo, n) botw_gpu_copy_supersedes((mb), (mo), (n));
+void botw_serial_note(uint64_t serial, const char *what);
+#define BOTW_SERIAL_NOTE(k, what) botw_serial_note((k), (what));
+#define BOTW_TILELOG_NOTE(t) if (tilelog_match(t)) botw_serial_note((t)->serial, NULL);
+void botw_tex_follow(const void *t);
+#define BOTW_TEX_FOLLOW(t) botw_tex_follow(t);
+int botw_dead_keep(uint64_t serial);
+#define BOTW_DEAD_KEEP(k) if (botw_dead_keep(k)) continue;
+#define BOTW_TEX_RELEASE_KEEP(k) if (!botw_dead_keep(k))
+void botw_dead_forget(const uint64_t *serials, size_t n);
+#define BOTW_DEAD_FORGET(s, n) botw_dead_forget((s), (n));
 #else
+#define BOTW_T2B_NOTE(c, t, mb, mo, n)
+#define BOTW_GPU_COPY_SUPERSEDES(mb, mo, n)
+#define BOTW_SERIAL_NOTE(k, what)
+#define BOTW_TILELOG_NOTE(t)
+#define BOTW_TEX_FOLLOW(t)
+#define BOTW_DEAD_KEEP(k)
+#define BOTW_TEX_RELEASE_KEEP(k)
+#define BOTW_DEAD_FORGET(s, n)
 #define UNCAPPED_INTERVAL_FROM_ENV(e) e && atoi(e)
 #define BOTW_RT_DUP_CLEARS()
 #define BOTW_RT_DUP_SKIP(i)

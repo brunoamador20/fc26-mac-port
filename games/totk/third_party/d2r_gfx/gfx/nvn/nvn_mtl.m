@@ -2142,7 +2142,7 @@ static inline void *hm_get_ptr(const nvn_hmap *m, const void *k) { return nvn_hm
 static void *serial_ptr(uint64_t k) { pthread_mutex_lock(&g_smu); void *o = nvn_hm_get(&g_by_serial, &k); pthread_mutex_unlock(&g_smu); return o; }
 static __unsafe_unretained id serial_get(uint64_t k) { pthread_mutex_lock(&g_smu); __unsafe_unretained id o = hm_get_id(&g_by_serial, &k); pthread_mutex_unlock(&g_smu); return o; }
 static void serial_put(uint64_t k, id o) { pthread_mutex_lock(&g_smu); id old = hm_get_id(&g_by_serial, &k); if (old) { if (stor_unref_locked(old, k)) defer_obj_unref(old); else defer_obj_release(old); } hm_put_id(&g_by_serial, &k, o); stor_ref_locked(o, k); ser_bump_locked(k); pthread_mutex_unlock(&g_smu); }
-static void serial_del(uint64_t k) { pthread_mutex_lock(&g_smu); id old = hm_get_id(&g_by_serial, &k); if (old) { if (stor_unref_locked(old, k)) defer_obj_unref(old); else defer_obj_release(old); } hm_del_id(&g_by_serial, &k); ser_bump_locked(k); pthread_mutex_unlock(&g_smu); }
+static void serial_del(uint64_t k) { pthread_mutex_lock(&g_smu); id old = hm_get_id(&g_by_serial, &k); if (old) { if (stor_unref_locked(old, k)) defer_obj_unref(old); else defer_obj_release(old); } hm_del_id(&g_by_serial, &k); ser_bump_locked(k); pthread_mutex_unlock(&g_smu); BOTW_SERIAL_NOTE(k, "serial_del") }
 static void ser_bump(uint64_t serial) { pthread_mutex_lock(&g_smu); ser_bump_locked(serial); pthread_mutex_unlock(&g_smu); }
 /* Dead serials (TOTK): the game finalizes temporary NVNtexture objects after recording and before the submission runs,
    so a replay may meet a serial that was already finalized. Previously the replay created a Metal texture for it and
@@ -2170,7 +2170,7 @@ static void dead_put_note(uint64_t k) {
 /* Called at the end of every submission: textures created for already-finalized serials are released after it completes. */
 static void dead_put_flush(void) {
     pthread_mutex_lock(&g_smu); int n = g_dead_put_n; uint64_t *l = n ? malloc(n * sizeof *l) : NULL; if (n) memcpy(l, g_dead_put, n * sizeof *l); g_dead_put_n = 0; pthread_mutex_unlock(&g_smu);
-    for (int i = 0; i < n; i++) { serial_del(l[i]); treg_drop_serial(l[i]); }
+    for (int i = 0; i < n; i++) { BOTW_DEAD_KEEP(l[i]) BOTW_SERIAL_NOTE(l[i], "dead_put_flush") serial_del(l[i]); treg_drop_serial(l[i]); }
     free(l);
 }
 uint64_t mtl_dead_serial_textures(void) { return g_dead_put_total; }
@@ -2357,7 +2357,7 @@ static int tilelog_match(const tex_t *t) {
     static int on = -1; static unsigned w, h; if (on < 0) { const char *e = getenv("DM_NVN_TILELOG"); on = e && sscanf(e, "%ux%u", &w, &h) == 2; }
     return on && t && t->d.width == w && t->d.height == h;
 }
-#define TILELOG(t, fmt, ...) do { if (tilelog_match(t)) MLOG("[tile] f%llu ser=%llu mem=%p nvnfmt=%#x lv%u " fmt, (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)(t)->serial, (void *)(t)->mem, (t)->d.format, (t)->d.levels, ##__VA_ARGS__); } while (0)
+#define TILELOG(t, fmt, ...) do { BOTW_TILELOG_NOTE(t) if (tilelog_match(t)) MLOG("[tile] f%llu ser=%llu mem=%p nvnfmt=%#x lv%u " fmt, (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)(t)->serial, (void *)(t)->mem, (t)->d.format, (t)->d.levels, ##__VA_ARGS__); } while (0)
 static void wb_ent_free(wb_ent *e) { if (!e) return; if (e->obj) { defer_obj_release((__bridge id)e->obj); CFRelease(e->obj); } free(e); }
 static void wb_note(const tex_t *t) {
     TILELOG(t, "GPU render (owned %d)", gpu_owned(t->serial));
@@ -2584,7 +2584,7 @@ static void stor_release_holders_locked(stor_ent *e) {
     for (int i = 0; i < e->nser; i++) {
         uint64_t s = e->ser[i]; id o = hm_get_id(&g_by_serial, &s); if (!o) continue;
         uint64_t ok = obj_key(o); if (ok != (uint64_t)(uintptr_t)e->tex) nvn_hm_del(&g_stor_of_obj, &ok);
-        defer_obj_unref(o); hm_del_id(&g_by_serial, &s);
+        defer_obj_unref(o); hm_del_id(&g_by_serial, &s); BOTW_SERIAL_NOTE(s, "storage entry dropped")
     }
     e->nser = 0; ser_bump_locked(0);
 }
@@ -3337,7 +3337,7 @@ static int tex_mirrored(const tex_t *t) {
 }
 static int tex_check_once(void) { static int v = -1; if (v < 0) { const char *e = getenv("TOTK_TEX_CHECK_ONCE"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("TOTK_TEX_CHECK_ONCE=0：CPU 池贴图每次取用都查是否被改写（旧行为）"); } return v; }
 static id<MTLTexture> tex_mtl(const tex_t *ct) {
-    tex_t *t = (tex_t *)ct;
+    tex_t *t = (tex_t *)ct; BOTW_TEX_FOLLOW(t)
     if (!t || !t->serial) return nil;
     int packaged = tex_mirrored(t);
     __unsafe_unretained id have = (__bridge id)serial_ptr(t->serial);
@@ -3470,7 +3470,7 @@ void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads) { *uploads = g_pkg_up
 uint64_t mtl_pkg_miss(void) { return g_pkg_miss; }
 void mtl_tex_release(tex_t *t) {
     if (!t->serial) return;
-    serial_del(t->serial);
+    BOTW_SERIAL_NOTE(t->serial, "nvnTextureFinalize") BOTW_TEX_RELEASE_KEEP(t->serial) serial_del(t->serial);
     pthread_mutex_lock(&g_smu); nvn_hm_put(&g_dead_serial, &t->serial, (void *)1); ser_bump_locked(t->serial); pthread_mutex_unlock(&g_smu);   // view caches of this serial look again (dead-serial follow)
     treg_drop_serial(t->serial);
 }
@@ -3479,7 +3479,7 @@ void mtl_tex_release(tex_t *t) {
    serial once no recording's texture copy had it (and did not remember unpinned ones at all): analysis/long20b made not one
    dead-serial texture where long19 made 538,563, i.e. slots kept textures of finalized serials instead of following them.
    Forgetting needs the number of slots per serial; until then the set keeps every finalized serial, as before. */
-void mtl_dead_forget(const uint64_t *serials, size_t n) { (void)serials; (void)n; }
+void mtl_dead_forget(const uint64_t *serials, size_t n) { BOTW_DEAD_FORGET(serials, n) (void)serials; (void)n; }
 
 // ---------- 渲染通道：SetRenderTargets 开新通道；通道里第一条命令之前的清除并进 load 动作 ----------
 // ---------- Render passes: SetRenderTargets opens a new pass; clears before the first command in the pass are folded into the load action ----------
@@ -4213,7 +4213,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
     for (int i = 0; i < R.rt.n; i++) {
         if (!R.rt.color[i] || (clear_only == 1 && !R.clear_c[i])) continue; BOTW_RT_DUP_SKIP(i)
         attach(pd.colorAttachments[i], R.rt.color[i], &R.rt.cview[i], R.rt.has_cview[i]);
-        { const tex_t *ot = R.rt.color[i]; int was = gpu_owned(ot->serial); gpu_owned_mark(ot->serial);
+        { const tex_t *ot = R.rt.color[i]; BOTW_TEX_FOLLOW(ot) int was = gpu_owned(ot->serial); gpu_owned_mark(ot->serial);
           if (ot->mem && tex_mirrored(ot)) wb_note(ot);
           static int ownlog = -1; if (ownlog < 0) ownlog = getenv("DM_NVN_OWNLOG") != NULL;
           if (ownlog && !was && tex_mirrored(ot)) MLOG("[ownlog] ser=%llu %ux%ux%u lv%u nvnfmt=%#x flags=%#x pool=%p pflags=%#x mem=%p off=%lld: GPU-rendered texture in a CPU-visible pool", (unsigned long long)ot->serial,
@@ -9887,7 +9887,7 @@ static void copy_t2b(const p_copy_b2t *c) {
     upd_guard(c->src, c->src + img * nz);   // TOTK: renamed uniform updates before a GPU write to the range
     if (!mtl_addr(c->src, img * nz, &mb, &mo)) { RED_ONCE(31, "贴图→缓冲拷贝的目标不在内存池里"); return; }
     usnap_drop(c->src, img * nz);   // TOTK: a GPU write: no uniform copy of these bytes from here on
-    id<MTL4ComputeCommandEncoder> b = blit();
+    id<MTL4ComputeCommandEncoder> b = blit(); BOTW_T2B_NOTE(c, t, mb, mo, img * nz) BOTW_GPU_COPY_SUPERSEDES(mb, mo, img * nz)
     if (is3d)
         enc_b_copy_texture_buffer(b, t, 0, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, c->r.zoffset), MTLSizeMake(c->r.width, c->r.height, nz), (__bridge id<MTLBuffer>)mb, mo, row, img);
     else
@@ -13529,5 +13529,121 @@ void botw_ashot_poll(const void *tv, long cur) {
         if (src) ashot_take(src, g_ashotq[i].path, cur); else MLOG("【红】ashot：出图纹理不可用，丢弃 %s", g_ashotq[i].path);
         g_ashotq[i] = g_ashotq[--g_nashotq];
     } else i++;
+}
+#endif
+#ifdef GAME_BOTW
+/* TOTK_T2B_LOG=1 (botw.md, the black save thumbnail: the game copies a texture into a buffer on a CPU-visible pool with
+   nvnCommandBufferCopyTextureToBuffer and JPEG-encodes the pool bytes): each copy's source texture and destination, and
+   once the GPU is done, how many destination bytes are not zero (first 4 MiB). Zero: the source was black; not zero
+   but a black JPEG: the bytes were overwritten or read too early. */
+void botw_t2b_note(const void *cv, const void *texv, const void *mbv, uint64_t mo, size_t n) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("TOTK_T2B_LOG"); on = e && *e && strcmp(e, "0"); }
+    if (!on) return;
+    const p_copy_b2t *c = cv; id<MTLTexture> t = (__bridge id<MTLTexture>)texv; id<MTLBuffer> mb = (__bridge id<MTLBuffer>)mbv;
+    static _Atomic unsigned seq; unsigned k = atomic_fetch_add(&seq, 1);
+    MLOG("[t2b] #%u F%llu ser=%llu %ux%u nvnfmt=%#x region %d,%d %dx%d -> %#llx (%zu bytes); Metal %lux%lu format %lu; gpu_owned %d mirrored %d; buffer %s",
+         k, (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)c->tex->serial, c->tex->d.width, c->tex->d.height, c->tex->d.format,
+         c->r.xoffset, c->r.yoffset, c->r.width, c->r.height, (unsigned long long)c->src, n, (unsigned long)t.width, (unsigned long)t.height,
+         (unsigned long)t.pixelFormat, gpu_owned(c->tex->serial), tex_mirrored(c->tex), mb.storageMode == MTLStorageModeShared ? "shared" : "not shared");
+    if (mb.storageMode != MTLStorageModeShared) return;
+    const uint8_t *p = (const uint8_t *)mb.contents + mo; size_t m = n < (4u << 20) ? n : (4u << 20);
+    static const char *dump; static int dump_init; if (!dump_init) { dump_init = 1; dump = getenv("TOTK_T2B_DUMP"); }
+    unsigned w = c->r.width, h = c->r.height;
+    [g_commit_blocks addObject:^{ size_t z = 0; for (size_t i = 0; i < m; i++) z += p[i] != 0; MLOG("[t2b] #%u done: %zu of %zu destination bytes not zero", k, z, m);
+        if (dump && *dump) { char path[1024]; snprintf(path, sizeof path, "%s/t2b-%u-%ux%u.rgba", dump, k, w, h); FILE *f = fopen(path, "wb"); if (f) { fwrite(p, 1, m, f); fclose(f); } } }];
+}
+/* botw.md, the black save thumbnail: a GPU copy into a buffer (nvnCommandBufferCopyTextureToBuffer) is newer than every
+   earlier GPU rendering of a texture over the same memory that waits for write-back (wb_note). The game copies its
+   256x144 caption into a CPU-visible pool, waits for the queue and invalidates the pool before JPEG-encoding it; the
+   invalidate wrote such an older rendering back over the copied bytes. Those records are dropped here (in GPU order:
+   this runs where the replay encodes the copy; a later rendering of that memory is recorded again). */
+void botw_gpu_copy_supersedes(const void *mbv, uint64_t mo, size_t n) {
+    id<MTLBuffer> mb = (__bridge id<MTLBuffer>)mbv;
+    if (!mb || !n || mb.storageMode != MTLStorageModeShared) return;
+    const uint8_t *a = (const uint8_t *)mb.contents + mo, *z = a + n;
+    wb_ent *list[64]; int nl = 0;
+    pthread_mutex_lock(&g_smu);
+    for (uint32_t i = 0; g_wb.n && g_wb.vals && i < g_wb.cap && nl < 64; i++) {
+        wb_ent *e = g_wb.vals[i];
+        if (!e || e->t.mem >= z || e->t.mem + e->t.L.size <= a) continue;
+        uint64_t k = e->t.serial; nvn_hm_del(&g_wb, &k); list[nl++] = e; i = (uint32_t)-1;   // deletion shifts entries: rescan
+    }
+    pthread_mutex_unlock(&g_smu);
+    static _Atomic unsigned shown;
+    for (int i = 0; i < nl; i++) {
+        const tex_t *t = &list[i]->t;
+        if (atomic_fetch_add(&shown, 1) < 16)
+            MLOG("[t2b] a GPU copy into %p (%zu bytes) replaces the earlier GPU rendering of ser=%llu %ux%u nvnfmt=%#x at %p (%llu bytes): not written back",
+                 (const void *)a, n, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, (const void *)t->mem, (unsigned long long)t->L.size);
+        wb_ent_free(list[i]);
+    }
+}
+/* botw.md, the black save thumbnail: the game records the caption rendering and its copy into a buffer once and replays
+   the recording at every save, while it finalises and re-initialises the 256x144 NVNtexture between saves. The recording's
+   texture copy kept the finalised serial, so each use made a texture for a dead serial that was deleted when the
+   submission completed (dead_put_flush): the copy of the next submission read a fresh upload of the stale pool bytes
+   (zeros). As the texture-pool slots do (tex_by_id), a command's texture whose serial was finalised now follows its
+   storage to the texture living there with the same layout: the pinned copy is re-keyed in place (dm_nvn_pin_rekey),
+   so every recording holding it, and the owned / write-back bookkeeping by serial, see the live texture. */
+int botw_serial_noted(uint64_t serial);
+void botw_tex_follow(const void *tv) {
+    tex_t *t = (tex_t *)tv;
+    if (!t || !t->serial || !t->mem || !serial_is_dead(t->serial)) return;
+    tex_t live; extern int nvn_tex_live_at(const void *mem, tex_t *out); extern int dm_nvn_pin_rekey(const tex_t *copy, const tex_t *live);
+    int watched = botw_serial_noted(t->serial), have = nvn_tex_live_at(t->mem, &live);
+    if (!have || live.serial == t->serial || serial_is_dead(live.serial)) {
+        if (watched) MLOG("[tile] f%llu ser=%llu not followed: %s", (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)t->serial,
+                          !have ? "no live texture at its storage" : live.serial == t->serial ? "the live texture is itself" : "the live texture is finalised too");
+        return;
+    }
+    if (live.L.size != t->L.size || live.d.format != t->d.format || live.d.width != t->d.width || live.d.height != t->d.height ||
+        live.d.depth != t->d.depth || live.d.target != t->d.target || live.d.levels != t->d.levels) {
+        if (watched) MLOG("[tile] f%llu ser=%llu not followed: live ser=%llu %ux%ux%u lv%u nvnfmt=%#x target %d size %llu differs from %ux%ux%u lv%u nvnfmt=%#x target %d size %llu",
+                          (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)t->serial, (unsigned long long)live.serial, live.d.width, live.d.height, live.d.depth, live.d.levels, live.d.format, live.d.target,
+                          (unsigned long long)live.L.size, t->d.width, t->d.height, t->d.depth, t->d.levels, t->d.format, t->d.target, (unsigned long long)t->L.size);
+        return;
+    }
+    uint64_t from = t->serial; int pinned = dm_nvn_pin_rekey(t, &live);
+    if (!pinned) *t = live;
+    static uint64_t n; if (n++ < 8 || n % 1000 == 0)
+        MLOG("[tex-follow] %s ser=%llu -> %llu at %p (%ux%u nvnfmt=%#x; %llu so far)", pinned ? "recording copy" : "texture", (unsigned long long)from,
+             (unsigned long long)live.serial, (void *)t->mem, t->d.width, t->d.height, t->d.format, (unsigned long long)n);
+}
+/* botw.md, the black save thumbnail (the second half): the game renders the pause menu's 854x480 screen copy, finalises
+   that NVNtexture object the next frame (the object is only a handle; the memory keeps the rendering) and then replays
+   the recorded caption draw, which samples it; the caption texture itself is finalised after the first save and never
+   initialised again while its recording keeps addressing its memory. On hardware a command addresses memory, so the
+   host texture made for a finalised serial must live as long as a recording copy names the serial (dm_nvn_pin_has_serial),
+   not until the finalize (mtl_tex_release) or the end of the submission (dead_put_flush). Such serials are kept and
+   released when the pin sweep frees their copies (mtl_dead_forget -> botw_dead_forget). */
+static nvn_hmap g_bdead_kept = {.klen = 8};   /* finalised serials whose textures are kept for their recording copies (g_smu) */
+static uint64_t g_bdead_kept_n, g_bdead_freed_n;
+int botw_dead_keep(uint64_t serial) {
+    extern int dm_nvn_pin_has_serial(uint64_t serial);
+    if (!dm_nvn_pin_has_serial(serial)) return 0;
+    pthread_mutex_lock(&g_smu);
+    if (!nvn_hm_get(&g_bdead_kept, &serial)) { nvn_hm_put(&g_bdead_kept, &serial, (void *)1); g_bdead_kept_n++; }
+    uint64_t k = g_bdead_kept_n, live = g_bdead_kept.n;
+    pthread_mutex_unlock(&g_smu);
+    if (k <= 4 || k % 1000 == 0) MLOG("[dead-keep] finalised serial %llu stays while a recording copy names it (%llu kept so far, %llu now)", (unsigned long long)serial, (unsigned long long)k, (unsigned long long)live);
+    return 1;
+}
+void botw_dead_forget(const uint64_t *serials, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        uint64_t k = serials[i];
+        pthread_mutex_lock(&g_smu); int kept = nvn_hm_get(&g_bdead_kept, &k) != NULL; if (kept) { nvn_hm_del(&g_bdead_kept, &k); g_bdead_freed_n++; } pthread_mutex_unlock(&g_smu);
+        if (kept) { BOTW_SERIAL_NOTE(k, "dead copy swept: texture released") serial_del(k); treg_drop_serial(k); }
+    }
+}
+/* DM_NVN_TILELOG diagnostics: serials a [tile] line was logged for are remembered (what == NULL), and the serial table's
+   deletions of them are logged with the reason (what), to see who drops a watched texture's host record. */
+static uint64_t g_bsn_seen[64]; static _Atomic int g_bsn_n;
+int botw_serial_noted(uint64_t serial) { int c = atomic_load(&g_bsn_n); for (int i = 0; i < c; i++) if (g_bsn_seen[i] == serial) return 1; return 0; }
+void botw_serial_note(uint64_t serial, const char *what) {
+    uint64_t *seen = g_bsn_seen; _Atomic int *np = &g_bsn_n;
+    int c = atomic_load(np);
+    if (!what) { for (int i = 0; i < c; i++) if (seen[i] == serial) return; if (c < 64) { seen[c] = serial; atomic_store(np, c + 1); } return; }
+    for (int i = 0; i < c; i++) if (seen[i] == serial) { MLOG("[tile] f%llu ser=%llu %s", (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)serial, what); return; }
 }
 #endif
