@@ -184,7 +184,7 @@ Language: the game and the launcher's own text (startup screen, shader warm-up p
 - Shader cache: `~/Library/Application Support/MacNativeGames/TOTK/shader-cache` (delete it to translate everything again)
 - Shaders the shared list does not have yet: `~/Library/Application Support/MacNativeGames/TOTK/shader-list-contribution.txt`
 - Log: `~/Library/Logs/MacNativeGames/totk.log` (the run before: `totk.previous.log`)
-- Mods: `~/Library/Application Support/MacNativeGames/TOTK/mods/<v0|v112|v121|v143>`. Its `manifest.tsv` lists each replaced RomFS file as tab-separated path, size, SHA-256 and the original's SHA-256; the files sit under the same paths. The game checks every listed file at start and stops on a mismatch. Delete the folder to play without mods.
+- Mods: `~/Library/Application Support/MacNativeGames/TOTK/mods/<v0|v112|v121|v143>`. Its `manifest.tsv` lists each replaced RomFS file as tab-separated path, size, SHA-256 and the original's SHA-256; the files sit under the same paths. `python3 games/totk/scripts/make_mod_manifest.py <mods folder> --app <Tears of the Kingdom.app>` writes it. The game checks every listed file at start and stops on a mismatch, or when a mod file changes while it runs. Delete the folder to play without mods.
 
 ## Known issues
 
@@ -399,7 +399,7 @@ python3.14 games/totk/tools/install_desktop_entry.py --app "/路径/Tears of the
 - 着色器缓存：`~/Library/Application Support/MacNativeGames/TOTK/shader-cache`（删掉会全部重新翻译）
 - 公共清单里还没有的着色器：`~/Library/Application Support/MacNativeGames/TOTK/shader-list-contribution.txt`
 - 日志：`~/Library/Logs/MacNativeGames/totk.log`（上一次运行：`totk.previous.log`）
-- 模组：`~/Library/Application Support/MacNativeGames/TOTK/mods/<v0|v112|v121|v143>`。其中的 `manifest.tsv` 以制表符分隔列出每个被替换的 RomFS 文件：路径、大小、SHA-256 和原文件的 SHA-256；文件按相同路径存放。游戏启动时校验所有列出的文件，不一致即停止。删除该文件夹即可不带模组运行。
+- 模组：`~/Library/Application Support/MacNativeGames/TOTK/mods/<v0|v112|v121|v143>`。其中的 `manifest.tsv` 以制表符分隔列出每个被替换的 RomFS 文件：路径、大小、SHA-256 和原文件的 SHA-256；文件按相同路径存放。可用 `python3 games/totk/scripts/make_mod_manifest.py <模组文件夹> --app <Tears of the Kingdom.app>` 生成。游戏启动时校验所有列出的文件，不一致即停止；游戏运行中模组文件被改动也会停止。删除该文件夹即可不带模组运行。
 
 ## 已知问题
 

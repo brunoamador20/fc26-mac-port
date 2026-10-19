@@ -47,8 +47,10 @@ static uint64_t handles[NH]; /* file index + 1; 0 is free */
    TOTK_ROMFS_PATCHES, default extracted/<version>/romfs-patches, 0 = none), the true-2K HeapDef overlay
    (scripts/make_output_res_overlay.py) and the player's mods (TOTK_ROMFS_MODS, which the launcher sets to
    <data>/mods/<version>; no manifest there = none). Each file can be replaced once. An overlay file is opened when the
-   game opens it, so a mod can replace thousands of files (a dub's voice streams) without holding a descriptor each. */
-typedef struct { uint64_t index,size; char *path; } Overlay;
+   game opens it, so a mod can replace thousands of files (a dub's voice streams) without holding a descriptor each; the
+   file's identity (device, inode, size, modification time) is kept from the start check, and an open that finds another
+   file there stops the game instead of serving bytes nobody checked. scripts/make_mod_manifest.py writes a mod's manifest. */
+typedef struct { uint64_t index,size; char *path; dev_t dev; ino_t ino; struct timespec mtime; } Overlay;
 static Overlay *overlays; /* sorted by RomFS index after overlay_init */
 static size_t noverlay,overlay_cap;
 static uint32_t handle_ovl[NH]; /* overlay slot + 1 of an open handle, 0 = original */
@@ -150,7 +152,7 @@ static void overlay_load(const char *dir,int required) {
  char path[4096];need(snprintf(path,sizeof(path),"%s/manifest.tsv",dir)<(int)sizeof(path),"RomFS overlay path");FILE *m=fopen(path,"r");
  if(!m&&required){fprintf(stderr,"[totk] RomFS overlay: %s missing; build it with scripts/make_output_res_overlay.py <w>x<h>\n",path);runtime_fail("true-2K HeapDef overlay missing (make romfs-patches-out OUTPUT_RES=<w>x<h>)");}
  if(!m){fprintf(stderr,"[totk] RomFS overlay: none (%s)\n",path);return;}
- char line[8192];size_t first=noverlay;
+ char line[8192];size_t first=noverlay;uint64_t hashed=0,t0=runtime_now_ns();
  while(fgets(line,sizeof(line),m)){
   if(line[0]=='#'||line[0]=='\n')continue;char name[4096],sha[65],orig[65];unsigned long long size=0;
   need(sscanf(line,"%4095[^\t]\t%llu\t%64[0-9a-f]\t%64[0-9a-f]",name,&size,sha,orig)==4&&strlen(sha)==64&&strlen(orig)==64,"RomFS overlay manifest line");
@@ -158,12 +160,14 @@ static void overlay_load(const char *dir,int required) {
   Entry e=entry(i);sha_range(image_fd,e.offset,e.size,orig,"original");
   char file[8200];need(snprintf(file,sizeof(file),"%s/%s",dir,name)<(int)sizeof(file),"RomFS overlay file path");int fd=open(file,O_RDONLY|O_CLOEXEC);struct stat st;
   need(fd>=0&&fstat(fd,&st)==0&&(uint64_t)st.st_size==size,"RomFS overlay file missing or wrong size");sha_range(fd,0,size,sha,name);close(fd);
+  hashed+=e.size+size;
   if(noverlay==overlay_cap){overlay_cap=overlay_cap?overlay_cap*2:16;overlays=realloc(overlays,overlay_cap*sizeof(*overlays));need(overlays!=NULL,"RomFS overlay table");}
-  char *copy=strdup(file);need(copy!=NULL,"RomFS overlay path copy");overlays[noverlay++]=(Overlay){i,size,copy};
+  char *copy=strdup(file);need(copy!=NULL,"RomFS overlay path copy");overlays[noverlay++]=(Overlay){i,size,copy,st.st_dev,st.st_ino,st.st_mtimespec};
   if(noverlay-first<=16)fprintf(stderr,"[totk] RomFS overlay: %s (%llu bytes) replaces the original\n",name,size);
  }
  fclose(m);
  if(noverlay-first>16)fprintf(stderr,"[totk] RomFS overlay: %zu files from %s (%zu more not listed)\n",noverlay-first,dir,noverlay-first-16);
+ if(noverlay>first)fprintf(stderr,"[totk] RomFS overlay: %s checked, %zu files, %.1f MB hashed in %.2f s\n",dir,noverlay-first,hashed/1048576.0,(runtime_now_ns()-t0)/1e9);
 }
 static int overlay_order(const void *a,const void *b) {uint64_t x=((const Overlay *)a)->index,y=((const Overlay *)b)->index;return (x>y)-(x<y);}
 /* The overlay slot + 1 that replaces RomFS file i, or 0. */
@@ -177,7 +181,9 @@ static void overlay_init(void) {
   need(snprintf(d,sizeof(d),"%s/%ux%u",out?out:"extracted/" TOTK_GAME_DIR "/romfs-patches-out",w,h)<(int)sizeof(d),"RomFS output overlay path");overlay_load(d,1);}
  const char *mods=getenv("TOTK_ROMFS_MODS");if(mods&&*mods&&strcmp(mods,"0"))overlay_load(mods,0);
  if(noverlay)qsort(overlays,noverlay,sizeof(*overlays),overlay_order);
- for(size_t k=1;k<noverlay;k++)need(overlays[k].index!=overlays[k-1].index,"RomFS overlay: two overlays replace the same file");
+ for(size_t k=1;k<noverlay;k++)if(overlays[k].index==overlays[k-1].index){
+  fprintf(stderr,"[totk] RomFS overlay: %s and %s replace the same file %s\n",overlays[k-1].path,overlays[k].path,entry_name(entry(overlays[k].index)));
+  runtime_fail("RomFS overlay: two overlays replace the same file (see the log; remove it from one of the manifests)");}
 }
 void runtime_fs_init(void) {
  if(image_fd>=0)return;
@@ -219,7 +225,9 @@ unsigned runtime_romfs_open(uint64_t *out,const char *path,int mode) {
  fs_log("rom",path?path:"(null)");
  if(!out||mode!=1)return UNSUPPORTED;const char *p=rom_path(path);if(!p)return NOT_FOUND;uint64_t i=lower(p);if(i>=file_count||strcmp(p,entry_name(entry(i))))return NOT_FOUND;
  uint32_t ov=overlay_slot(i);int fd=-1;
- if(ov){fd=open(overlays[ov-1].path,O_RDONLY|O_CLOEXEC);struct stat st;need(fd>=0&&fstat(fd,&st)==0&&(uint64_t)st.st_size==overlays[ov-1].size,"RomFS overlay file missing or changed size");}
+ if(ov){const Overlay *o=&overlays[ov-1];fd=open(o->path,O_RDONLY|O_CLOEXEC);struct stat st;
+  if(fd<0||fstat(fd,&st)!=0||(uint64_t)st.st_size!=o->size||st.st_dev!=o->dev||st.st_ino!=o->ino||st.st_mtimespec.tv_sec!=o->mtime.tv_sec||st.st_mtimespec.tv_nsec!=o->mtime.tv_nsec){
+   fprintf(stderr,"[totk] RomFS overlay: %s is missing or changed since the start check\n",o->path);runtime_fail("RomFS overlay file changed while the game ran (restart the game)");}}
  pthread_mutex_lock(&lock);for(unsigned j=1;j<NH;j++)if(!handles[j]){handles[j]=i+1;handle_ovl[j]=ov;handle_fd[j]=fd;*out=0x100000000ULL+j;pthread_mutex_unlock(&lock);return 0;}pthread_mutex_unlock(&lock);runtime_fail("file handle table full");return INVALID;
 }
 static int handle_entry(uint64_t h,Entry *e) {if(h<=0x100000000ULL||h>=0x100000000ULL+NH)return 0;pthread_mutex_lock(&lock);uint64_t i=handles[h-0x100000000ULL];pthread_mutex_unlock(&lock);if(!i)return 0;*e=entry(i-1);return 1;}
