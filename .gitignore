@@ -24,3 +24,14 @@ games/totk/tools/totk_xlate/obj/
 games/totk/tools/totk_xlate/bin/
 games/totk/scripts/shader_inventory/obj/
 games/totk/scripts/shader_inventory/bin/
+# Bayonetta 3: work folder, player mods (they hold game data) and game data by format, wherever it lands
+BY3_build/
+games/by3/mods/
+games/by3/extracted/
+games/by3/rewritten/
+games/by3/analysis/
+games/by3/build/
+games/by3/user-data/
+romfs.bin
+*.pkz
+*.pchtxt
