@@ -330,15 +330,16 @@ void dm_guest_clock_advanced(void) {
    shorter waits are handoffs between working threads, such as the main thread waiting for its ModuleSystem workers on
    the frame's critical path (nxnative started at 200 µs and 1.4.3 then dropped itself to 20 fps). After that each yield
    sleeps an eighth of the run so far, 10 to 250 µs, with the virtual core given up, so a wait ends at most an eighth late.
-   TOTK_YIELD_BACKOFF=0 turns it off; =<cap µs>[:<start µs>] sets the cap and the start (default 250:2000). Returns the
-   sleep for a yield whose run started run_ns ago, 0 for a plain yield. */
+   Off by default: on the Mac at about 100 fps (1.2.1 field save, 300 s each) it saved 3% CPU (708 -> 685 s) but frames
+   dropped steadily, 10-15 per 300 instead of 0-3. TOTK_YIELD_BACKOFF=on turns it on (250:2000); =<cap µs>[:<start µs>]
+   sets the cap and the start. Returns the sleep for a yield whose run started run_ns ago, 0 for a plain yield. */
 static uint64_t yield_backoff_ns(uint64_t run_ns) {
     static int64_t cap = -1, start = 2000000;
     if (cap < 0) {
-        const char *e = getenv("TOTK_YIELD_BACKOFF"); int64_t c = 250000;
-        if (e && *e) { c = atoll(e) * 1000; const char *colon = strchr(e, ':'); if (colon) start = atoll(colon + 1) * 1000; }
-        if (!c) LOG("TOTK_YIELD_BACKOFF=0: a run of yields spins as plain sched_yield");
-        else if (e && *e) LOG("TOTK_YIELD_BACKOFF: a run of yields backs off after %lld us, sleeping at most %lld us", (long long)(start / 1000), (long long)(c / 1000));
+        const char *e = getenv("TOTK_YIELD_BACKOFF"); int64_t c = 0;
+        if (e && !strcmp(e, "on")) c = 250000;
+        else if (e && *e) { c = atoll(e) * 1000; const char *colon = strchr(e, ':'); if (colon) start = atoll(colon + 1) * 1000; }
+        if (c) LOG("TOTK_YIELD_BACKOFF: a run of yields backs off after %lld us, sleeping at most %lld us", (long long)(start / 1000), (long long)(c / 1000));
         cap = c;
     }
     if (!cap || run_ns < (uint64_t)start) return 0;
