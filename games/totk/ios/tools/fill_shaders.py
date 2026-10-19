@@ -147,11 +147,12 @@ def main():
         failed = translate(rqs, tree, out, ch)
         variants = sorted({rq['variant'] for rq in rqs} - failed)
         if not variants: raise RuntimeError('no variant could be translated')
-        # What this device needed goes into the one shared list, so every later build carries it (docs/shader-list.md).
-        shared = ShaderList.load(SHADER_LIST); before = len(shared.variants); shared.add_cache(out); shared.save(SHADER_LIST)
-        print(f'shared shader list: {len(shared.variants) - before} new variants ({SHADER_LIST}; send them in a pull request)')
         name = time.strftime('%Y%m%d-%H%M%S'); pack = work/name; pack.mkdir()
         count = build_pack(pack, out, variants, ch, env)
+        # What this device needed goes into the one shared list, so every later build carries it (docs/shader-list.md).
+        # The pack's index rows are written by build_pack, so the list is merged from the pack after it is built.
+        shared = ShaderList.load(SHADER_LIST); before = len(shared.variants); shared.add_cache(pack); shared.save(SHADER_LIST)
+        print(f'shared shader list: {len(shared.variants) - before} new variants ({SHADER_LIST}; send them in a pull request)')
         print(f'pack {name}: {len(variants)} variants, {count} files' + (f', {len(failed)} failed' if failed else ''))
         if args.no_push:
             keep = tree/'build/shader-fill'/name; keep.parent.mkdir(parents=True, exist_ok=True); shutil.move(str(pack), keep)
