@@ -23,33 +23,55 @@ void runtime_shortcut_help_toggle(void) {}
 
 @interface TOTKTouchPad : UIView
 @property(nonatomic,strong) NSMapTable<UITouch *, NSValue *> *points;
+@property(nonatomic,strong) NSMapTable<UITouch *, NSValue *> *origins;   // where each camera-stick touch went down
 @end
 @implementation TOTKTouchPad
-- (instancetype)initWithFrame:(CGRect)frame { if ((self=[super initWithFrame:frame])) { self.multipleTouchEnabled=YES; self.backgroundColor=UIColor.clearColor; self.points=[NSMapTable strongToStrongObjectsMapTable]; } return self; }
+- (instancetype)initWithFrame:(CGRect)frame { if ((self=[super initWithFrame:frame])) { self.multipleTouchEnabled=YES; self.backgroundColor=UIColor.clearColor; self.points=[NSMapTable strongToStrongObjectsMapTable]; self.origins=[NSMapTable strongToStrongObjectsMapTable]; } return self; }
+/* The buttons, as fractions of the view; a touch on the right side that misses them drives the camera (right stick). */
+static const struct {CGFloat x,y;uint64_t bit;NSString *label;} kButtons[]={{.86,.69,1,@"A"},{.78,.78,2,@"B"},{.78,.60,4,@"X"},{.70,.69,8,@"Y"},{.70,.17,64,@"L"},{.86,.17,128,@"R"},{.50,.15,1024,@"+"},{.40,.15,2048,@"−"}};
+static const unsigned kButtonCount=sizeof(kButtons)/sizeof(*kButtons);
+- (uint64_t)buttonAt:(CGPoint)p {
+    CGFloat w=self.bounds.size.width,h=self.bounds.size.height;uint64_t bits=0;
+    for(unsigned i=0;i<kButtonCount;i++) if(hypot(p.x-w*kButtons[i].x,p.y-h*kButtons[i].y)<MAX(30,h*.075)) bits|=kButtons[i].bit;
+    return bits;
+}
+- (CGFloat)stickRadius { return MIN(78,self.bounds.size.height*.16); }
+static void stick_axes(CGPoint from,CGPoint to,CGFloat radius,int32_t *x,int32_t *y) {
+    CGFloat dx=to.x-from.x,dy=from.y-to.y,dist=hypot(dx,dy);
+    if (dist>radius) { dx*=radius/dist;dy*=radius/dist; }
+    *x=(int32_t)(dx/radius*32767);*y=(int32_t)(dy/radius*32767);
+}
 - (void)updateState {
-    RuntimeGamepadState s={.connected=1}; CGPoint center=CGPointMake(self.bounds.size.width*.18,self.bounds.size.height*.70); CGFloat radius=MIN(78,self.bounds.size.height*.16);
+    RuntimeGamepadState s={.connected=1}; CGPoint center=CGPointMake(self.bounds.size.width*.18,self.bounds.size.height*.70); CGFloat radius=[self stickRadius];
     for (UITouch *t in self.points.keyEnumerator) {
-        CGPoint p=[self.points objectForKey:t].CGPointValue; CGFloat dx=p.x-center.x,dy=center.y-p.y,dist=hypot(dx,dy);
-        if (p.x<self.bounds.size.width*.38 && p.y>self.bounds.size.height*.38) {
-            if (dist>radius) { dx*=radius/dist;dy*=radius/dist; }
-            s.lx=(int32_t)(dx/radius*32767);s.ly=(int32_t)(dy/radius*32767);continue;
-        }
-        CGFloat w=self.bounds.size.width,h=self.bounds.size.height;
-        struct {CGFloat x,y;uint64_t bit;} b[]={{.86,.69,1},{.78,.78,2},{.78,.60,4},{.70,.69,8},{.70,.17,64},{.86,.17,128},{.50,.15,1024},{.40,.15,2048}};
-        for(unsigned i=0;i<sizeof(b)/sizeof(*b);i++) if(hypot(p.x-w*b[i].x,p.y-h*b[i].y)<MAX(30,h*.075)) s.buttons|=b[i].bit;
+        CGPoint p=[self.points objectForKey:t].CGPointValue; NSValue *origin=[self.origins objectForKey:t];
+        if (origin) { stick_axes(origin.CGPointValue,p,radius,&s.rx,&s.ry);continue; }
+        if (p.x<self.bounds.size.width*.38 && p.y>self.bounds.size.height*.38) { stick_axes(center,p,radius,&s.lx,&s.ly);continue; }
+        s.buttons|=[self buttonAt:p];
     }
     runtime_touch_pad_set(&s);[self setNeedsDisplay];
 }
-- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event;for(UITouch *t in touches)[self.points setObject:[NSValue valueWithCGPoint:[t locationInView:self]] forKey:t];[self updateState]; }
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    (void)event;
+    for(UITouch *t in touches){
+        CGPoint p=[t locationInView:self];[self.points setObject:[NSValue valueWithCGPoint:p] forKey:t];
+        if (p.x>=self.bounds.size.width*.5 && ![self buttonAt:p]) [self.origins setObject:[NSValue valueWithCGPoint:p] forKey:t];
+    }
+    [self updateState];
+}
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event;for(UITouch *t in touches)[self.points setObject:[NSValue valueWithCGPoint:[t locationInView:self]] forKey:t];[self updateState]; }
-- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event;for(UITouch *t in touches)[self.points removeObjectForKey:t];[self updateState]; }
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event;for(UITouch *t in touches){[self.points removeObjectForKey:t];[self.origins removeObjectForKey:t];}[self updateState]; }
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self touchesEnded:touches withEvent:event]; }
 - (void)drawRect:(CGRect)rect {
     (void)rect;CGContextRef c=UIGraphicsGetCurrentContext();UIColor *ink=[UIColor colorWithWhite:1 alpha:.32];CGContextSetStrokeColorWithColor(c,ink.CGColor);CGContextSetFillColorWithColor(c,[UIColor colorWithWhite:1 alpha:.09].CGColor);CGContextSetLineWidth(c,2);
-    CGFloat w=self.bounds.size.width,h=self.bounds.size.height,r=MIN(78,h*.16);CGPoint center=CGPointMake(w*.18,h*.70);CGContextStrokeEllipseInRect(c,CGRectMake(center.x-r,center.y-r,2*r,2*r));
-    struct {CGFloat x,y;NSString *label;} b[]={{.86,.69,@"A"},{.78,.78,@"B"},{.78,.60,@"X"},{.70,.69,@"Y"},{.70,.17,@"L"},{.86,.17,@"R"},{.50,.15,@"+"},{.40,.15,@"−"}};
+    CGFloat w=self.bounds.size.width,h=self.bounds.size.height,r=[self stickRadius];CGPoint center=CGPointMake(w*.18,h*.70);CGContextStrokeEllipseInRect(c,CGRectMake(center.x-r,center.y-r,2*r,2*r));
+    for (UITouch *t in self.origins.keyEnumerator) {   // the camera stick, drawn where the finger went down
+        CGPoint o=[self.origins objectForKey:t].CGPointValue,p=[self.points objectForKey:t].CGPointValue;int32_t x,y;stick_axes(o,p,r,&x,&y);
+        CGContextStrokeEllipseInRect(c,CGRectMake(o.x-r,o.y-r,2*r,2*r));
+        CGPoint k=CGPointMake(o.x+x/32767.0*r,o.y-y/32767.0*r);CGRect knob=CGRectMake(k.x-23,k.y-23,46,46);CGContextFillEllipseInRect(c,knob);CGContextStrokeEllipseInRect(c,knob);
+    }
     NSDictionary *attrs=@{NSFontAttributeName:[UIFont systemFontOfSize:17 weight:UIFontWeightSemibold],NSForegroundColorAttributeName:ink};
-    for(unsigned i=0;i<sizeof(b)/sizeof(*b);i++){CGPoint p=CGPointMake(w*b[i].x,h*b[i].y);CGRect box=CGRectMake(p.x-23,p.y-23,46,46);CGContextFillEllipseInRect(c,box);CGContextStrokeEllipseInRect(c,box);CGSize z=[b[i].label sizeWithAttributes:attrs];[b[i].label drawAtPoint:CGPointMake(p.x-z.width/2,p.y-z.height/2) withAttributes:attrs];}
+    for(unsigned i=0;i<kButtonCount;i++){CGPoint p=CGPointMake(w*kButtons[i].x,h*kButtons[i].y);CGRect box=CGRectMake(p.x-23,p.y-23,46,46);CGContextFillEllipseInRect(c,box);CGContextStrokeEllipseInRect(c,box);CGSize z=[kButtons[i].label sizeWithAttributes:attrs];[kButtons[i].label drawAtPoint:CGPointMake(p.x-z.width/2,p.y-z.height/2) withAttributes:attrs];}
 }
 @end
 
