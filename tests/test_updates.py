@@ -108,16 +108,21 @@ class Updates(unittest.TestCase):
         original = self.keys.read_text()
         if not original.endswith('\n'):
             original += '\n'
-        self.keys.write_text(original + f'master_kek_source_06 = {body}00\n'
-                             f'mariko_master_kek_source_05 = {body.upper()}00 # kept\n')
+        extra = (f'master_kek_source_06 = {body}00\n'
+                 f'mariko_master_kek_source_05 = {body.upper()}00 # kept\n'
+                 '# a comment line\n'
+                 f'titlekek_01 = {"33" * 16}   # hactool would read this note as part of the value\n')
+        self.keys.write_text(original + extra)
         out = self.root/'hactool.keys'
         hactool_prod_keys(self.keys, out)
         self.assertEqual(os.stat(out).st_mode & 0o777, 0o600)
         lines = out.read_text().splitlines()
         self.assertIn(f'master_kek_source_06 = {body}', lines)
-        self.assertIn(f'mariko_master_kek_source_05 = {body.upper()} # kept', lines)
-        self.assertEqual(self.keys.read_text(), original + f'master_kek_source_06 = {body}00\n'
-                         f'mariko_master_kek_source_05 = {body.upper()}00 # kept\n')
+        self.assertIn(f'mariko_master_kek_source_05 = {body.upper()}', lines)
+        self.assertIn(f'titlekek_01 = {"33" * 16}', lines)
+        self.assertFalse([line for line in lines if '#' in line])
+        self.assertEqual(len(lines), len([line for line in original.splitlines() if '=' in line]) + 3)
+        self.assertEqual(self.keys.read_text(), original + extra)
         bad = self.root/'bad.keys'
         bad.write_text(f'master_kek_source_06 = {body}ff\n')
         with self.assertRaisesRegex(ValueError, 'master_kek_source_06 must be 16 bytes') as caught:
@@ -167,7 +172,7 @@ class Updates(unittest.TestCase):
             'base=pathlib.Path(next(s.split("=",1)[1] for s in sys.argv if s.startswith("--basenca=")))\n'
             'offset=int(os.environ["MNG_BASE_RANGE_OFFSET"]); size=int(os.environ["MNG_BASE_RANGE_SIZE"])\n'
             'assert base.suffix in (".xci",".nsp") and offset>=0 and size>0 and offset+size<=base.stat().st_size\n'
-            'if os.environ.get("MNG_MOCK_FAIL"): raise SystemExit(1)\n'
+            'if os.environ.get("MNG_MOCK_FAIL"): print("Key ("+"ab"*17+") must be 32 hex digits!"); raise SystemExit(1)\n'
             'out=pathlib.Path(next(s.split("=",1)[1] for s in sys.argv if s.startswith("--section")))\n'
             f'out.write_bytes({romfs()!r})\n'
             'for i in range(6): print(f"Level {i} (GOOD)")\n')
@@ -181,6 +186,9 @@ class Updates(unittest.TestCase):
         with patch.dict(os.environ, MNG_MOCK_FAIL='1'), self.assertRaisesRegex(ValueError, 'BKTR verification failed'):
             merge(base, self.update, self.keys, helper, self.root/'failed')
         self.assertFalse((self.root/'failed').exists())
+        failure = (self.root/'failed-failure.log').read_text()
+        self.assertIn('must be 32 hex digits', failure)
+        self.assertNotIn('ab' * 17, failure)
         self.assertFalse(list(self.root.glob('update-merge-*')))
 
     def test_bundle_contains_only_selected_game_version(self):

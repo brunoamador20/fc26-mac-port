@@ -35,27 +35,23 @@ def copy_range(source, offset, size, target):
 def hactool_prod_keys(source, target):
     """Copy prod.keys for hactool. The caller's file is left unchanged.
 
-    A Lockpick trailing NUL on master_kek_source / mariko_master_kek_source is
-    dropped. Any other length is rejected without recording the key bytes.
+    hactool knows no comments: it reads the rest of a line as the value, so a trailing `# note` makes it exit. The copy
+    keeps only the `name = value` lines, read the way load_keys reads them (comments dropped, spaces trimmed).
+    A Lockpick trailing NUL on master_kek_source / mariko_master_kek_source is dropped. Any other length is rejected
+    without recording the key bytes.
     """
     lines = []
     for number, line in enumerate(Path(source).read_text().splitlines(), 1):
-        body, sep, comment = line.partition('#')
+        body = line.split('#', 1)[0]
         if '=' not in body:
-            lines.append(line)
             continue
-        name, value = body.split('=', 1)
-        keyname = name.strip().lower()
-        if _LOCKPICK_KEK_SOURCE.fullmatch(keyname) is None:
-            lines.append(line)
-            continue
-        hexvalue = value.strip()
-        require(re.fullmatch(r'[0-9a-fA-F]+', hexvalue) is not None, f'Invalid key encoding at line {number}')
-        if len(hexvalue) == 34 and hexvalue[-2:].lower() == '00':
-            hexvalue = hexvalue[:32]
-        require(len(hexvalue) == 32, f'{keyname} must be 16 bytes')
-        suffix = f' #{comment}' if sep else ''
-        lines.append(f'{name.strip()} = {hexvalue}{suffix}')
+        name, value = (part.strip() for part in body.split('=', 1))
+        if _LOCKPICK_KEK_SOURCE.fullmatch(name.lower()) is not None:
+            require(re.fullmatch(r'[0-9a-fA-F]+', value) is not None, f'Invalid key encoding at line {number}')
+            if len(value) == 34 and value[-2:].lower() == '00':
+                value = value[:32]
+            require(len(value) == 32, f'{name.lower()} must be 16 bytes')
+        lines.append(f'{name} = {value}')
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, 'w') as f:
         f.write('\n'.join(lines) + ('\n' if lines else ''))
@@ -113,7 +109,8 @@ def merge(base, update, keys_path, hactool, output, *, base_romfs=None):
                                   stdout=log, stderr=subprocess.STDOUT).returncode
         log = (result/'merge.log').read_text()
         if code or re.search(r'\(FAIL\)|\(INVALID\)|Failed to|Error:', log):
-            (output.parent/(output.name+'-failure.log')).write_text(log)
+            # hactool repeats a key it cannot parse ("Key (<value>) must be 32 hex digits!"): keep no long hex in the log
+            (output.parent/(output.name+'-failure.log')).write_text(re.sub(r'[0-9A-Fa-f]{32,}', '<hex removed>', log))
         require(code == 0 and not re.search(r'\(FAIL\)|\(INVALID\)|Failed to|Error:', log), 'BKTR verification failed')
         require(all(re.search(rf'Level {i} \(GOOD\)', log) for i in range(6)), 'Missing verified IVFC levels')
         image = result/'romfs.bin'
