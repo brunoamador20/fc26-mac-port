@@ -822,7 +822,7 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
     else:
         try:
             report = json.loads((seed/'seed-manifest.json').read_text())
-            if (report['version'] != version or report['chain'] != 'totk-native-v4-unverified' or
+            if (report['version'] != version or report['chain'] != 'totk-native-v5-unverified' or
                     report['shaders'] < (8000 if game == 'totk' else 2000) or not report['files'] or any(
                         Path(name).name != name or sha256(seed/name) != digest for name, digest in report['files'].items())):
                 raise ValueError('version, translation chain or file hash differs')
