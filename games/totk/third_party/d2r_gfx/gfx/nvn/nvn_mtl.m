@@ -6119,6 +6119,43 @@ static void nan_trace_bind(id<MTL4RenderCommandEncoder> en) {
     }
     enc_r_args(en, MTLRenderStageFragment, buf.gpuAddress + (uint64_t)(fr % NT_SLOTS) * NT_SLOT_WORDS * 4, 29);
 }
+#include "totk_pipeline_archive.h"
+/* The game's pipelines are made here, with the pipeline archive (totk_pipeline_archive.h): pso_desc gives every render
+   pipeline the archive to take its code from; warming: built by the warm-up (always added to the archive). */
+/* A pipeline is first asked of the archives alone (MTLPipelineOptionFailOnBinaryArchiveMiss). Found: done. Not found: it
+   is compiled as usual and added, so the archives come to hold what this device draws. (Guessing "compiled" from the
+   time it took missed most of them on the Mac, where the warm system shader cache makes a compile quick too.) */
+static _Atomic uint64_t g_par_hits, g_par_misses;
+static NSArray<NSString *> *g_par_fill_lists;   // the first run's pipeline lists for the background fill (warm_fill_archive)
+static void par_count(int hit) {
+    uint64_t h = hit ? atomic_fetch_add(&g_par_hits, 1) + 1 : atomic_load(&g_par_hits), m = hit ? atomic_load(&g_par_misses) : atomic_fetch_add(&g_par_misses, 1) + 1;
+    if ((h + m) % 1000 == 0) MLOG("管线存档：建管线 %llu 次，存档里有 %llu 次，现编并收进存档 %llu 次", (unsigned long long)(h + m), (unsigned long long)h, (unsigned long long)m);
+}
+static id<MTLRenderPipelineState> pso_new(MTLRenderPipelineDescriptor *d, NSError **e) {
+    id<MTLRenderPipelineState> ps = nil;
+    if (d.binaryArchives.count) {
+        ps = [g_dev newRenderPipelineStateWithDescriptor:d options:MTLPipelineOptionFailOnBinaryArchiveMiss reflection:nil error:nil];
+        par_count(ps != nil);
+        if (ps) return ps;
+    }
+    ps = [g_dev newRenderPipelineStateWithDescriptor:d error:e];
+    if (ps && d.binaryArchives.count) par_add_render(g_dev, d);
+    return ps;
+}
+static id<MTLComputePipelineState> cs_new(id<MTLFunction> fn, NSError **e) {
+    if (!fn) return nil;
+    MTLComputePipelineDescriptor *d = [MTLComputePipelineDescriptor new];
+    d.computeFunction = fn; d.binaryArchives = par_list(g_dev);
+    id<MTLComputePipelineState> ps = nil;
+    if (d.binaryArchives.count) {
+        ps = [g_dev newComputePipelineStateWithDescriptor:d options:MTLPipelineOptionFailOnBinaryArchiveMiss reflection:nil error:nil];
+        par_count(ps != nil);
+        if (ps) return ps;
+    }
+    ps = [g_dev newComputePipelineStateWithDescriptor:d options:MTLPipelineOptionNone reflection:nil error:e];
+    if (ps && d.binaryArchives.count) par_add_compute(g_dev, d);
+    return ps;
+}
 static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvShader *fs, id<MTLFunction> fsfn, int merged) {
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
     d.vertexFunction = vs_fn_for(vs, fs, (k->a2c & PSO_LAYERED) != 0, (k->a2c & PSO_VBORDER) != 0); d.fragmentFunction = fsfn ? fsfn : fs ? (k->dfmt ? fs->fn : fs_fn_without_depth(fs)) : nil;
@@ -6215,6 +6252,7 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
         vd.layouts[16 + st].stepRate = k->stream[st].stride == 0 ? 0 : k->stream[st].divisor ? k->stream[st].divisor : 1;
     }
     d.vertexDescriptor = vd;
+    d.binaryArchives = par_list(g_dev);
     return d;
 }
 // 管线键：当前状态 S + 通道格式（普通通道；合并通道另带 lmap / 特化函数，由 pso_get 填）
@@ -6262,7 +6300,7 @@ static void pso_pend_kick(const pso_key *k, NvShader *vs, NvShader *fs) {   // �
     if (at >= 0 || slot < 0) return;
     MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0); g_pp_kicked++;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSError *e = nil; id<MTLRenderPipelineState> ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&e];
+        NSError *e = nil; id<MTLRenderPipelineState> ps = pso_new(d, &e);
         pthread_mutex_lock(&g_pp_mu); g_pp[slot].ps = ps; g_pp[slot].done = 1; pthread_cond_broadcast(&g_pp_cv); pthread_mutex_unlock(&g_pp_mu);
     });
 }
@@ -6296,7 +6334,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get(NvProg *pr, MTLRen
     else {
         if (g_pp_submit_mark != g_sub_serial) { g_pp_submit_mark = g_sub_serial; pso_predict_rest(); }   // 本次提交第一次缺：先把后面的丢出去并行编，再同步编眼前这条 | First miss in this submission: first kick the later ones out to compile in parallel, then synchronously compile the one at hand
         MTLRenderPipelineDescriptor *d = pso_desc(&k, vs, fs, bfn ? bfn : g_pso_fsfn, g_pso_lmap != NULL);
-        ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&e];
+        ps = pso_new(d, &e);
     }
     g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
     if (!ps) { static int said; if (said++ < 12) MLOG("【红】建渲染管线失败：%s（vs %s ps %s dfmt %d sfmt %d cfmt0 %d samples %d）", e.localizedDescription.UTF8String, vs->key, fs ? fs->key : "-", (int)k.dfmt, (int)k.sfmt, (int)k.cfmt[0], (int)k.samples); else if (said == 12) MLOG("【红】建渲染管线失败：后续不再逐条打印"); return nil; }
@@ -6536,7 +6574,7 @@ static void warm_worker(NSArray<NSString *> *paths, NSArray<NSString *> *files,
                         }
                         pso_key k = sk.k; k.vs = (__bridge void *)vs; k.fs = (__bridge void *)fs; k.fsfn = (__bridge void *)fsfn;
                         NSError *e = nil; uint64_t ps_started = bp_now();
-                        id ps = [g_dev newRenderPipelineStateWithDescriptor:pso_desc(&k, vs, fs, fsfn, sk.merged) error:&e];
+                        id ps = pso_new(pso_desc(&k, vs, fs, fsfn, sk.merged), &e);
                         atomic_fetch_add(&g_warm_pipeline_ns, bp_now() - ps_started); atomic_fetch_add(&g_warm_pipeline_count, 1);
                         if (!ps) { MLOG("【红】后台建渲染管线失败：%s", e.localizedDescription.UTF8String); warm_task_done(&done,total,shader_total,pipeline_total,dict); continue; }
                         WarmItem *item = [WarmItem new]; item->kind = 1; item->vs_key = vkey; item->fs_key = fkey; item->vs = vs; item->fs = fs; item->fsfn = fsfn; item->pso = k; item->object = ps;
@@ -6545,7 +6583,7 @@ static void warm_worker(NSArray<NSString *> *paths, NSArray<NSString *> *files,
                         NSString *key = c[1]; if (!key.length) { warm_task_done(&done,total,shader_total,pipeline_total,dict); continue; }
                         NvShader *cs = warm_shader(dict, key, 5);
                         if (!cs) { warm_task_done(&done,total,shader_total,pipeline_total,dict); continue; }
-                        NSError *e = nil; uint64_t ps_started = bp_now(); id ps = [g_dev newComputePipelineStateWithFunction:cs->fn error:&e];
+                        NSError *e = nil; uint64_t ps_started = bp_now(); id ps = cs_new(cs->fn, &e);
                         atomic_fetch_add(&g_warm_pipeline_ns, bp_now() - ps_started); atomic_fetch_add(&g_warm_pipeline_count, 1);
                         if (!ps) { MLOG("【红】后台建计算管线失败：%s", e.localizedDescription.UTF8String); warm_task_done(&done,total,shader_total,pipeline_total,dict); continue; }
                         WarmItem *item = [WarmItem new]; item->kind = 2; item->key = key; item->shader = cs; item->object = ps;
@@ -6564,7 +6602,7 @@ static void warm_worker(NSArray<NSString *> *paths, NSArray<NSString *> *files,
         NSMutableArray<NSString *> *cache_files = [files mutableCopy];
         NSMutableSet<NSString *> *known_files = [NSMutableSet setWithArray:files];
         NSSet<NSString *> *late_scope = g_warm_scope ? [g_warm_scope setByAddingObjectsFromSet:totk_rt_observed_shader_keys()] : nil;
-        NSArray<NSString *> *latest = totk_rt_list();
+        NSArray<NSString *> *latest = g_par_valid || g_par_fill_lists ? @[] : totk_rt_list();   // with a pipeline archive the rest is made when first drawn
         for (NSString *file in latest) if ([file hasSuffix:@"_b.metal"] && ![known_files containsObject:file]) {
             if (!totk_shader_scope_contains(late_scope, [file stringByDeletingPathExtension])) continue;
             // The native service publishes reflection last. A newly written
@@ -6604,6 +6642,7 @@ static void warm_worker(NSArray<NSString *> *paths, NSArray<NSString *> *files,
         }
         if (runtime_warm_progress) runtime_warm_progress(done,total,dict.count,shader_total,g_warm_rps+g_warm_cps,pipeline_total);
         MLOG("缓存补充预热：新增 %llu 个着色器，%llu 个失败；清单里还不在翻译缓存的着色器 %llu 个（第一次用到时现翻，自动收集）", cached, failed, (unsigned long long)g_warm_missing);
+        if (g_par_unsaved) par_save(g_dev, g_par_valid ? "预热中新编的管线" : "全量预热完成");
         MLOG("管线预热完成：着色器 %llu 个 / 渲染管线 %llu 个（跳过特化片元 %llu）/ 计算管线 %llu 个，后台用时 %.1f ms（着色器库 %d 个线程%s）",
              (unsigned long long)dict.count, g_warm_rps, g_warm_skip_fz, g_warm_cps, (bp_now() - g_warm_t0) / 1e6, warm_threads(),
              atomic_load(&g_warm_in_play) && warm_threads() > 2 ? "，进世界后 2 个" : "");
@@ -6690,10 +6729,10 @@ static void warm_light(void) {
                 NvShader *vs = vkey.length ? warm_shader(dict, vkey, sk.vs_stage) : nil, *fs = fkey.length ? warm_shader(dict, fkey, sk.fs_stage) : nil;
                 if (!vs || (fkey.length && !fs)) { nfail++; continue; }
                 pso_key k = sk.k; k.vs = (__bridge void *)vs; k.fs = (__bridge void *)fs; k.fsfn = NULL;
-                NSError *er = nil; ps = [g_dev newRenderPipelineStateWithDescriptor:pso_desc(&k, vs, fs, nil, sk.merged) error:&er]; tried = 1; nr += ps != nil;
+                NSError *er = nil; ps = pso_new(pso_desc(&k, vs, fs, nil, sk.merged), &er); tried = 1; nr += ps != nil;
             } else if ([c[0] isEqualToString:@"C"] && c.count >= 2 && [c[1] length]) {
                 NvShader *cs = warm_shader(dict, c[1], 5); if (!cs) { nfail++; continue; }
-                NSError *er = nil; ps = [g_dev newComputePipelineStateWithFunction:cs->fn error:&er]; tried = 1; nc += ps != nil;
+                NSError *er = nil; ps = cs_new(cs->fn, &er); tried = 1; nc += ps != nil;
             }
             if (tried && !ps) nfail++;
             if (tried && bp_now() - t1 > 20000000ull) slow++;   // > 20 ms: compiled, not a cache hit
@@ -6703,6 +6742,46 @@ static void warm_light(void) {
         MLOG("轻量管线预热完成：渲染管线 %llu 条、计算管线 %llu 条，失败 / 缺着色器 %llu，超过 20 ms（现编）%llu 条，用时 %.1f s", nr, nc, nfail, slow, (bp_now() - t0) / 1e9);
     });
 #endif
+}
+/* The first run without a valid pipeline archive where memory is short (iOS, par_fill_light): the full warm-up is
+   skipped (it keeps about 450 MB, and with the archive filling at the same time the game passed the 4 GB limit,
+   2026-10-20). Instead the pipeline lists are made one by one in the background, added to the archive and dropped;
+   every PAR_SAVE_EVERY of them the archive is written and opened again from the file. The next start finds it valid. */
+static void warm_fill_archive(NSArray<NSString *> *paths) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{
+        uint64_t t0 = bp_now(), nr = 0, nc = 0, nfail = 0; NSMutableSet<NSString *> *seen = [NSMutableSet set];
+        atomic_store(&par_filling, 1);
+        NSMutableDictionary<NSString *, NvShader *> *dict = [NSMutableDictionary dictionary];
+        MLOG("管线存档：后台填充开始（%lu 份管线清单，建完收进存档就丢，每 %d 条写一次盘）", (unsigned long)paths.count, PAR_SAVE_EVERY);
+        for (NSString *path in paths) {
+            NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+            for (NSString *line in [txt componentsSeparatedByString:@"\n"]) @autoreleasepool {
+                if (!line.length || [line hasPrefix:@"#"] || [seen containsObject:line]) continue;
+                [seen addObject:line];
+                NSArray<NSString *> *c = [line componentsSeparatedByString:@"\t"];
+                id ps = nil; int tried = 0;
+                if ([c[0] isEqualToString:@"R"] && c.count >= 2) {
+                    pso_skey sk; if (pso_skey_parse(c[1].UTF8String, &sk) || sk.fz) continue;
+                    NSString *vkey = warm_key(sk.vs, sizeof sk.vs), *fkey = warm_key(sk.fs, sizeof sk.fs);
+                    NvShader *vs = vkey.length ? warm_shader(dict, vkey, sk.vs_stage) : nil, *fs = fkey.length ? warm_shader(dict, fkey, sk.fs_stage) : nil;
+                    if (!vs || (fkey.length && !fs)) { nfail++; continue; }
+                    pso_key k = sk.k; k.vs = (__bridge void *)vs; k.fs = (__bridge void *)fs; k.fsfn = NULL;
+                    NSError *er = nil; ps = pso_new(pso_desc(&k, vs, fs, nil, sk.merged), &er); tried = 1; nr += ps != nil;
+                } else if ([c[0] isEqualToString:@"C"] && c.count >= 2 && [c[1] length]) {
+                    NvShader *cs = warm_shader(dict, c[1], 5); if (!cs) { nfail++; continue; }
+                    NSError *er = nil; ps = cs_new(cs->fn, &er); tried = 1; nc += ps != nil;
+                } else continue;
+                if (tried && !ps) nfail++;
+                if (dict.count > 256) [dict removeAllObjects];
+                if (g_par_unsaved >= PAR_SAVE_EVERY) par_save_now(g_dev, "后台填充", NULL);
+            }
+        }
+        [dict removeAllObjects];
+        par_save_now(g_dev, "后台填充完成", NULL);
+        atomic_store(&par_filling, 0);
+        MLOG("管线存档：后台填充完成，渲染管线 %llu 条、计算管线 %llu 条，失败 / 缺着色器 %llu，用时 %.1f s；下次启动从存档取",
+             nr, nc, nfail, (bp_now() - t0) / 1e9);
+    });
 }
 static void warm_start(void) {
     if (g_warm_started++) return;
@@ -6743,6 +6822,27 @@ static void warm_start(void) {
     if (!g_warm_items) g_warm_items = [NSMutableArray array];
     g_warm_scope = totk_rt_shader_scope();
     NSArray<NSString *> *cached = totk_rt_list();
+    par_list(g_dev);   // opens the pipeline archive: with a valid one only the title's pipelines are warmed, the rest come from it
+    /* With a valid pipeline archive the pipeline lists are still warmed (the title's, the shared list's, this device's):
+       they will be drawn, so making them before play costs no more memory, and from the archive it is quick. Skipped:
+       the shader libraries alone (the prepared seed's S rows and every other shader in the cache, about 20,000 on
+       1.4.3, most of which a session never draws). Only the title list first (2026-10-20: 866 ms frames on entering the
+       world when the lists were skipped too). */
+    if (g_par_valid || (g_par_new && par_fill_light())) {
+        NSMutableArray<NSString *> *lists = [NSMutableArray array];
+        for (NSString *p in paths) if (![p hasSuffix:@"shader-seed/pso_manifest.tsv"]) [lists addObject:p];
+        cached = @[];
+        if (g_par_valid) {
+            paths = lists;
+            MLOG("预热：有管线存档，只建管线清单里的 %lu 份（不单独加载着色器库），其余用到时从存档取", (unsigned long)paths.count);
+        } else {   // first run, memory short: only the title's pipelines are kept; the rest go into the archive in the background
+            NSString *title = [lists.firstObject.lastPathComponent isEqualToString:@"pso_title.tsv"] ? lists.firstObject : nil;
+            paths = title ? @[title] : @[];
+            if (title) [lists removeObjectAtIndex:0];
+            g_par_fill_lists = lists;
+            MLOG("预热：还没有管线存档，只建标题画面的管线；其余 %lu 份清单在后台收进存档", (unsigned long)lists.count);
+        }
+    }
     NSMutableArray<NSString *> *files = [NSMutableArray array];
     NSUInteger skipped = 0;
     for (NSString *file in cached) {
@@ -6769,6 +6869,7 @@ static void warm_start(void) {
     warm_claim();
     MLOG("启动关键管线已就绪：等待 %d ms，可用着色器 %lu / 渲染管线 %llu / 计算管线 %llu；其余后台继续预热",
          ms, (unsigned long)g_shcache.count, g_warm_claim_rps, g_warm_claim_cps);
+    if (g_par_fill_lists) warm_fill_archive(g_par_fill_lists);
 }
 static int g_rt_ovr;   // 运行时外推的模板覆盖：0 不覆盖；1 只在单位 / 特效 / 外推洞位（0xD0）上通过、不写模板；3 照常深度测试，通过处写特效位 0x40 | Stencil override for runtime extrapolation: 0 no override; 1 pass only on the unit / effect / extrapolation-hole bits (0xD0), no stencil write; 3 depth test as usual, write the effect bit 0x40 where it passes
 static id<MTLDepthStencilState> dss_get(int has_depth, int has_stencil) {
@@ -10297,7 +10398,7 @@ static void dispatch(const p_dispatch *dp) {
     const void *k = (__bridge const void *)cs;
     id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
     if (!ps) {
-        NSError *e = nil; uint64_t bt = bp_now(); ps = [g_dev newComputePipelineStateWithFunction:cs->fn error:&e];
+        NSError *e = nil; uint64_t bt = bp_now(); ps = cs_new(cs->fn, &e);
         g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
         if (!ps) { MLOG("【红】建计算管线失败：%s", e.localizedDescription.UTF8String); return; }
         if (survey_shader_log()) MLOG("[survey-shader] frame %llu compute pipeline %s in %.2f ms", (unsigned long long)atomic_load(&g_cur_frame), cs->key, (bp_now() - bt) / 1e6);
