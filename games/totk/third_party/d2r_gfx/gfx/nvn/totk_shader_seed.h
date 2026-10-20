@@ -29,14 +29,17 @@ static NSString *totk_seed_fingerprint(NSDictionary *m, NSArray<NSString *> *nam
 
 // iOS checks the app bundle's seal when it installs the app and keeps the bundle read-only, so a seed inside the bundle
 // needs no second hash on the device (76 s for 79,352 files on an iPhone 14, 2026-10-20). Packs pushed into Documents
-// (fill packs) and every seed on the Mac are still checked.
+// (fill packs) and every seed on the Mac are still checked. Such a seed is also not copied: the bundle and Documents are
+// on different volumes, so a clone fails (EXDEV) and the copy took 175 s; the runtime reads it in place
+// (totk_shader_rt.m totk_rt_file), and the result names the files ("overlay").
 static BOOL totk_seed_sealed(NSString *source) {
 #if TARGET_OS_IPHONE
     NSString *bundle = NSBundle.mainBundle.bundlePath.stringByResolvingSymlinksInPath;
     NSString *path = source.isAbsolutePath ? source : [NSFileManager.defaultManager.currentDirectoryPath stringByAppendingPathComponent:source];
     return bundle.length && [path.stringByResolvingSymlinksInPath hasPrefix:[bundle stringByAppendingString:@"/"]];
 #else
-    (void)source; return NO;
+    (void)source;   // TOTK_SHADER_SEED_IN_PLACE=1: the Mac reads its seed the way iOS does (tests of the iOS path)
+    const char *e = getenv("TOTK_SHADER_SEED_IN_PLACE"); return e && !strcmp(e, "1");
 #endif
 }
 
@@ -44,11 +47,15 @@ static BOOL totk_seed_sealed(NSString *source) {
 // folder: one call instead of a clone and a rename per file (181 s for 79,352 files on an iPhone 14, 2026-10-20). The
 // entries the manifest does not name for the cache (the manifest itself, the title list, shader-keys.json) are removed
 // again, and the folder is made writable (the bundle's is read-only). NO leaves the cache as it was: import file by file.
+static int totk_seed_clone_errno;   // why the last folder or file clone fell back (0: none did), for the import log
+static NSString *totk_seed_folder_skipped;   // an entry already in the cache, which made the import go file by file
 static BOOL totk_seed_clone_folder(NSString *source, NSString *cache, NSSet<NSString *> *keep) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSArray *present = [fm contentsOfDirectoryAtPath:cache error:nil];
+    if (present.count) totk_seed_folder_skipped = present.firstObject;
     if (!present || present.count || rmdir(cache.fileSystemRepresentation)) return NO;
     if (clonefile(source.fileSystemRepresentation, cache.fileSystemRepresentation, CLONE_NOOWNERCOPY)) {
+        totk_seed_clone_errno = errno;
         [fm createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
         return NO;
     }
@@ -85,17 +92,21 @@ static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NS
         // (totk_shader_rt.m shader_scope), so it is never copied into the writable cache.
         NSString *const scopeName = @"shader-keys.json";
         BOOL installed = [old isKindOfClass:NSDictionary.class] && [old[@"files_sha256"] isEqual:fingerprint];   // receipts from before 2026-10-18 (manifest_sha256) are checked once more
+        BOOL sealed = marker && totk_seed_sealed(source);
         for (id name in names) {
             if (![name isKindOfClass:NSString.class] || ![safe numberOfMatchesInString:name options:0 range:NSMakeRange(0, [name length])]) {
                 problem = @"Unsafe startup shader seed filename"; goto fail;
             }
-            if (![name isEqualToString:scopeName] && ![fm fileExistsAtPath:[cache stringByAppendingPathComponent:name]]) installed = NO;
+            if (!sealed && ![name isEqualToString:scopeName] && ![fm fileExistsAtPath:[cache stringByAppendingPathComponent:name]]) installed = NO;
+        }
+        if (sealed) {   // read in place (see totk_seed_sealed): nothing to check or copy
+            if (![fm createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:error]) return nil;
+            return @{@"available": @YES, @"shaders": m[@"shaders"], @"imported_files": @0, @"sealed": @YES, @"overlay": names};
         }
         if (installed) return @{@"available": @YES, @"shaders": m[@"shaders"], @"imported_files": @0};
         // Validate the complete source before changing any existing cache entry.
         NSUInteger checked = 0;
-        BOOL sealed = totk_seed_sealed(source);
-        if (!sealed) for (NSString *name in names) {
+        for (NSString *name in names) {
             @autoreleasepool {
                 NSData *data = [NSData dataWithContentsOfFile:[source stringByAppendingPathComponent:name] options:0 error:error];
                 if (!data || ![totk_seed_hash(data) isEqual:files[name]]) { problem = @"Startup shader seed integrity check failed"; goto fail; }
@@ -108,8 +119,7 @@ static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NS
             NSData *receipt = [NSJSONSerialization dataWithJSONObject:@{@"files_sha256": fingerprint} options:0 error:error];
             if (!receipt || ![receipt writeToFile:marker options:NSDataWritingAtomic error:error]) return nil;
             if (totk_seed_progress) totk_seed_progress(1, names.count, names.count);
-            return @{@"available": @YES, @"shaders": m[@"shaders"], @"imported_files": @(keep.count), @"cloned_folder": @YES,
-                     @"sealed": @(sealed)};
+            return @{@"available": @YES, @"shaders": m[@"shaders"], @"imported_files": @(keep.count), @"cloned_folder": @YES};
         }
         NSUInteger imported = 0, copied = 0;
         // Make shader files available before publishing their variant indexes.
@@ -134,8 +144,10 @@ static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NS
                 // out of the cache.
                 NSString *temp = [target stringByAppendingFormat:@".%d.import", getpid()];
                 unlink(temp.fileSystemRepresentation);
-                if (clonefile(from.fileSystemRepresentation, temp.fileSystemRepresentation, 0) &&
-                    ![fm copyItemAtPath:from toPath:temp error:error]) return nil;
+                if (clonefile(from.fileSystemRepresentation, temp.fileSystemRepresentation, 0)) {
+                    if (!totk_seed_clone_errno) totk_seed_clone_errno = errno;
+                    if (![fm copyItemAtPath:from toPath:temp error:error]) return nil;
+                }
                 if (rename(temp.fileSystemRepresentation, target.fileSystemRepresentation)) {
                     if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
                     unlink(temp.fileSystemRepresentation);
@@ -171,7 +183,8 @@ static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NS
         }
         NSData *receipt = [NSJSONSerialization dataWithJSONObject:@{@"files_sha256": fingerprint} options:0 error:error];
         if (marker && (!receipt || ![receipt writeToFile:marker options:NSDataWritingAtomic error:error])) return nil;
-        return @{@"available": @YES, @"shaders": m[@"shaders"], @"imported_files": @(imported), @"sealed": @(sealed)};
+        return @{@"available": @YES, @"shaders": m[@"shaders"], @"imported_files": @(imported),
+                 @"clone_errno": @(totk_seed_clone_errno), @"folder_skipped": totk_seed_folder_skipped ?: @""};
     }
 fail:
     if (error) *error = [NSError errorWithDomain:@"MacNativeGames.ShaderSeed" code:1

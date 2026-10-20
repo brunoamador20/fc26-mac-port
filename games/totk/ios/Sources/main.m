@@ -127,6 +127,10 @@ static void audio_observe(void) {
        shader-cache; those, and other chains' folders, are only cache and are removed in the background. */
     NSString *cacheRoot = [docs stringByAppendingPathComponent:@"shader-cache"], *chainDir = @"rt-" DMSH_CHAIN;
     NSString *cache = [cacheRoot stringByAppendingPathComponent:chainDir];
+    /* Test launches (devicectl --environment-variables '{"TOTK_SHADER_CACHE":"cache-test/1"}') can name another folder
+       in Documents, e.g. an empty one to time a first start; it lies outside shader-cache, so the cleanup leaves it. */
+    const char *testCache = getenv("TOTK_SHADER_CACHE");
+    if (testCache && *testCache && !strstr(testCache, "..")) cache = [docs stringByAppendingPathComponent:@(testCache)];
     [fm createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
     setenv("TOTK_SHADER_CACHE",cache.fileSystemRepresentation,1);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{

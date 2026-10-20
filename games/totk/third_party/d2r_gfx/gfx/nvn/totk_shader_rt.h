@@ -4,6 +4,10 @@
 #import <Foundation/Foundation.h>
 #include <stdint.h>
 NSString *totk_rt_dir(void);
+// A file of the translation cache by name: the cache folder, or on iOS the seed inside the app for the files it brings
+// (read in place, never copied). totk_rt_list: every file name of both, sorted.
+NSString *totk_rt_file(NSString *name);
+NSArray<NSString *> *totk_rt_list(void);
 // Current-game raw shader keys observed outside the bundled static inventory.
 // Includes persisted earlier sessions and returns an immutable snapshot.
 NSSet<NSString *> *totk_rt_observed_shader_keys(void);
