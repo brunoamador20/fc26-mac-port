@@ -3630,7 +3630,7 @@ static id<MTL4RenderCommandEncoder> g_enc;
 static int rp_active(void) { return g_enc != nil; }
 // 当前渲染通道的目标信息：rp_begin 时由附件定一次，通道内各绘制共用（管线键、深度模板、视口 / 剪裁都只依赖它）
 // Target info of the current render pass: determined once from the attachments at rp_begin and shared by all draws in the pass (pipeline key, depth-stencil, viewport / scissor all depend only on it)
-static struct { uint32_t cfmt[8], dfmt, sfmt, samples; int hd, hs; NSUInteger tw, th; uint64_t serial, reg_gen, ser_gen, range_dirty; int range_external, range_depth_nonro; __unsafe_unretained id<MTLTexture> range_color, range_depth; int layered, mfx; } g_pass;
+static struct { uint32_t cfmt[8], dfmt, sfmt, samples; int hd, hs; NSUInteger tw, th; uint64_t serial, reg_gen, ser_gen, range_dirty; int range_external, range_depth_nonro; __unsafe_unretained id<MTLTexture> range_color, range_depth; int layered, mfx, noatt; } g_pass;
 /* TOTK_MFX=interp (totk_mfx.m): the canvas is the float target the game composes the frame in and then copies to the
    presented texture (docked: 1920x1080, the 1600x900 scene upscaled into it; handheld: 1280x720, the scene drawn in it).
    Before the first UI draw into it (a TOTK UI vertex shader) the pass is ended and the canvas copied: that is the scene.
@@ -3735,7 +3735,7 @@ static void pass_dims(MTL4RenderPassDescriptor *pd, NSUInteger nc, NSUInteger *w
         NSUInteger aw = mip_extent(a.texture.width, a.level), ah = mip_extent(a.texture.height, a.level);
         *w = *w ? MIN(*w, aw) : aw; *h = *h ? MIN(*h, ah) : ah;
     }
-    if (!*w) *w = *h = 1;
+    if (!*w) { *w = pd.renderTargetWidth ? pd.renderTargetWidth : 1; *h = pd.renderTargetHeight ? pd.renderTargetHeight : 1; }   // a pass with no attachment: its set size
 }
 
 // ---------- DM_NVN_PASSGPU=<文件>：逐通道 GPU 时间（阶段边界时间戳计数器） ----------
@@ -4335,6 +4335,7 @@ static void mfx_snapshot_scene(void) {
 }
 static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only);
 static id<MTL4RenderCommandEncoder> rp_begin(void) { return rp_begin_ex(0); }
+static int rt_none(void); static void noatt_dims(NSUInteger *w, NSUInteger *h);
 static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
     if (g_enc) return g_enc;
     chunk_maybe_split();
@@ -4425,6 +4426,18 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
                 if (pd.depthAttachment.texture && pd.depthAttachment.loadAction == MTLLoadActionLoad) pd.depthAttachment.loadAction = MTLLoadActionDontCare;
                 if (pd.stencilAttachment.texture && pd.stencilAttachment.loadAction == MTLLoadActionLoad) pd.stencilAttachment.loadAction = MTLLoadActionDontCare; }
       if (ns) { if (pd.depthAttachment.texture) pd.depthAttachment.storeAction = MTLStoreActionDontCare; if (pd.stencilAttachment.texture) pd.stencilAttachment.storeAction = MTLStoreActionDontCare; } }
+    /* TOTK (from games/by3, PR #62; nxnative 7ed061f found it in TOTK): a draw with no render target set, only
+       rasterization whose fragment shader writes a storage buffer (an agl shader samples a 64x64 cube map into a 1x1
+       viewport and the game reads the buffer back). Such passes were skipped ("pass without Metal targets: no
+       attachments set"); nxnative reports the opening cave's rock then lacked its ambient light and Zelda had a bloom
+       halo. Metal takes a pass with a set size and no attachments: the viewport's extent (or the scissor's); a later
+       draw that needs more reopens it (draw_inner). */
+    int noatt = 0;
+    if (!any && clear_only != 1 && rt_none()) {
+        NSUInteger w, h; noatt_dims(&w, &h);
+        pd.renderTargetWidth = w; pd.renderTargetHeight = h; pd.defaultRasterSampleCount = 1; any = noatt = 1;
+        PD("P %llu none %lux%lu (no render target)", g_stat_pass + 1, (unsigned long)w, (unsigned long)h);
+    }
     if (!any) {
         static int n; if (n++ < 8) {   /* TOTK: report what the attachments were (the pass is skipped, its draws are lost) */
             for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i]) MLOG("【红】pass without Metal targets (clear_only %d): color %d serial %llu format %#x %ux%u target %d view %s%#x -> %s", clear_only, i,
@@ -4489,7 +4502,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
         g_pass.dfmt = g_pass.hd ? (uint32_t)dt.pixelFormat : 0; g_pass.sfmt = stt ? (uint32_t)stt.pixelFormat : 0;
         if (dt || stt) g_pass.samples = (uint32_t)(dt ? dt : stt).sampleCount;
         pass_dims(pd, (NSUInteger)R.rt.n, &g_pass.tw, &g_pass.th);
-        g_pass.layered = lay_n != 0;
+        g_pass.layered = lay_n != 0; g_pass.noatt = noatt;
         if (rt_range_on()) { g_pass.reg_gen = reg0; g_pass.ser_gen = ser0; }
         if (rt_range_on()) { g_pass.range_dirty=dirty0; g_pass.range_color=pd.colorAttachments[0].texture; g_pass.range_depth=pd.depthAttachment.texture; }
         g_enc_pso = nil; g_enc_dss = nil;
@@ -4523,6 +4536,7 @@ static void rt_dims(NSUInteger *tw, NSUInteger *th) {
         t0 = tex_mtl(R.rt.color[i]); level = R.rt.has_cview[i] && R.rt.cview[i].set_levels ? R.rt.cview[i].base_level : 0;
     }
     if (!t0 && R.rt.depth) { t0 = tex_mtl(R.rt.depth); level = R.rt.has_dview && R.rt.dview.set_levels ? R.rt.dview.base_level : 0; }
+    if (!t0 && rt_none()) { noatt_dims(tw, th); return; }
     *tw = t0 ? mip_extent(t0.width, level) : 1; *th = t0 ? mip_extent(t0.height, level) : 1;
 }
 // 有挂起的清除但通道里没有绘制：开一次通道把清除落地
@@ -5534,6 +5548,19 @@ static struct {
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; int depth_clamp; int render_disabled; int raster_discard;
     float blend_color[4]; int64_t copy_stride;
 } S;
+// No render target set: no colour target and no depth / stencil (a pass of rasterization only, see rp_begin_ex)
+static int rt_none(void) {
+    if (!R.has_rt || R.rt.depth) return 0;
+    for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i]) return 0;
+    return 1;
+}
+// The size of such a pass: the extent of viewport 0, else of the scissor (1..16384)
+static void noatt_dims(NSUInteger *w, NSUInteger *h) {
+    double x1 = 0, y1 = 0;
+    if (S.has_vp) { x1 = ceil(fmax(S.vp[0][0], S.vp[0][0] + S.vp[0][2])); y1 = ceil(fmax(S.vp[0][1], S.vp[0][1] + S.vp[0][3])); }
+    if ((x1 < 1 || y1 < 1) && R.has_sc) { x1 = (double)R.sc.x + R.sc.w; y1 = (double)R.sc.y + R.sc.h; }
+    *w = x1 < 1 ? 1 : x1 > 16384 ? 16384 : (NSUInteger)x1; *h = y1 < 1 ? 1 : y1 > 16384 ? 16384 : (NSUInteger)y1;
+}
 static void udc_note_draw(NvProg *pr) {
     if (R.has_rt) for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i]) { zskip_del(R.rt.color[i]->serial); g_zskip_cand_ok[i] = 0; }   // 零源集合：真画了就不再是全零 | Zero-source set: once really drawn it is no longer all zeros
     /* TOTK (after D2R Mobile 44a6770): the program's image bindings and fragment colour mask are worked out once per program
@@ -9837,6 +9864,7 @@ static void draw_inner(const p_draw *dw, const p_draw_idx *di) {
     if (g_fz.active && g_enc && g_fz.phase == 2 && !fz_p2_draw(pr, dw, di, g_fz.lmap2, &fz_fn)) {   // 证不出：结束合并通道（前一个通道的结果照常写回），按后一个通道的原目标重开 | Cannot be proven: end the merged render pass (the earlier pass's result is stored as usual) and reopen with the later pass's original targets
         static int once3; if (!once3++) MLOG("可读 tile 通道合并：后一个通道的绘制证不出，退回分开（首例 通道 %llu）", g_stat_pass);
         g_fz_fallback++; rp_end(); }
+    if (g_enc && g_pass.noatt) { NSUInteger w, h; noatt_dims(&w, &h); if (w > g_pass.tw || h > g_pass.th) rp_end(); }   // no render target: this draw needs a larger pass
     if (R.has_sc && !g_enc) {
         NSUInteger tw0 = 0, th0 = 0; rt_dims(&tw0, &th0);
         long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
