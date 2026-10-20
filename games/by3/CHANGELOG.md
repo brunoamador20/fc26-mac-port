@@ -318,3 +318,15 @@ classic present path when the link stays silent, and goes back when it calls aga
   its passes are unchanged. Dumps now show these passes as `P <pass> none WxH`.
 - Ruled out on the way: the renamed uniform-update path for `ClearBuffer` (`TOTK_UB_RENAME=0` changes nothing). The
   81920-byte buffer that `ClearBuffer` clears is an occlusion-visibility list (`s0[object] = 0xffff`), not a histogram.
+
+### 2026-10-19: "Improved LOD v2" breaks the geometry
+
+Report: in play (ship deck, prologue), the picture looked blurred and "fast": the scenery broke into blocks and
+smears, and Bayonetta was a ghost (only her shadow solid). It happened at both the 60 Hz and the 120 Hz base, so
+pacing is not the cause.
+- With the same scripted run from chapter select into the deck fight (test profile), the picture is clean with
+  `60fps,res-1600x900`. Adding only `improved-lod-v2` gives the user's picture.
+- That patch is one instruction, `main+0xbd5b2c`: `csel w8, ...` becomes `mov w8, #0`, so every object takes LOD 0.
+  Why LOD 0 breaks here and not on the Switch is open. One guess: high-detail meshes drawn before their data is
+  streamed in.
+- Launcher: LOD is off in every preset, and checking it shows a warning. The 120 fps option stays: the user wants it.

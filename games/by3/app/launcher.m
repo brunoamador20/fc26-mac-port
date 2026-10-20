@@ -9,7 +9,8 @@
    - Monitor (BY3_DISPLAY), window or full screen (BY3_FULLSCREEN), window size (TOTK_WINDOW_SIZE), the full-screen
      output resolution (TOTK_DRAWABLE_SCALE relative to the monitor's pixels) and the scaler (MetalFX spatial upscaling of
      the game's picture to the output, TOTK_MFX_UPSCALE / TOTK_MFX_OUTPUT, or plain linear scaling).
-   - Extras: improved LOD, no film grain (patches); the RomFS interface mod; the FPS / resolution HUD.
+   - Extras: improved LOD (off in every preset: it breaks the geometry here), no film grain (patches); the RomFS
+     interface mod; the FPS / resolution HUD.
    Patches come from <work>/patches (scripts/prepare_patches.py, make_res_patch.py); a missing one is left out and the
    window says so. */
 #import <Cocoa/Cocoa.h>
@@ -26,8 +27,8 @@ static const Preset presets[] = {
     {"Original (30 fps, como en la consola)", "Original (30 fps, as on the console)", 30, 0, 0, 0, 0, 0, 0, 2},
     {"Recomendado (60 fps, ventana)", "Recommended (60 fps, window)", 60, 0, 0, 1, 0, 0, 0, 2},
     {"Rendimiento (60 fps, 900p fija)", "Performance (60 fps, fixed 900p)", 60, 1, 0, 1, 0, 0, 0, 2},
-    {"Calidad (60 fps, pantalla completa, MetalFX nativo, LOD, sin grano)", "Quality (60 fps, full screen, native MetalFX, LOD, no grain)", 60, 1, 1, 1, 0, 1, 1, 2},
-    {"Monitor rápido (120 fps experimental, pantalla completa, MetalFX)", "Fast monitor (120 fps experimental, full screen, MetalFX)", 120, 1, 1, 1, 0, 1, 1, 2},
+    {"Calidad (60 fps, pantalla completa, MetalFX nativo, sin grano)", "Quality (60 fps, full screen, native MetalFX, no grain)", 60, 1, 1, 1, 0, 0, 1, 2},
+    {"Monitor rápido (120 fps experimental, pantalla completa, MetalFX)", "Fast monitor (120 fps experimental, full screen, MetalFX)", 120, 1, 1, 1, 0, 0, 1, 2},
 };
 enum { NPRESETS = sizeof presets / sizeof *presets };
 static const int fps_values[] = {30, 60, 120};
@@ -182,6 +183,8 @@ static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
         [s appendString:T("120 fps es experimental: si el juego se ve acelerado, vuelve a 60. ", "120 fps is experimental: if the game looks sped up, go back to 60. ")];
         if (self.chosenScreen.maximumFramesPerSecond < 120) [s appendString:T("Este monitor no llega a 120 Hz. ", "This monitor does not reach 120 Hz. ")];
     }
+    if (self.lod.state)   // tried 2026-10-19: with the patch the scenery breaks into blocks and smears, characters turn ghostly
+        [s appendString:T("Mejor LOD rompe la geometría en este port (bloques, personajes fantasma): mejor apagado. ", "Improved LOD breaks the geometry in this port (blocks, ghostly characters): best left off. ")];
     if (missing.count)
         [s appendFormat:T("Faltan estos parches y se omitirán: %@ (make patches). ", "These patches are missing and will be left out: %@ (make patches). "),
                           [missing componentsJoinedByString:@", "]];
