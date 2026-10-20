@@ -156,7 +156,13 @@ python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.
 ```
 
 `--mod` takes the mod folder as it comes (its `exefs/` code patches and its `romfs/`, which is installed separately as
-described above; the build only reads `exefs/`). The patches are applied to the verified retail main of the version
+described above; the build only reads `exefs/`). Why a build flag at all: the app has no module loader - at start it maps
+the three code modules it was built from (main, sdk, subsdk0), rewritten for Apple silicon and bound by SHA-256, and
+nothing in it reads a mod's `exefs/` the way Ryujinx or a Switch does. So the code side goes in one step earlier:
+`--mod` merges the mod's main-module patches into the verified retail module before it is rewritten. RomFS (data) mods
+are unaffected and still load at start. Several mods with code patches: merge them in the mod manager first (TKMM's
+output is one folder with one `exefs/` and one `romfs/`), then build with `--mod <that folder>`.
+The patches are applied to the verified retail main of the version
 being built - a `.pchtxt` as the game's own patch loader reads it, a `.ips` / `.ips32` with the emulator offset
 convention - after checking that no edit lands on a site the app patches itself, that no two patches change the same
 bytes and that every edit is inside main's own segments. The merged module is then rewritten for Apple silicon and the
@@ -435,6 +441,17 @@ python3.14 games/totk/tools/install_desktop_entry.py --app "/路径/Tears of the
 1.4.3 另行通过了 M4 Mac 的场景读档、移动 / 跳跃、菜单 / 地图、保存重读、原生 2K 画布切换和 MetalFX 放大 / 补帧。唯一打包 App 已实际验证，另覆盖死亡重试和神庙进出。旧构建三小时及最终版约 30 分钟分开记录；首次编译卡顿、长局内存增长与音频欠载仍待排查，不能视为全游戏或稳定帧率认证。结果、测试方法和后续项见 [1.4.3 适配记录](docs/v1.4.3-port.md)。
 
 1.2.1（10 月 19 日）通过了同样的改写验证（600 个反向对照全部抓到）和加载、RomFS、启动探针。在 M4 Mac 上读过 1.0.0 和 1.1.2 两种格式的存档，并通过移动 / 跳跃、菜单 / 地图 / 快捷菜单、手动存档后新进程读档、摔死重试和 3 键的三种画质；打包后的 App 也从启动器打开测试过。详见 [1.2.1 测试记录](docs/v1.2.1-port.md)；这不代表全流程或长局验收。
+
+### 构建带模组代码补丁
+
+```sh
+python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.4.3.nsp \
+  --mod "/路径/The Second Quest 1.4.3"
+```
+
+`--mod` 原样接收模组文件夹（它的 `exefs/` 代码补丁，以及按上文单独安装的 `romfs/`；构建只读 `exefs/`）。为什么要一个构建参数：App 没有模块加载器——启动时它映射的是构建时的那三个代码模块（main、sdk、subsdk0），已经改写为 Apple 芯片版本并按 SHA-256 绑定，里面没有任何东西会像 Ryujinx 或 Switch 那样去加载模组的 `exefs/`。所以代码这一半只能在更早一步进去：`--mod` 在改写之前把模组的主模块补丁合并进核对过的原版模块；RomFS（数据）部分不受影响，仍在启动时加载。多个带代码补丁的模组建议先在模组管理器里合并（TKMM 的输出就是一个文件夹，一套 `exefs/`、一套 `romfs/`），再用 `--mod <那个文件夹>` 构建。
+
+补丁只打在当前版本、核对过的原版 main 上：`.pchtxt` 按游戏自带补丁加载器的规则读，`.ips` / `.ips32` 按模拟器的偏移约定（含 0x100 字节 NSO 头）读；打之前会检查没有任何改动落在 App 自己打补丁的位置、没有两个补丁改同一批字节、且每处改动都在 main 自己的段内。合并后的模块再改写为 Apple 芯片版本，App 按它的 SHA-256 绑定。`--work` 里的 `analysis/phase12-validation.json`（1.0.0）或 `analysis/<version>-port/phase12-validation.json` 在 `mod_exefs` 下记录模组目录、每个补丁文件的 SHA-256 和它改动的地址。模组附带的额外代码模块（`subsdk9` 这类 hook 框架的模块）不会被加载，构建会明确提示：这样的模组保留主模块补丁和整个 RomFS，但依赖那个模块的那部分代码改动不会生效。逐步说明见 [docs/mods.md](docs/mods.md)。
 
 ### 旷野之息 1.6.0（早期）
 

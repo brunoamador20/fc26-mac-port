@@ -91,6 +91,19 @@ A mod that changes the game's code ships `exefs/` files: an IPS or IPS32 patch, 
 python3 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys" --mod "/path/to/Mod"
 ```
 
+Why the build and not the game: the app has no module loader. At start it maps the three code modules it
+was built from - main, sdk and subsdk0 - rewritten for Apple silicon and bound by SHA-256, and nothing in
+it reads a mod's `exefs/` the way Ryujinx or a Switch does (that is the extra-module support of v2, see
+below). So the code side goes in one step earlier: `--mod` merges the mod's main-module patches into the
+verified retail module before it is rewritten, and the app ships code that still matches its hash. RomFS
+(data) mods are not affected - they are still loaded at start, as described above.
+
+With several mods, let the mod manager do the combining: TKMM's merged output is one folder with one
+`exefs/` and one `romfs/` (a manager may also pack several mods' records into one `.ips`), so `--mod
+<that folder>` picks all of them up, and its `romfs/` is installed as usual. Two patch files that change
+the same bytes are refused with both names, so a merge that overwrote one mod's change with another's
+stops the build instead of shipping silently.
+
 The folder you pass holds the mod's files in the usual layout - `exefs/` for code, `romfs/` for data - and
 its `romfs/` half is still installed separately (see above); the build only reads `exefs/`. With
 `--update` the patch is merged into the updated module, which is the one the app runs.
@@ -170,7 +183,9 @@ already happened is reused: the rewrite is skipped while the recorded hash match
   pass that folder to `--mod` - its `exefs` patches are merged, and a manager's merged `.ips` may hold several mods'
   records in one file - then copy its `romfs/` into the version's mods folder and generate the manifest (no `--exclude`
   needed: the manager's heap table and the app's 2K overlay are reconciled for you). Generate the manifest again after
-  every re-merge in the manager: the game checks every file's hash at start.
+  every re-merge in the manager: the game checks every file's hash at start. This is also how several mods with code
+  patches are combined: merge them in the manager first, then build with `--mod <the manager's output folder>`; the
+  build refuses two patch files that change the same bytes and names both of them.
 - A mod with a code patch also needs its `exefs/` patch to match the game version the app is built from.
   The build checks what the file itself says: a `.pchtxt` is refused when its `@nsobid-` names another
   main, and an `.ips` / `.ips32` named after a build id is left out when that id is not this main's.
@@ -281,6 +296,17 @@ never checks and Metal refuses to build; the app caps the chain at what the dime
 python3 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys" --mod "/path/to/Mod"
 ```
 
+为什么只能在构建时、而不是运行时：App 没有模块加载器。启动时它映射的是构建时的那三个代码模块（main、
+sdk、subsdk0），已经改写为 Apple 芯片版本并按 SHA-256 绑定，里面没有任何东西会像 Ryujinx 或 Switch 那样去
+加载 mod 的 `exefs/`（那是 v2 的额外模块支持，见下文）。所以代码这一半只能在更早一步进去：`--mod` 在改写
+之前把 mod 的主模块补丁合并进核对过的原版模块，App 里跑的仍是与哈希一致的那份代码。RomFS（数据）部分不受
+影响，仍按上面的说明在启动时加载。
+
+有多个 mod 时，让模组管理器去做合并这件事：TKMM 的合并输出就是一个文件夹，里面一套 `exefs/`、一套
+`romfs/`（管理器也可能把几个 mod 的记录合进同一个 `.ips`），`--mod <那个文件夹>` 会把它们一起收进来，
+它的 `romfs/` 照常安装。两个补丁文件改到同一批字节时构建会拒绝并报出两个文件名，所以「合并时被另一个 mod
+覆盖」这种情况会停在构建阶段，不会不声不响地打进去。
+
 传入的文件夹按 mod 的常见结构放文件——代码在 `exefs/`、数据在 `romfs/`。构建只读 `exefs/`，
 `romfs/` 那一半仍按上面的步骤单独安装。带 `--update` 时补丁合并进更新后的模块，也就是 App 实际运行的
 那个。
@@ -347,7 +373,9 @@ mod 的 `exefs/` 里可能还有这些文件，构建这样处理：
 - 模组管理器（TKMM，或 Ryujinx 的 `mods/contents/<title id>/<name>`）给出的是同一个文件夹里的 `exefs/` 和 `romfs/`：
   把这个文件夹交给 `--mod`（里面的 `exefs` 补丁会合并，管理器合并出来的 `.ips` 可能一个文件里装着好几个模组的记录），
   再把它 `romfs/` 的内容拷进对应版本的 mods 目录并生成清单（不需要再手动 `--exclude`：管理器的堆表和 App 的 2K 覆盖
-  文件会自动协调）。每次在管理器里重新合并后都要重新生成清单：游戏启动时会逐个校验文件哈希。
+  文件会自动协调）。每次在管理器里重新合并后都要重新生成清单：游戏启动时会逐个校验文件哈希。多个带代码补丁的
+  mod 也是这样合的：先在管理器里合并，再用 `--mod <管理器的输出文件夹>` 构建；两个补丁文件改到同一批字节时构建
+  会拒绝，并同时报出这两个文件。
 - 带代码补丁的 mod，其 `exefs/` 补丁也要和构建所用的游戏版本一致。构建按文件自己写的东西核对：`.pchtxt` 的
   `@nsobid-` 不是这个 main 就拒绝；按 build id 命名的 `.ips` / `.ips32`，id 不是这个 main 就留出并提示。
 - 本文面向 Mac App；iPhone/iPad 的 App 容器内安装未在此说明。
