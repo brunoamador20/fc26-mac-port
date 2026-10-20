@@ -2572,6 +2572,42 @@ static int tex_swizzle_sel(const tex_t *t, const uint8_t *view_sel, int format, 
 }
 static int tex_swizzle(const tex_t *t, int format, MTLTextureSwizzleChannels *out) { return tex_swizzle_sel(t, NULL, format, out); }
 static int swizzle_eq(MTLTextureSwizzleChannels a, MTLTextureSwizzleChannels b) { return a.red == b.red && a.green == b.green && a.blue == b.blue && a.alpha == b.alpha; }
+// TOTK: a texture that comes from a mod can carry descriptor fields the guest never validates and Metal refuses to
+// build - it aborts the process from -[MTLTextureDescriptorInternal validateWithDevice:] (seen with The Second Quest:
+// "requests 9 mipmap levels, but the dimensions (1, 1, 1) can only support 1"). Cap every guest-controlled field at
+// what the hardware allows; the game's own data is always inside these bounds, so nothing changes for it.
+static void tex_desc_fixup(const tex_t *t, MTLTextureDescriptor *d) {
+    static uint64_t capped;
+    char why[160] = "";
+    NSUInteger w = d.width, h = d.height, z = d.depth;
+    NSUInteger arr0 = d.arrayLength, smp0 = d.sampleCount, lv0 = d.mipmapLevelCount, w0 = d.width, h0 = d.height, z0 = d.depth;
+    int is_msaa = d.textureType == MTLTextureType2DMultisample || d.textureType == MTLTextureType2DMultisampleArray;
+    if (w < 1 || w > 16384) { d.width = w = w < 1 ? 1 : 16384; strlcat(why, "宽, ", sizeof why); }
+    if (h < 1 || h > 16384) { d.height = h = h < 1 ? 1 : 16384; strlcat(why, "高, ", sizeof why); }
+    if (z < 1 || z > 2048) { d.depth = z = z < 1 ? 1 : 2048; strlcat(why, "深, ", sizeof why); }
+    NSUInteger biggest = w > h ? w : h;
+    if (d.textureType == MTLTextureType3D && z > biggest) biggest = z;
+    unsigned allowed = 1;
+    for (NSUInteger v = biggest; v > 1; v >>= 1) allowed++;
+    if (d.mipmapLevelCount > allowed) { d.mipmapLevelCount = allowed; strlcat(why, "mip 级数, ", sizeof why); }
+    if (d.mipmapLevelCount < 1) { d.mipmapLevelCount = 1; strlcat(why, "mip 级数, ", sizeof why); }
+    if (d.arrayLength < 1 || d.arrayLength > 2048) { d.arrayLength = d.arrayLength < 1 ? 1 : 2048; strlcat(why, "数组长度, ", sizeof why); }
+    if (!(d.sampleCount == 1 || d.sampleCount == 2 || d.sampleCount == 4 || d.sampleCount == 8)) {
+        d.sampleCount = 1; strlcat(why, "采样数, ", sizeof why);
+    }
+    if (d.sampleCount > 1 && !is_msaa) { d.sampleCount = 1; strlcat(why, "采样数, ", sizeof why); }   // only the multisample types may sample more than once
+    if (d.sampleCount > 1) d.mipmapLevelCount = 1;
+    if (!why[0]) return;
+    if (capped++ < 6 || capped % 500 == 0) {
+        size_t n = strlen(why); if (n > 2) why[n - 2] = 0;      // drop the trailing ", "
+        MLOG("[tex] ser=%llu %ux%ux%u 目标 %d 声明 %lux%lux%lu arr=%lu smp=%lu 级数=%lu：%s 超出硬件允许，按 %lux%lux%lu arr=%lu smp=%lu 级数=%lu 创建（累计 %llu 张；Metal 否则会终止进程）",
+             (unsigned long long)t->serial, (uint32_t)t->d.width, (uint32_t)t->d.height, (uint32_t)t->d.depth, (int)t->d.target,
+             (unsigned long)w0, (unsigned long)h0, (unsigned long)z0, (unsigned long)arr0, (unsigned long)smp0, (unsigned long)lv0,
+             why, (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.depth, (unsigned long)d.arrayLength,
+             (unsigned long)d.sampleCount, (unsigned long)d.mipmapLevelCount, (unsigned long long)capped);
+    }
+}
+
 static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     uint32_t pf = 0; uint8_t swz[4];
     if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf) { RED_ONCE(0, "贴图格式 %#x Metal 无对应（首例）", t->d.format); return nil; }
@@ -2592,6 +2628,7 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
         case 10: RED_ONCE(1, "缓冲贴图（TARGET_BUFFER）未实现"); return nil;
         default: d.textureType = MTLTextureType2D; break;
     }
+    tex_desc_fixup(t, d);
     d.storageMode = MTLStorageModePrivate;   // 渲染目标与素材都放 GPU 私有存储（可用无损压缩） | Render targets and assets both go in GPU private storage (lossless compression available)
     d.usage = MTLTextureUsageShaderRead | (fmt_compressed(t->d.format) || packaged ? 0 : MTLTextureUsageRenderTarget)
             | (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE ? MTLTextureUsageShaderWrite : 0)   // 图像用途：着色器可写（计算核生成 3D 调色表等） | Image usage: shader-writable (compute kernels generating the 3D color lookup table, etc.)
@@ -4950,14 +4987,14 @@ static id<MTLLibrary> shader_lib_prebuilt(NSData *src) {
 static NvShader *shader_load(NSString *pc, int stage) {
     NSError *e = nil;
     // TOTK: runtime translations are MSL source compiled here (macOS allows runtime compilation); the OS caches compiled code.
-    NSString *rt_src = [NSString stringWithFormat:@"%@/%@.metal", totk_rt_dir(), pc];
+    NSString *rt_src = totk_rt_file([pc stringByAppendingString:@".metal"]);
     int rt = [NSFileManager.defaultManager fileExistsAtPath:rt_src];
     NSString *lp = [NSString stringWithFormat:@"%@/%@.metallib", g_msl_dir, pc];
     id<MTLLibrary> lib = nil;
     if (rt) {
 #if TARGET_OS_IPHONE
         // iOS: the variant precompiled on the Mac (ios/tools/build_metallibs.sh, same options) if it came in shaders.pack
-        NSString *rt_lib = [NSString stringWithFormat:@"%@/%@.metallib", totk_rt_dir(), pc];
+        NSString *rt_lib = totk_rt_file([pc stringByAppendingString:@".metallib"]);
         if ([NSFileManager.defaultManager fileExistsAtPath:rt_lib]) { lib = lib_from_file(rt_lib, &e); if (!lib) MLOG("【红】预编译着色器库加载失败 %s：%s（改为现编）", pc.UTF8String, e.localizedDescription.UTF8String); else atomic_fetch_add(&g_rt_prebuilt, 1); }
 #endif
         if (!lib) { NSData *raw = [NSData dataWithContentsOfFile:rt_src options:0 error:&e];
@@ -4969,7 +5006,7 @@ static NvShader *shader_load(NSString *pc, int stage) {
     } else lib = lib_from_file(lp, &e);
     if (rt) { uint64_t pre = atomic_load(&g_rt_prebuilt), com = atomic_load(&g_rt_compiled);
               if ((pre + com) % 200 == 1) MLOG("着色器库：预编译加载 %llu 个，现编 %llu 个", (unsigned long long)pre, (unsigned long long)com); }
-    NSData *jd = [NSData dataWithContentsOfFile:[NSString stringWithFormat:@"%@/%@.json", rt ? totk_rt_dir() : g_msl_dir, pc]];
+    NSData *jd = [NSData dataWithContentsOfFile:rt ? totk_rt_file([pc stringByAppendingString:@".json"]) : [NSString stringWithFormat:@"%@/%@.json", g_msl_dir, pc]];
     NSDictionary *j = jd ? [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil] : nil;
     if (!lib || !j) { MLOG("【红】加载着色器失败 %s：%s", pc.UTF8String, e ? e.localizedDescription.UTF8String : "无反射 json"); return nil; }
     if (![j[@"chain"] isEqual:@DMSH_CHAIN]) { MLOG("【红】着色器 %s 的翻译链版本 %s 与本宿主期望的 %s 不符", pc.UTF8String, [[j[@"chain"] description] UTF8String], DMSH_CHAIN); return nil; }
@@ -6282,9 +6319,8 @@ static int warm_available(NSString *key) {
     if (!key.length) return 1;
     if (!totk_shader_scope_contains(g_warm_scope, key)) return 0;
     NSFileManager *fm = NSFileManager.defaultManager;
-    NSString *rt = totk_rt_dir();
-    int have = [fm fileExistsAtPath:[rt stringByAppendingFormat:@"/%@.metal", key]] ||
-               [fm fileExistsAtPath:[rt stringByAppendingFormat:@"/%@.metallib", key]] ||
+    int have = [fm fileExistsAtPath:totk_rt_file([key stringByAppendingString:@".metal"])] ||
+               [fm fileExistsAtPath:totk_rt_file([key stringByAppendingString:@".metallib"])] ||
                [fm fileExistsAtPath:[g_msl_dir stringByAppendingFormat:@"/%@.metallib", key]];
     if (!have) {
         static NSMutableSet *missing; static dispatch_once_t once;
@@ -6300,9 +6336,9 @@ static NvShader *warm_shader_load(NSString *key, int stage) {
        instead of a red "cannot open" per pipeline that names it (2026-10-16 night: 42 such lines in one session). */
     static NSMutableSet<NSString *> *missing; static dispatch_once_t once; dispatch_once(&once, ^{ missing = [NSMutableSet set]; });
     @synchronized (missing) { if ([missing containsObject:key]) return nil; }
-    NSString *msl = [NSString stringWithContentsOfFile:[totk_rt_dir() stringByAppendingFormat:@"/%@.metal", key]
+    NSString *msl = [NSString stringWithContentsOfFile:totk_rt_file([key stringByAppendingString:@".metal"])
                                                 encoding:NSUTF8StringEncoding error:nil];
-    if (!msl && ![NSFileManager.defaultManager fileExistsAtPath:[totk_rt_dir() stringByAppendingFormat:@"/%@.metallib", key]] &&
+    if (!msl && ![NSFileManager.defaultManager fileExistsAtPath:totk_rt_file([key stringByAppendingString:@".metallib"])] &&
         ![NSFileManager.defaultManager fileExistsAtPath:[NSString stringWithFormat:@"%@/%@.metallib", g_msl_dir, key]]) {
         @synchronized (missing) { if (![missing containsObject:key]) { [missing addObject:key]; g_warm_missing++; } }
         return nil;
@@ -6524,19 +6560,18 @@ static void warm_worker(NSArray<NSString *> *paths, NSArray<NSString *> *files,
         atomic_store(&g_warm_priority_done, 1);
         // Every variant of this game's shaders already in the cache, including those translated while the manifests
         // were warming. Other versions' shaders stay on disk for use on demand (g_warm_scope).
-        NSString *rt = totk_rt_dir();
         // Preserve variants translated while the manifest was warming. They
         // extend the measured total rather than being silently omitted.
         NSMutableArray<NSString *> *cache_files = [files mutableCopy];
         NSMutableSet<NSString *> *known_files = [NSMutableSet setWithArray:files];
         NSSet<NSString *> *late_scope = g_warm_scope ? [g_warm_scope setByAddingObjectsFromSet:totk_rt_observed_shader_keys()] : nil;
-        NSArray<NSString *> *latest = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:rt error:nil] sortedArrayUsingSelector:@selector(compare:)];
+        NSArray<NSString *> *latest = totk_rt_list();
         for (NSString *file in latest) if ([file hasSuffix:@"_b.metal"] && ![known_files containsObject:file]) {
             if (!totk_shader_scope_contains(late_scope, [file stringByDeletingPathExtension])) continue;
             // The native service publishes reflection last. A newly written
             // MSL with no reflection yet is still in flight, not a failed shader.
             NSString *json = [[file stringByDeletingPathExtension] stringByAppendingPathExtension:@"json"];
-            if (![NSFileManager.defaultManager fileExistsAtPath:[rt stringByAppendingPathComponent:json]]) continue;
+            if (![NSFileManager.defaultManager fileExistsAtPath:totk_rt_file(json)]) continue;
             [known_files addObject:file]; [cache_files addObject:file]; ++total;
             NSString *key = [file stringByDeletingPathExtension];
             if (![planned_keys containsObject:key]) { [planned_keys addObject:key]; ++shader_total; }
@@ -6548,7 +6583,7 @@ static void warm_worker(NSArray<NSString *> *paths, NSArray<NSString *> *files,
             if (![file hasSuffix:@"_b.metal"]) continue;
             NSString *key = [file stringByDeletingPathExtension];
             if (dict[key]) { warm_task_done(&done,total,shader_total,pipeline_total,dict); continue; }
-            NSString *jp = [rt stringByAppendingPathComponent:[key stringByAppendingPathExtension:@"json"]];
+            NSString *jp = totk_rt_file([key stringByAppendingPathExtension:@"json"]);
             NSData *jd = [NSData dataWithContentsOfFile:jp];
             NSDictionary *j = jd ? [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil] : nil;
             NSString *stage = j[@"stage"];
@@ -6607,7 +6642,7 @@ static void warm_filled(void) {
         [fm createDirectoryAtPath:@"shader-requests/done" withIntermediateDirectories:YES attributes:nil error:nil];
         for (NSString *n in names) @autoreleasepool {
             NSString *variant = [n stringByDeletingPathExtension];
-            if (![fm fileExistsAtPath:[totk_rt_dir() stringByAppendingFormat:@"/%@_b.metal", variant]]) { pending++; continue; }
+            if (![fm fileExistsAtPath:totk_rt_file([variant stringByAppendingString:@"_b.metal"])]) { pending++; continue; }
             NSData *jd = [NSData dataWithContentsOfFile:[@"shader-requests" stringByAppendingPathComponent:n]];
             NSDictionary *rq = jd ? [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil] : nil;
             NSString *sn = [rq isKindOfClass:[NSDictionary class]] ? rq[@"stage"] : nil;
@@ -6708,7 +6743,7 @@ static void warm_start(void) {
     }
     if (!g_warm_items) g_warm_items = [NSMutableArray array];
     g_warm_scope = totk_rt_shader_scope();
-    NSArray<NSString *> *cached = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:totk_rt_dir() error:nil] sortedArrayUsingSelector:@selector(compare:)] ?: @[];
+    NSArray<NSString *> *cached = totk_rt_list();
     NSMutableArray<NSString *> *files = [NSMutableArray array];
     NSUInteger skipped = 0;
     for (NSString *file in cached) {

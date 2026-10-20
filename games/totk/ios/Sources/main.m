@@ -37,6 +37,16 @@ void runtime_shortcut_help_toggle(void) {}
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     static BOOL started; if (started) return; started = YES;
+    /* Playback category (PR #97): plays with the ring / silent switch off and routes to the speaker. Without an active
+       session the game's CoreAudio output stays on a null sink on iOS 27 ("no device sink in use"); activating it in
+       didFinishLaunching blocked the main thread before the log file was opened. Interruptions: audio_observe. */
+    AVAudioSession *audio = AVAudioSession.sharedInstance;
+    NSError *catErr = nil, *actErr = nil;
+    [audio setCategory:AVAudioSessionCategoryPlayback mode:AVAudioSessionModeDefault options:0 error:&catErr];
+    BOOL activated = [audio setActive:YES error:&actErr];
+    fprintf(stderr, "[totk-audio] audio session category=%s active=%d route=%s err=%s%s\n",
+            audio.category.UTF8String ?: "?", (int)activated, audio.currentRoute.outputs.firstObject.portType.UTF8String ?: "?",
+            catErr ? catErr.localizedDescription.UTF8String : "none", actErr ? actErr.localizedDescription.UTF8String : "");
     pthread_attr_t attr; pthread_attr_init(&attr); pthread_attr_setstacksize(&attr, 64u << 20);
     pthread_t thread; pthread_create(&thread, &attr, run_host, NULL);
     pthread_detach(thread); pthread_attr_destroy(&attr);
@@ -97,6 +107,9 @@ static void audio_observe(void) {
     // Controller input does not reset the idle timer; auto-lock would suspend the game mid-play or mid shader import.
     application.idleTimerDisabled = YES;
     audio_observe();
+    /* The Mac launcher passes the preferred language as TOTK_LOCALE (PR #97); "zh-Hans-CN" maps to zh-Hans in services.c. */
+    NSString *preferred = NSLocale.preferredLanguages.firstObject;
+    if (preferred.length) setenv("TOTK_LOCALE", preferred.UTF8String, 1);
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject;
     NSString *res = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"GameData"];
@@ -114,6 +127,10 @@ static void audio_observe(void) {
        shader-cache; those, and other chains' folders, are only cache and are removed in the background. */
     NSString *cacheRoot = [docs stringByAppendingPathComponent:@"shader-cache"], *chainDir = @"rt-" DMSH_CHAIN;
     NSString *cache = [cacheRoot stringByAppendingPathComponent:chainDir];
+    /* Test launches (devicectl --environment-variables '{"TOTK_SHADER_CACHE":"cache-test/1"}') can name another folder
+       in Documents, e.g. an empty one to time a first start; it lies outside shader-cache, so the cleanup leaves it. */
+    const char *testCache = getenv("TOTK_SHADER_CACHE");
+    if (testCache && *testCache && !strstr(testCache, "..")) cache = [docs stringByAppendingPathComponent:@(testCache)];
     [fm createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
     setenv("TOTK_SHADER_CACHE",cache.fileSystemRepresentation,1);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{

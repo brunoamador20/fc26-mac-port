@@ -2,6 +2,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import struct
@@ -302,6 +303,40 @@ int main(int argc, const char **argv) { @autoreleasepool {
             self.assertEqual(self.run_probe(source, cache)['imported_files'], 0)
             (cache/(variant+'_b.metal')).unlink()
             self.assertGreater(self.run_probe(source, cache)['imported_files'], 0)
+            self.assertEqual((cache/'unrelated.txt').read_text(), 'keep')
+
+    def test_an_empty_cache_gets_the_seed_as_one_folder_clone(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source, cache, key, variant = self.fixture(Path(folder))
+            (source/'pso_title.tsv').write_text('not in the manifest\n')   # the seed folder holds more than the manifest names
+            r = self.run_probe(source, cache)
+            self.assertTrue(r['cloned_folder'])
+            names = set(json.loads((source/'seed-manifest.json').read_text())['files'])
+            self.assertEqual({p.name for p in cache.iterdir()}, names | {'seed-installed.json'})
+            for name in names:
+                self.assertEqual((cache/name).read_bytes(), (source/name).read_bytes())
+            (cache/'written-later.txt').write_text('the cache stays writable')
+            self.assertEqual(self.run_probe(source, cache)['imported_files'], 0)
+
+    def test_a_sealed_seed_is_read_in_place(self):
+        # iOS: the seed inside the signed app is neither hashed nor copied (TOTK_SHADER_SEED_IN_PLACE=1 does the same on a Mac).
+        with tempfile.TemporaryDirectory() as folder:
+            source, cache, key, variant = self.fixture(Path(folder))
+            (source/(variant+'_b.metal')).write_text('changed after packaging')   # a check would refuse it; the seal covers it
+            r = subprocess.run([str(self.binary), str(source), str(cache)], capture_output=True, text=True,
+                               env=os.environ | {'TOTK_SHADER_SEED_IN_PLACE': '1'})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            result = json.loads(r.stdout)
+            self.assertEqual(result['imported_files'], 0)
+            self.assertEqual(sorted(result['overlay']), sorted(json.loads((source/'seed-manifest.json').read_text())['files']))
+            self.assertEqual(list(cache.iterdir()), [])
+
+    def test_a_cache_with_files_is_merged_file_by_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source, cache, key, variant = self.fixture(Path(folder))
+            (cache/'unrelated.txt').write_text('keep')
+            r = self.run_probe(source, cache)
+            self.assertFalse(r.get('cloned_folder', False))
             self.assertEqual((cache/'unrelated.txt').read_text(), 'keep')
 
     def test_reprepared_seed_with_the_same_files_is_not_checked_again(self):

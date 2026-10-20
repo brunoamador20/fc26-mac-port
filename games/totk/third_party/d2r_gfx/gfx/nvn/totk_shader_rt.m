@@ -38,6 +38,11 @@ static NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *g_vari
 static NSMutableSet<NSString *> *g_msl_checked;
 static FILE *g_svc_in, *g_svc_out;
 static NSString *g_root, *g_dir;
+/* iOS: the seed inside the signed app is read where it is instead of being copied into the cache (totk_shader_seed.h
+   totk_seed_sealed). Its files are taken from there; the cache holds the rest (fill packs, pso_collected.tsv), and a
+   shader's .variants lists of both places are joined. nil on the Mac, where the seed is cloned into the cache. */
+static NSString *g_seed_dir;
+static NSSet<NSString *> *g_seed_names;
 static uint64_t g_translated;
 /* The bottom-left box (nvn_mtl.m shader_overlay_prepare): variants new to the cache this run, when the last one came,
    and the variants in the cache (counted once in the background, plus the new ones since). */
@@ -73,6 +78,7 @@ NSString *totk_rt_dir(void) {
             totk_seed_progress = seed_progress;
             NSDictionary *seed = totk_seed_import(source, g_dir, &error);
             totk_seed_progress = NULL;
+            if ([seed[@"overlay"] isKindOfClass:NSArray.class]) { g_seed_dir = source; g_seed_names = [NSSet setWithArray:seed[@"overlay"]]; }
             if (!seed) {   // 2026-10-18: a damaged bundle or a full disk used to end the game here with nothing on screen. The
                            // cache stays usable (totk_seed_import writes shader files before the indexes that name them),
                            // so play on and translate shaders as they first appear, as before the prepared shaders existed.
@@ -83,10 +89,15 @@ NSString *totk_rt_dir(void) {
             }
             if ([seed[@"available"] boolValue]) {
                 unsigned long long imported=[seed[@"imported_files"] unsignedLongLongValue];
-                LOG("[shader-seed] 发现随 App 准备的着色器 %llu 个，导入 %llu 个文件；首次启动即可预热",
-                    [seed[@"shaders"] unsignedLongLongValue], imported);
+                LOG("[shader-seed] 发现随 App 准备的着色器 %llu 个，导入 %llu 个文件%s%s；首次启动即可预热",
+                    [seed[@"shaders"] unsignedLongLongValue], imported,
+                    [seed[@"cloned_folder"] boolValue] ? "（整个文件夹一次克隆）" : "",
+                    g_seed_dir ? "（App 包已签名，原地读取，不校验也不复制）" : "");
+                if ([seed[@"folder_skipped"] length]) LOG("[shader-seed] 缓存里已有文件（例如 %s），逐个导入", [seed[@"folder_skipped"] UTF8String]);
+                if ([seed[@"clone_errno"] intValue]) LOG("[shader-seed] 【红】克隆失败（%s），改为复制文件", strerror([seed[@"clone_errno"] intValue]));
                 if (runtime_boot_status) runtime_boot_status(TOTK_UI("着色器缓存已就绪","Shader cache ready"),imported
                     ? [NSString stringWithFormat:@(TOTK_UI("已导入 %llu 个预置文件，开始预热","Imported %llu prepared files; starting warm-up")),imported].UTF8String
+                    : g_seed_dir ? TOTK_UI("直接读取 App 附带的着色器，无需导入；开始预热","Reading the shaders bundled with the app in place, nothing to import; starting warm-up")
                     : TOTK_UI("本机缓存已存在，无需重新导入；开始预热","Local cache already present, nothing to import; starting warm-up"));
             } else if (runtime_boot_status && ![seed[@"failed"] boolValue]) runtime_boot_status(TOTK_UI("着色器缓存已就绪","Shader cache ready"),TOTK_UI("没有内置着色器种子，继续初始化图形","No bundled shader seed; continuing graphics setup"));
         }
@@ -183,14 +194,35 @@ static NSString *json_string(id obj) {
     if (!d) die("shader request JSON");
     return [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
 }
+NSString *totk_rt_file(NSString *name) {
+    NSString *dir = totk_rt_dir();
+    return g_seed_dir && [g_seed_names containsObject:name] ? [g_seed_dir stringByAppendingPathComponent:name]
+                                                             : [dir stringByAppendingPathComponent:name];
+}
+NSArray<NSString *> *totk_rt_list(void) {
+    NSArray<NSString *> *cached = [NSFileManager.defaultManager contentsOfDirectoryAtPath:totk_rt_dir() error:nil] ?: @[];
+    if (!g_seed_dir) return [cached sortedArrayUsingSelector:@selector(compare:)];
+    NSMutableSet<NSString *> *all = [g_seed_names mutableCopy]; [all addObjectsFromArray:cached];
+    return [all.allObjects sortedArrayUsingSelector:@selector(compare:)];
+}
 static NSString *index_path(NSString *shader) { return [totk_rt_dir() stringByAppendingFormat:@"/%@.variants", shader]; }
+static NSArray *variants_file(NSString *path) {
+    NSData *d = [NSData dataWithContentsOfFile:path];
+    NSArray *a = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil;
+    return [a isKindOfClass:[NSArray class]] ? a : @[];
+}
 static NSMutableArray *variants_of(NSString *shader) {
     if (!g_variants) g_variants = [NSMutableDictionary dictionary];
     NSMutableArray *v = g_variants[shader];
     if (v) return v;
-    NSData *d = [NSData dataWithContentsOfFile:index_path(shader)];
-    NSArray *a = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil;
-    v = [NSMutableArray arrayWithArray:[a isKindOfClass:[NSArray class]] ? a : @[]];
+    v = [NSMutableArray arrayWithArray:variants_file(index_path(shader))];
+    NSString *seedIndex = [shader stringByAppendingString:@".variants"];
+    if (g_seed_dir && [g_seed_names containsObject:seedIndex]) {   // the cache's own rows (fill packs) first, then the seed's
+        NSMutableSet *known = [NSMutableSet set];
+        for (NSDictionary *row in v) if ([row isKindOfClass:NSDictionary.class] && row[@"variant"]) [known addObject:row[@"variant"]];
+        for (NSDictionary *row in variants_file([g_seed_dir stringByAppendingPathComponent:seedIndex]))
+            if ([row isKindOfClass:NSDictionary.class] && row[@"variant"] && ![known containsObject:row[@"variant"]]) [v addObject:row];
+    }
     g_variants[shader] = v;
     return v;
 }
@@ -228,7 +260,7 @@ NSString *totk_rt_variant(NSString *shader, int stage, const uint8_t *control, c
         if (!g_msl_checked) g_msl_checked = [NSMutableSet set];
         BOOL checked = [g_msl_checked containsObject:found];
         NSString *msl = checked ? nil :
-            [NSString stringWithContentsOfFile:[totk_rt_dir() stringByAppendingFormat:@"/%@_b.metal", found]
+            [NSString stringWithContentsOfFile:totk_rt_file([found stringByAppendingString:@"_b.metal"])
                                              encoding:NSUTF8StringEncoding error:nil];
         if (!checked && (!msl || [msl containsString:@"double "] || [msl containsString:@"unsupported_GLSLstd450"])) {
             [vs removeObjectAtIndex:i];  /* regenerate missing or previously un-compilable Metal variant */
@@ -307,8 +339,10 @@ void totk_rt_counts(uint64_t *fresh, int64_t *total, uint64_t *last_new_ns) {
         NSString *dir = totk_rt_dir();
         atomic_store(&g_new_at_count, atomic_load(&g_new_variants));
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{   // ~45,000 directory entries: not on the present thread
-            int64_t n = 0; DIR *d = opendir(dir.fileSystemRepresentation); struct dirent *e;
-            if (d) { while ((e = readdir(d))) { size_t l = strlen(e->d_name); if (l > 8 && !strcmp(e->d_name + l - 8, "_b.metal")) n++; } closedir(d); }
+            int64_t n = 0;
+            if (g_seed_dir) { for (NSString *name in totk_rt_list()) if ([name hasSuffix:@"_b.metal"]) n++; }
+            else { DIR *d = opendir(dir.fileSystemRepresentation); struct dirent *e;
+                   if (d) { while ((e = readdir(d))) { size_t l = strlen(e->d_name); if (l > 8 && !strcmp(e->d_name + l - 8, "_b.metal")) n++; } closedir(d); } }
             atomic_store(&g_cached_variants, n);
         });
     });

@@ -15,3 +15,5 @@ no .NET and the app needs no .NET runtime and no Python.
   the same output as the .NET translator with the Python service for all 7,570 shader variants of the development cache.
   Patch 0005 changes only vertex shaders: over the 18,064 startup variants of a 1.4.3 build, 6,679 vertex functions
   gained the initialisation of their outputs and nothing else changed (see docs/how-it-works.md).
+  The depth sampling rewrite after PR #104 (Service.cs MatchSwitchDepthSampling) changes 2,650 of the 20,368 seed MSL
+  files of a 1.4.3 build, each exactly by the two rewrites; reflection and every other file are unchanged.
