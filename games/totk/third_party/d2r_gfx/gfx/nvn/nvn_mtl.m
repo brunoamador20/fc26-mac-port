@@ -4610,6 +4610,7 @@ static int sh_has_src(NvShader *s) { return s && (s->src || s->src_path); }
     // TOTK: translation inputs and the variant per bound-state signature (prog_fit)
     const uint8_t *ctl[6], *code[6]; NSString *key[6]; uint64_t sig[6]; NSMutableDictionary<NSNumber *, NvShader *> *alt[6];
     void *udc_sh[6]; uint8_t udc_ok, udc_img, udc_imgw; uint32_t udc_cmask;   // udc_*: udc_note_draw's summary of sh[] (valid while sh[] is the same)
+    void *ar_sh[6]; uint8_t ar_n, ar_st[32], ar_reg[32], ar_img[32];   // ar_*: draw_att_reads' sampled texture / image slots of sh[] (valid while sh[] is the same; ar_n 255 = more than 32, scan the bindings)
     int missing, miss_has[2]; uint64_t miss_sig[2]; int exp_skip; } @end   // TOTK (iOS): missing = stages whose variant is not translated yet; miss_sig: signature whose variant is missing (prog_fit); exp_skip: TOTK_EXP_SKIP_FS decision (0 unknown, 1 keep, 2 skip)
 @implementation NvProg @end
 /* TOTK_EXP_SKIP_FS=<fragment key prefix>[,<prefix>...] (measurement only, 2026-10-16): drop every draw whose fragment shader key
@@ -7875,12 +7876,34 @@ static uint64_t h_ser(uint64_t h) { int tid = (int)(h & 0xfffff); return tid ? a
 static int has_ser(const uint64_t *s, int n, uint64_t v) { for (int i = 0; i < n; i++) if (s[i] == v) return 1; return 0; }
 /* The serials of the textures the draw samples that are attachments: of the current targets or of the open encoder (which
    can hold more, e.g. a merged pass). By serial, not slot: the encoder's attachment order need not be the targets' order. */
+/* The sampled texture / image slots of the program's stages, taken from the reflection once per sh[] (ar_*): the draw path
+   then reads only those slots instead of walking every binding of every stage. */
+static void ar_learn(NvProg *pr) {
+    unsigned n = 0;
+    for (int st = 0; st < 5 && n < 255; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh || sh->stage >= 6) continue;
+        for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i];
+            int img = b->kind == NVN_RB_IMG; if (!img && b->kind != NVN_RB_TEX) continue;
+            if (b->reg >= (img ? 32 : 128)) continue;
+            if (n == 32) { n = 255; break; }
+            pr->ar_st[n] = (uint8_t)sh->stage; pr->ar_reg[n] = (uint8_t)b->reg; pr->ar_img[n] = (uint8_t)img; n++; } }
+    pr->ar_n = (uint8_t)n;
+    for (int st = 0; st < 6; st++) pr->ar_sh[st] = (__bridge void *)pr->sh[st];
+}
 static int draw_att_reads(NvProg *pr, uint64_t out[ATT_READS_MAX]) {
     uint64_t cand[18]; int nc = 0, n = 0;
     if (R.has_rt) { for (int k = 0; k < R.rt.n && k < 8; k++) if (R.rt.color[k]) cand[nc++] = R.rt.color[k]->serial;
                     if (R.rt.depth) cand[nc++] = R.rt.depth->serial; }
     if (g_enc) for (int i = 0; i < g_nsd; i++) cand[nc++] = g_sd[i].ser;
     if (!pr || !nc) return 0;
+    int same = 1; for (int st = 0; st < 6; st++) if (pr->ar_sh[st] != (__bridge void *)pr->sh[st]) { same = 0; break; }
+    if (!same) ar_learn(pr);
+    if (pr->ar_n != 255) {
+        for (unsigned i = 0; i < pr->ar_n; i++) {
+            uint64_t h = pr->ar_img[i] ? S.img[pr->ar_st[i]][pr->ar_reg[i]] : S.tex[pr->ar_st[i]][pr->ar_reg[i]];
+            uint64_t ser = h ? h_ser(h) : 0;
+            if (ser && has_ser(cand, nc, ser) && !has_ser(out, n, ser) && n < ATT_READS_MAX) out[n++] = ser; }
+        return n;
+    }
     for (int st = 0; st < 5; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh || sh->stage >= 6) continue;
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; uint64_t h;
             if (b->kind == NVN_RB_IMG) h = b->reg < 32 ? S.img[sh->stage][b->reg] : 0; else if (b->kind == NVN_RB_TEX) h = b->reg < 128 ? S.tex[sh->stage][b->reg] : 0; else continue;
@@ -7888,6 +7911,8 @@ static int draw_att_reads(NvProg *pr, uint64_t out[ATT_READS_MAX]) {
             if (ser && has_ser(cand, nc, ser) && !has_ser(out, n, ser) && n < ATT_READS_MAX) out[n++] = ser; } }
     return n;
 }
+/* TOTK_ATT_STORE=0 turns the store-before-sample off (A/B; the decals ghost again) */
+static int att_store_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("TOTK_ATT_STORE"); on = !(e && !strcmp(e, "0")); } return on; }
 static int att_unstored_read(const uint64_t *rs, int n) {
     if (!n) return 0;
     if (!g_enc) {   // no pass open: only a clear still pending lands after the sample
@@ -9750,7 +9775,7 @@ static void draw_inner(const p_draw *dw, const p_draw_idx *di) {
         PD("M %llu 续用通道内绘制要采样附件，在此切开", g_stat_pass); rp_end(); }
     // TOTK: the draw samples an attachment whose pixels are still only in tile memory: store them first (att_unstored_read).
     // Not in the second half of a fused pass: it reads the first half's pixels from tile memory by construction (fz_p2_draw).
-    uint64_t att_rs[ATT_READS_MAX]; int att_n = draw_att_reads(pr, att_rs);
+    uint64_t att_rs[ATT_READS_MAX]; int att_n = att_store_on() ? draw_att_reads(pr, att_rs) : 0;
     if (!(g_fz.active && g_fz.phase == 2) && att_unstored_read(att_rs, att_n)) {
         static int once; if (!once++) MLOG("[totk] a draw samples an attachment its pass drew: the pass is stored first (first: pass %llu)", g_stat_pass);
         PD("M %llu 绘制采样本通道画过的附件，先写回再画", g_stat_pass); rp_flush(); }
