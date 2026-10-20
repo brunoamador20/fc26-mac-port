@@ -355,6 +355,16 @@ class Case(unittest.TestCase):
             mod_exefs.apply(argparse.Namespace(exefs=self.exefs, mod=empty, version='v121',
                                               output=self.output, report=self.report))
 
+    def test_a_pchtxt_that_applies_nothing_is_a_note_not_a_failure(self):
+        # every section @disabled: the file is kept around but switched off, which must not stop a build that also
+        # carries the mod's romfs/
+        self.retail()
+        self.patch('@nsobid-' + BUILD_ID.hex() + '\n@disabled\n40 aabbccdd\n@stop\n')
+        report = self.apply()
+        self.assertEqual(report['status'], 'skipped')
+        self.assertIn('every section is @disabled', ' '.join(report['notes']))
+        self.assertFalse(self.output.exists())
+
     def test_an_exefs_without_a_main_patch_merges_nothing(self):
         # A mod whose exefs/ holds only a module the app does not load (or a main.npdm) is not a build failure: its
         # romfs/ half still goes in, and the report says nothing was merged.

@@ -105,7 +105,8 @@ verified retail module before it is rewritten, and the app ships code that still
 
 With several mods, let the mod manager do the combining: TKMM's merged output is one folder with one
 `exefs/` and one `romfs/` (a manager may also pack several mods' records into one `.ips`), so `--mod
-<that folder>` picks all of them up, and its `romfs/` is installed as usual. Two patch files that change
+<that folder>` picks all of them up, and add `--install-mod-romfs` to have its `romfs/` replace the version
+folder. Two patch files that change
 the same bytes are refused with both names, so a merge that overwrote one mod's change with another's
 stops the build instead of shipping silently.
 
@@ -135,10 +136,14 @@ Then, at the very end, the build:
   replaces itself is left out (the heap table included: the 2K overlay carries the mod's heap sizes), and a
   misspelt path stops the build with the reason instead of stopping the game later.
 
-The folder is checked before it is touched: the build runs the manifest tool with `--check` on the mod's own
-folder first, so a mod that would stop the game at start is reported while your folder still holds what it
-held. The build says what it is about to do when it starts (Ctrl-C there if it is not what you meant) and
-again right before the copy:
+Your folder is not emptied for something untried: the build copies the mod's `romfs/` into a folder next to
+it, writes the manifest there, and moves the new copy into place only when it is complete (the old copy is
+deleted after that). Before any of it, the manifest tool runs with `--check` on the mod's own folder, so a
+misspelt path stops the build while your folder still holds what it held; and a mod whose files the game would
+all take from the app instead (every one identical to the original, or one the app replaces itself) replaces
+nothing the game loads - then the build says so and leaves your folder alone rather than emptying it for a
+folder with no manifest. The build says what it is about to do when it starts (Ctrl-C there if it is not what
+you meant) and again right before the copy:
 
 ```text
 --install-mod-romfs: the player's mod folder for the version this build makes will be EMPTIED and filled with
@@ -397,8 +402,10 @@ python3 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys"
   （包括堆表：2K 覆盖文件已经带着 mod 的堆大小）；路径大小写写错的会当场终止构建并给出原因，而不是等到启动时
   才停止。
 
-动手之前先检查：构建会先用 `--check` 在 mod 自己的目录上跑一遍清单工具，所以「会让游戏起不来」的 mod 会在你的
-目录还没被碰过时报出来。构建开始时就会醒目提示一次（不想继续就在这里 Ctrl-C），复制前再说一次：
+不会拿你的目录去试错：构建先把 mod 的 `romfs/` 复制到它旁边的一个目录里、在那里写好清单，确认完整之后才把新的一份
+换进来（旧的一份随后删除）。在此之前还会用 `--check` 在 mod 自己的目录上跑一遍清单工具，所以路径写错的 mod 会在你的
+目录还没被碰过时就停下；另外，如果这个 mod 的文件最终一个都不会被游戏加载（全部与原版相同，或者全是 App 自己会替换
+的文件），它其实什么都没替换——这时构建会说明并保持你的目录不动，而不是清空成一个没有清单的空目录。构建开始时就会醒目提示一次（不想继续就在这里 Ctrl-C），复制前再说一次：
 
 ```text
 --install-mod-romfs: the player's mod folder for the version this build makes will be EMPTIED and filled with

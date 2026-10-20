@@ -222,13 +222,16 @@ def _section(body, build_id):
 
 
 SIGNED_ENTRY = re.compile(r'(0x[0-9a-fA-F]+)[ \t]*:[ \t]*\([ \t]*(0x[0-9a-fA-F]+)[ \t]*,[ \t]*(0x[0-9a-fA-F]+)'
-                           r'[ \t]*,[ \t]*\(([0-9,\s]*)\)')
+                           r'[ \t]*,[ \t]*\(([-0-9,\s]*)\)')      # an offset may be negative
 
 
 def signed_table_sites(build_id):
     """The signed 32-bit jump tables patch_nso.py knows for a build ID (SIGNED_TABLES): the dispatch instruction whose
     bytes it checks, and the table of offsets it reads. A mod patch on either moves a jump the rewriter relies on, so both
-    are reserved - the same reason CUTS and PARAMS are."""
+    are reserved - the same reason CUTS and PARAMS are.
+
+    The dispatch is reserved with the 16 bytes before it: patch_nso.py asserts IMG[dispatch-0x10:dispatch+4] against the
+    table's own copy of those bytes, so an edit anywhere in that window fires its assert mid-rewrite."""
     if not build_id:
         return []
     body = _section(_table_body(REWRITER.read_text(), 'SIGNED_TABLES'), build_id)
@@ -237,7 +240,7 @@ def signed_table_sites(build_id):
     found = []
     for match in SIGNED_ENTRY.finditer(body):      # 0xdispatch: (0xadrbase, 0xtable, (offsets...), 'dispatch word')
         dispatch, _, table, offsets = match.groups()
-        found.append(Site('patch_nso.py SIGNED_TABLES', int(dispatch, 16), 4))
+        found.append(Site('patch_nso.py SIGNED_TABLES', int(dispatch, 16) - 16, 0x14))
         count = len([offset for offset in offsets.split(',') if offset.strip()])
         if count:
             found.append(Site('patch_nso.py SIGNED_TABLES', int(table, 16), 4*count))

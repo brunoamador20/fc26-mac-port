@@ -604,9 +604,10 @@ def overlay_stale(out_dir, heapdef, tree):
 
 def install_mod_romfs(mod, tree, version, out, py, logs):
     """--mod --install-mod-romfs: replace the player's mod folder for this version with the mod's RomFS files, and write
-    its manifest against the app just built (games/totk/scripts/mod_folder.py; the folder is emptied first, which is what
-    the flag agreed to). The manifest leaves out the paths the app replaces itself, the heap table included: mod_heapdef
-    (see above) folded its sizes into the 2K overlay, so the app's table is the one to load."""
+    its manifest against the app just built (games/totk/scripts/mod_folder.py). The replacement is copied and given its
+    manifest in a folder next to the player's first, so the player's files are only moved aside for a copy that is
+    complete - and not at all when the mod would replace nothing the game loads. The manifest leaves out the paths the
+    app replaces itself, the heap table included: mod_heapdef (see above) folded its sizes into the 2K overlay."""
     log = logs / f'mod-manifest-{version}.log'
     try:
         installed = mod_folder.install(mod, version, out, py, tree, say=say)
@@ -614,15 +615,15 @@ def install_mod_romfs(mod, tree, version, out, py, logs):
         log.write_text(e.output + '\n')
         for line in e.output.splitlines()[-3:]:
             say(f'   {line}')
-        raise BuildError(f'the app itself is built, but {mod_folder.mods_folder(version)} would stop the game at start '
-                         f'(fix the mod folder, then write the manifest again with scripts/make_mod_manifest.py): '
-                         f'{e}') from None
+        raise BuildError(f'the app itself is built, but {mod_folder.mods_folder(version)} was not replaced: {e} '
+                         f'(it holds what it held before; fix {mod.name}/romfs, then write the manifest again with '
+                         f'scripts/make_mod_manifest.py)') from None
     if installed is None:
         return None
     log.write_text('\n'.join(installed.manifest) + '\n')
     say(f'4/4 app: {installed.folder} holds {installed.copied} files from {mod.name}/romfs now '
         f'({installed.removed} entries it held before are gone)')
-    for line in installed.manifest[-3:]:
+    for line in installed.manifest:                 # the notes and the summary; a mod's notes are a handful
         say(f'   {line}')
     return installed.folder
 
@@ -630,11 +631,14 @@ def install_mod_romfs(mod, tree, version, out, py, logs):
 def say_mod_copy_steps(mod, tree, version, out):
     """--mod without --install-mod-romfs: the version's mod folder is the player's own, so the build leaves it alone and
     only says how to fill it."""
+    if not (mod/'romfs').is_dir():
+        say(f'4/4 app: {mod.name} has no romfs/: its code patches are in the app, and there is no data half to copy')
+        return
     folder = mod_folder.mods_folder(version)
     say(f'4/4 app: {mod.name}/romfs was not installed: {folder} is your folder, and a build only replaces it when you '
         f'pass --install-mod-romfs (which empties it first). To do it by hand:')
     say(f'   rsync -a "{mod}/romfs/" "{folder}/"')
-    say(f'   python3.14 "{tree}/scripts/make_mod_manifest.py" "{folder}" --app "{out}" --version {version}')
+    say(f'   "{sys.executable}" "{tree}/scripts/make_mod_manifest.py" "{folder}" --app "{out}" --version {version}')
 
 
 def step_data(tree, game, keys, logs, *, firmware=None, shared_fonts=None, mod=None):
@@ -1410,10 +1414,9 @@ def main(argv):
     if args.install_mod_romfs and not (mod / 'romfs').is_dir():
         raise BuildError(f'--install-mod-romfs installs {mod.name}/romfs into the player\'s mod folder, and this mod has '
                          f'none; leave the flag out to merge its code patches only')
-    if args.install_mod_romfs:      # said before the long steps, so a mistake can still be stopped with Ctrl-C
-        say(f'--install-mod-romfs: the player\'s mod folder for the version this build makes will be EMPTIED and filled '
-            f'with {mod.name}/romfs (and its manifest.tsv) when the build ends: anything you put in that folder yourself '
-            f'is deleted. Without the flag the build leaves the folder alone.')
+    if args.install_mod_romfs and args.platform == 'ios':
+        raise BuildError('an iPhone / iPad build loads no player mod folder, so --install-mod-romfs has nothing to fill: '
+                         'build the Mac app (leave out --platform ios) to install a mod\'s RomFS')
     code_mod = mod if mod and (mod / 'exefs').is_dir() else None   # a data-only mod has no code to merge
     version = 'v0'
     firmware = args.firmware.expanduser().resolve() if args.firmware else None
@@ -1499,6 +1502,10 @@ def main(argv):
             raise BuildError('needs about 40 GB free for a fresh base + update build (19 GB extra with base data cached)')
         if free<25 and not base_cached:
             raise BuildError('needs about 25 GB free for the work folder (the app itself is an APFS clone of it when on the same volume)')
+    if mod and args.install_mod_romfs:      # said before the long steps, so a mistake can still be stopped with Ctrl-C
+        say(f'--install-mod-romfs: the player\'s mod folder for the version this build makes will be EMPTIED and filled '
+            f'with {mod.name}/romfs (and its manifest.tsv) when the build ends: anything you put in that folder yourself '
+            f'is deleted. Without the flag the build leaves the folder alone.')
     if update:
         version, update = identify_update(tree, update, keys, logs)
     step_code(tree, game, keys, env, logs, mod=None if update else code_mod)
@@ -1545,8 +1552,7 @@ def main(argv):
         elif mod:
             say_mod_copy_steps(mod, tree, version, out)            # the folder is the player's: only say how to fill it
     elif mod:
-        say('4/4 app: an iPhone / iPad build loads no player mod folder, so --mod merged its code patches only'
-            + (' and --install-mod-romfs does nothing' if args.install_mod_romfs else ''))
+        say('4/4 app: an iPhone / iPad build loads no player mod folder, so --mod merged its code patches only')
     say(f'done in {(time.time() - t0) / 60:.0f} min: {out}')
     if args.platform=='macos':
         say('Open it from Finder. Moving it afterwards (also to /Applications) keeps the macOS check when it stays on the same '

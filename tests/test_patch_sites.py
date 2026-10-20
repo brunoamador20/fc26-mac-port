@@ -54,8 +54,12 @@ class Extraction(unittest.TestCase):
         # patch_nso.py 1.6.0/1.0.0 signed-table dispatch: a mod patch on the dispatch instruction or on the table it
         # reads moves a jump the rewriter relies on, and the rewriter's own assert would fire mid-rewrite.
         found = {(site.offset, site.size) for site in patch_sites.sites('v0', SIGNED_BUILD_ID)}
-        self.assertIn((0x393bb0, 4), found)             # the dispatch instruction (its bytes are asserted)
+        # Every table in 1.4.3's block, not just the first: the dispatch with the 16 bytes patch_nso.py asserts with it,
+        # and the offsets it jumps through (which may be negative - one table has -7264 among them).
+        self.assertEqual(len(patch_sites.signed_table_sites(SIGNED_BUILD_ID)), 10)
+        self.assertIn((0x393ba0, 0x14), found)          # IMG[dispatch-0x10:dispatch+4] is what the rewriter asserts
         self.assertIn((0x2d8626c, 24), found)           # the six signed offsets it jumps through
+        self.assertIn((0x2d88e7c, 28), found)           # the table with negative offsets, 7 entries
 
     def test_another_versions_block_is_not_reserved(self):
         # game_patches.c's ultrawide list is in the 1.2.1 branch only: a 1.0.0 / 1.1.2 mod patch there is unrelated

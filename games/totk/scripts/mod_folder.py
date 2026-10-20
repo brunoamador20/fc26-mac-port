@@ -6,17 +6,24 @@ The app loads a RomFS mod while it plays, from
 --mod merges the mod's code patches; this module puts the data half there, and only when the build was asked to:
 build_app.py --install-mod-romfs says that folder may be replaced. Nothing here runs for a build that leaves the flag out.
 
-The folder is emptied first, then the mod's romfs/ is copied into it, so afterwards it holds exactly this mod's RomFS -
-files another mod or the player left there are gone, and the build says so before it starts. scripts/make_mod_manifest.py
-then writes manifest.tsv against the app the build just made, so the paths the app replaces itself are left out (the heap
-table included: the 2K overlay carries the mod's heap sizes) and a misspelt path stops the build.
+The replacement is built first, in a folder next to the player's (<folder>.new): the mod's romfs/ is copied there and
+scripts/make_mod_manifest.py writes the manifest there against the app the build just made, so the paths the app replaces
+itself are left out (the heap table included: the 2K overlay carries the mod's heap sizes). Only then is the player's
+folder moved aside (<folder>.old) and the new one renamed into place, so the folder holds either what it held before or
+the complete new copy - never a half-copied one. The old content is deleted last, and the build says what it is about to
+do before it starts.
 
-Nothing outside the folder is touched: the deletion never follows a symlink out of it, and the folder is the version's
-own (one game version, one mod set). make_mod_manifest.py --check runs first, on the mod folder itself, so a folder that
-would stop the game at start is reported while the player's folder has not been touched yet.
+Two checks run before anything of the player's is touched: make_mod_manifest.py --check on the mod folder itself (a
+misspelt path stops the build there), and a look at what that manifest would hold. A mod whose files would all be left
+out - every one identical to the original, or one the app replaces itself - replaces nothing the game loads, so the
+player's folder is left as it is and no manifest is written.
+
+Nothing outside the folder is touched: the move never follows a symlink out of it, a symlinked folder is refused, and the
+folder is the version's own (one game version, one mod set).
 """
 from collections import namedtuple
 from pathlib import Path
+import re
 import shutil
 import subprocess
 
@@ -90,10 +97,23 @@ def _manifest(py, tree, folder, app, version, check):
     return lines
 
 
+def _would_hold(lines):
+    """How many files the manifest would hold, read from the output of make_mod_manifest.py --check (0 when it says the
+    folder replaces or adds no file)."""
+    for line in lines:
+        match = re.search(r'would hold (\d+) files', line)
+        if match:
+            return int(match.group(1))
+        if 'replaces or adds no file' in line:
+            return 0
+    return 0
+
+
 def install(mod, version, app, py, tree, *, say=print):
     """Replace the player's mod folder for `version` with `mod`'s romfs/ and write its manifest against `app`.
 
-    Returns Installed; None when the mod has no romfs/ or an empty one, in which case nothing is touched."""
+    Returns Installed, or None when nothing was installed - no romfs/, an empty one, or one whose files the game would
+    all load from the app instead - in which case the player's folder is exactly as it was."""
     source = mod/'romfs'
     folder = mods_folder(version)
     if not source.is_dir():
@@ -102,12 +122,50 @@ def install(mod, version, app, py, tree, *, say=print):
     if not files_below(source):
         say(f'{mod.name}/romfs holds no files, so {folder} is left as it is')
         return None
-    _manifest(py, tree, source, app, version, check=True)      # the mod folder itself: nothing is written there
     if folder.is_symlink():
         raise InstallError(f'{folder} is a symlink; replace it with a real folder before --install-mod-romfs writes there')
-    folder.mkdir(parents=True, exist_ok=True)
-    say(f'{folder}: emptied, then filled with {mod.name}/romfs and its manifest.tsv (--install-mod-romfs)')
-    removed = empty(folder)
-    copied = copy_tree(source, folder)
-    manifest = _manifest(py, tree, folder, app, version, check=False)
+    found = _manifest(py, tree, source, app, version, check=True)     # the mod folder itself: nothing is written there
+    if not _would_hold(found):
+        say(f'{mod.name}/romfs would replace or add no file the game loads (every file is the original, or one the app '
+            f'replaces itself), so {folder} is left as it is and no manifest is written')
+        return None
+
+    staged, backup = folder.with_name(f'{folder.name}.new'), folder.with_name(f'{folder.name}.old')
+    try:
+        if folder.exists() and not folder.is_dir():
+            raise InstallError(f'{folder} is not a folder')
+        folder.parent.mkdir(parents=True, exist_ok=True)
+        if staged.is_symlink():
+            staged.unlink()
+        elif staged.exists():
+            shutil.rmtree(staged)          # left over from an interrupted build: a copy, never the player's files
+        staged.mkdir()
+        copied = copy_tree(source, staged)
+        manifest = _manifest(py, tree, staged, app, version, check=False)   # writes manifest.tsv inside the staged copy
+        if not (staged/'manifest.tsv').is_file():
+            raise InstallError(f'{staged} holds no manifest.tsv after make_mod_manifest.py ran, so nothing was swapped in',
+                               '\n'.join(manifest))
+        say(f'{folder}: emptied, then filled with {mod.name}/romfs and its manifest.tsv (--install-mod-romfs)')
+        removed = 0
+        if folder.exists():
+            if backup.exists():
+                shutil.rmtree(backup)      # left over from an interrupted build, not the player's files
+            folder.rename(backup)
+            removed = len(list(backup.iterdir()))
+            try:
+                staged.rename(folder)
+            except OSError:
+                backup.rename(folder)      # put the player's folder back exactly as it was
+                raise
+            try:
+                shutil.rmtree(backup)
+            except OSError:
+                say(f'   {backup} could not be removed; it holds the files that were there before, delete it yourself')
+        else:
+            staged.rename(folder)
+    except InstallError:
+        raise
+    except OSError as error:
+        raise InstallError(f'{error.filename or folder}: {error.strerror or error}; {folder} holds what it held before',
+                           '') from None
     return Installed(folder, copied, removed, manifest)

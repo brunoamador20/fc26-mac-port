@@ -272,9 +272,7 @@ def parse_pchtxt(text, identity, path):
     if not matched:
         raise ModError(f'{path}: no @nsobid line, so the patch cannot be checked against this build of main '
                        f'(it is {wanted16})')
-    if not records:
-        raise ModError(f'{path}: no patch lines between @enabled and @stop')
-    return records
+    return records        # empty when every section is @disabled: nothing to apply, not a broken file
 
 
 def _check_pchtxt_flag(fields, path, number):
@@ -370,6 +368,21 @@ def patch_files(exefs, build_id):
     return patches, notes
 
 
+def skipped(args, mod, nso, retail_sha, notes, why):
+    """A mod with nothing to merge into main is not a build failure - its romfs/ half still goes in. The report says
+    "skipped", so the build merges nothing, says so, and carries on."""
+    report = dict(format=1, status='skipped', folder=str(mod), version=args.version, build_id=nso.build_id[:32],
+                  retail_main_sha256=retail_sha, patches=[], edit_bytes=0, notes=[f'{mod}/exefs: {why}'] + notes)
+    report_path = (args.report.expanduser().resolve() if args.report else
+                   args.output.expanduser().resolve().with_name('mod-exefs.json'))
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2) + '\n')
+    for note in report['notes']:
+        print(f'mod: {note}')
+    print(f'mod: nothing merged into main; {args.version} is built from the retail module')
+    return report
+
+
 def apply(args):
     mod = args.mod.expanduser().resolve()
     exefs = mod / 'exefs'
@@ -389,21 +402,8 @@ def apply(args):
         notes.append('romfs/: not merged (data mods are loaded while the game runs, from '
                      '~/Library/Application Support/MacNativeGames/TOTK/mods/<version>; see docs/mods.md)')
     if not patches:
-        # A patch for another build of main, or for sdk / subsdk9, was already refused or noted by patch_files(): an exefs/
-        # with nothing to merge into main is not a build failure - the mod's romfs/ half still goes in - so this says so
-        # and writes a report the build reads as "nothing merged".
-        report = dict(format=1, status='skipped', folder=str(mod), version=args.version, build_id=nso.build_id[:32],
-                      retail_main_sha256=retail_sha, patches=[], edit_bytes=0,
-                      notes=[f'{mod}/exefs: no code patch for main ({", ".join(PATCH_SUFFIXES)}), so nothing is merged '
-                             f'into it'] + notes)
-        report_path = (args.report.expanduser().resolve() if args.report else
-                       args.output.expanduser().resolve().with_name('mod-exefs.json'))
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(json.dumps(report, indent=2) + '\n')
-        for note in report['notes']:
-            print(f'mod: {note}')
-        print(f'mod: nothing merged into main; {args.version} is built from the retail module')
-        return report
+        return skipped(args, mod, nso, retail_sha, notes,
+                       f'no code patch for main ({", ".join(PATCH_SUFFIXES)}), so nothing is merged into it')
 
     reserved = patch_sites.sites(args.version, nso.build_id)
     image, applied, taken = nso.image(), [], {}
@@ -411,6 +411,9 @@ def apply(args):
     for path in patches:
         name = path.relative_to(mod).as_posix()
         records = patch_records(path, nso)
+        if not records:
+            notes.append(f'{name}: not merged (every section is @disabled, so the file applies nothing)')
+            continue
         edits = []
         for address, payload in records:
             where = f'{name} (main+{address:#x})'
@@ -433,6 +436,8 @@ def apply(args):
                             format=path.suffix.lower().lstrip('.'),
                             edits=edits, edit_count=len(edits), bytes=sum(e['size'] for e in edits)))
 
+    if not applied:                 # patches that apply no record at all say nothing was merged, like an empty exefs/
+        return skipped(args, mod, nso, retail_sha, notes, 'no patch applies a byte of main, so nothing is merged into it')
     if bytes(image) == bytes(nso.image()):
         raise ModError(f'{mod}: the patches change no byte of main (are they for another version, or already merged?)')
 

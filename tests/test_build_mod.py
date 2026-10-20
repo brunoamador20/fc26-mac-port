@@ -197,6 +197,49 @@ class ModInstall(unittest.TestCase):
         self.assertTrue(any('left out (the app replaces it too' in line for line in installed.manifest),
                         installed.manifest)
 
+    def test_a_mod_that_would_replace_nothing_leaves_the_folder_alone(self):
+        # every file the app replaces itself: the game would load none of them, so there is no manifest to write - and
+        # the player's folder must not be emptied for it (the mod folder is checked, and looked at, first)
+        overlays = self.app/'Contents/Resources/totk/extracted/v143/romfs-patches'
+        overlays.mkdir(parents=True)
+        (overlays/'manifest.tsv').write_text('# path\tsize\tsha256\toriginal_sha256\nUI/C.bfres\t1\t00\t01\n')
+        self.add('UI/C.bfres', b'the mod version')
+        dest = self.mods/'v143'
+        dest.mkdir(parents=True)
+        (dest/'notes.txt').write_bytes(b'mine')
+        self.assertIsNone(self.install())
+        self.assertEqual(sorted(p.name for p in dest.iterdir()), ['notes.txt'])     # exactly as it was
+        self.assertIn('would replace or add no file the game loads', self.said[-1])
+        self.assertFalse((dest/'manifest.tsv').exists())
+
+    def test_a_failed_copy_leaves_the_folder_as_it_was(self):
+        # a full disk or a permission error while the new copy is built must not cost the player their mods, and must
+        # not come out as a traceback: the copy is built next to the folder and only then swapped in
+        dest = self.mods/'v143'
+        dest.mkdir(parents=True)
+        (dest/'notes.txt').write_bytes(b'mine')
+        self.add('Pack/A.pack.zs', b'replaced a')
+        saved = mod_folder.copy_tree
+
+        def run_out_of_space(source, target):
+            raise OSError(28, 'No space left on device', str(target))
+
+        mod_folder.copy_tree = run_out_of_space
+        try:
+            with self.assertRaises(mod_folder.InstallError) as raised:
+                self.install()
+        finally:
+            mod_folder.copy_tree = saved
+        self.assertIn('holds what it held before', str(raised.exception))
+        self.assertEqual(sorted(p.name for p in dest.iterdir()), ['notes.txt'])
+        self.assertFalse((dest/'manifest.tsv').exists())
+
+    def test_nothing_is_left_next_to_the_folder_after_a_clean_install(self):
+        self.add('Pack/A.pack.zs', b'replaced a')
+        installed = self.install()
+        self.assertEqual(sorted(p.name for p in self.mods.iterdir()), ['v143'])
+        self.assertEqual(sorted(p.name for p in installed.folder.iterdir()), ['Pack', 'manifest.tsv'])
+
     def test_a_mod_without_romfs_or_with_an_empty_one_leaves_the_folder_alone(self):
         self.assertIsNone(self.install())
         self.assertFalse((self.mods/'v143').exists())
