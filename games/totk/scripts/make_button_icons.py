@@ -20,8 +20,10 @@ Format notes (checked on 1.0.0 and 1.2.1): a .bfotf is an OpenType (CFF) font wi
 The archive is a SARC; its members are packed again in their original order and alignment, and every member except
 External.bfotf must come out byte-identical. The archive is compressed with the zstd dictionary it used (Pack/ZsDic).
 
-Needs fontTools (pip install fonttools) and Python 3.14 (compression.zstd).
-usage: make_button_icons.py <mod folder> (--app <Tears of the Kingdom.app> | --romfs <folder>) [--version v121] [--style xbox]
+Needs fontTools (python3.14 -m pip install fonttools) and Python 3.14 (compression.zstd). An existing font archive in the mod
+folder (another mod's, or an earlier run) is only overwritten with --replace. The xbox style matches the default face-button
+mapping by position (not TOTK_FACE_BUTTONS=label or face buttons changed in controls.txt).
+usage: make_button_icons.py <mod folder> (--app <Tears of the Kingdom.app> | --romfs <folder>) [--version v121] [--style xbox] [--replace]
 """
 import argparse
 import io
@@ -29,7 +31,10 @@ import struct
 import sys
 from pathlib import Path
 
-import compression.zstd as zstd
+try:
+    import compression.zstd as zstd
+except ImportError:
+    sys.exit('needs Python 3.14 (compression.zstd): run it with python3.14')
 from make_mod_manifest import VERSIONS, manifest, read_index
 
 try:
@@ -302,6 +307,7 @@ def main():
     source.add_argument('--romfs', type=Path, help='a folder holding romfs.bin and runtime-index.bin')
     parser.add_argument('--version', choices=VERSIONS, help='the game version (default: the mod folder name)')
     parser.add_argument('--style', choices=sorted(STYLES), default='keyboard')
+    parser.add_argument('--replace', action='store_true', help='overwrite a font archive already in the mod folder')
     args = parser.parse_args()
     version = args.version or (args.mod.name if args.mod.name in VERSIONS else None)
     romfs = args.romfs
@@ -309,6 +315,9 @@ def main():
         if not version:
             parser.error('name the game version with --version (or name the mod folder v0, v112, v121 or v143)')
         romfs = args.app / f'Contents/Resources/totk/extracted/{version}/romfs'
+    if (args.mod / ARCHIVE).exists() and not args.replace:
+        parser.error(f'{args.mod / ARCHIVE} already exists (another mod\'s font archive, or an earlier run): '
+                     'pass --replace to overwrite it')
     for need in ('romfs.bin', 'runtime-index.bin'):
         if not (romfs / need).is_file():
             parser.error(f'{romfs / need} not found')
