@@ -101,6 +101,7 @@ static id<MTLTexture> g_fps_tex[4];
 static id<MTLBuffer> g_fps_uv[3];
 static struct { fps_overlay_info info; int scale; } g_fps_key[4] = {{{.fps = -1000}, 0}, {{.fps = -1000}, 0}, {{.fps = -1000}, 0}, {{.fps = -1000}, 0}};
 static _Atomic int g_pic_big;   /* the game picture (its crop) is bigger than 1920x1080: true 2K (" 2K" in the FPS box) */
+static _Atomic uint64_t g_pic_src;   /* the last game frame's size presented (crop): height << 32 | width, for the HUD */
 static int g_fps_box[4][2];
 // TOTK load line (bottom-right, load_overlay_prepare; totk_sysload.c): same slots as the FPS box, a wider texture.
 static id<MTLTexture> g_load_tex[4];
@@ -615,7 +616,18 @@ static _Atomic uint64_t g_reg_gen = 1;   // 内存池 / 贴图 / 采样器登记
    kIOReturnNoMemory. A zero-copy buffer makes the whole range resident, so ranges with inaccessible pages (sparse
    virtual pools) or very large ranges are refused here, with details, instead of being handed to the driver. */
 #include "mach_vm_compat.h"
-#define POOL_BUFFER_MAX (1ull << 30)
+/* DM_POOL_BUFFER_MAX_MIB (1024..4096, default 1024) raises the limit for a game that makes one larger pool: Bayonetta 3
+   makes a 1348 MiB one at start, and its runtime sets 2048. TOTK keeps the default. */
+static uint64_t pool_buffer_max(void) {
+    static uint64_t v;
+    if (!v) {
+        const char *e = getenv("DM_POOL_BUFFER_MAX_MIB"); uint64_t mib = e ? strtoull(e, NULL, 10) : 1024;
+        if (mib < 1024 || mib > 4096) MDIE("DM_POOL_BUFFER_MAX_MIB must be 1024..4096");
+        v = mib << 20;
+    }
+    return v;
+}
+#define POOL_BUFFER_MAX pool_buffer_max()
 static void pool_range_check(uintptr_t a, uintptr_t b, const void *mem, uint64_t size) {
     if (b - a > POOL_BUFFER_MAX) MDIE("memory pool %p+%#llx: %llu MiB zero-copy GPU buffer refused (limit %llu MiB)", mem, (unsigned long long)size,
                                       (unsigned long long)((b - a) >> 20), POOL_BUFFER_MAX >> 20);
@@ -964,8 +976,31 @@ static uint64_t g_sub_serial;   // 第几次提交（并行预编「每次提交
 static void pt_apply_request(void);
 static int g_sub_chunks; static uint64_t g_chunk_mark, g_stat_draw; static void chunk_cfg(void);   // mid-submission commits, defined before mtl_sub_commit
 static int g_nupd, g_nshadow; static inline int upd_guard(uint64_t lo, uint64_t hi);   // renamed uniform updates, defined with mtl_sub_update
+/* Diagnostic: "gpucapture <path>.gputrace" in TOTK_INPUT_FILE writes a Metal capture of one whole frame (every submission
+   of it) for Xcode's Metal debugger: passes, draws, bound resources, and per-pixel history (which draws touched a pixel,
+   and whether they passed the depth / stencil tests). Metal writes capture files only if MTL_CAPTURE_ENABLED=1 was set
+   when the game started. */
+static _Atomic uint64_t g_cur_frame;   // tentative declaration, defined further down
+static char g_cap_path[1024]; static long g_cap_at = -1; static int g_cap_on;
+void dm_gfx_gpucapture_next(const char *path) {
+    snprintf(g_cap_path, sizeof g_cap_path, "%s", path); g_cap_at = (long)atomic_load(&g_cur_frame) + 2;
+    MLOG("[capture] Metal capture of frame %ld -> %s", g_cap_at, g_cap_path);
+}
+static void cap_step(void) {   // at the start of every submission
+    if (g_cap_at < 0) return;
+    long f = (long)atomic_load(&g_cur_frame);
+    MTLCaptureManager *m = [MTLCaptureManager sharedCaptureManager];
+    if (g_cap_on && f > g_cap_at) { [m stopCapture]; g_cap_on = 0; g_cap_at = -1; MLOG("[capture] written: %s", g_cap_path); return; }
+    if (!g_cap_on && f >= g_cap_at) {
+        if (![m supportsDestination:MTLCaptureDestinationGPUTraceDocument]) { MLOG("【红】[capture] capture files are off: start the game with MTL_CAPTURE_ENABLED=1"); g_cap_at = -1; return; }
+        MTLCaptureDescriptor *d = [MTLCaptureDescriptor new]; d.captureObject = g_dev; d.destination = MTLCaptureDestinationGPUTraceDocument;
+        d.outputURL = [NSURL fileURLWithPath:@(g_cap_path)];
+        NSError *e = nil; if ([m startCaptureWithDescriptor:d error:&e]) { g_cap_on = 1; g_cap_at = f; } else { MLOG("【红】[capture] could not start: %s", e.localizedDescription.UTF8String); g_cap_at = -1; }
+    }
+}
 void mtl_sub_begin(void) {
     g_fc_begin0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    cap_step();
     /* The submission's autorelease pool, drained in mtl_sub_commit, opens before anything else: the guest's submit
        thread has no pool of its own that drains (frontend.m's lasts the whole game), so what defer_drain, defer_reset,
        warm_claim and pt_apply_request autoreleased before it piled up every submission (nxnative found the same leak:
@@ -3628,7 +3663,7 @@ static id<MTL4RenderCommandEncoder> g_enc;
 static int rp_active(void) { return g_enc != nil; }
 // 当前渲染通道的目标信息：rp_begin 时由附件定一次，通道内各绘制共用（管线键、深度模板、视口 / 剪裁都只依赖它）
 // Target info of the current render pass: determined once from the attachments at rp_begin and shared by all draws in the pass (pipeline key, depth-stencil, viewport / scissor all depend only on it)
-static struct { uint32_t cfmt[8], dfmt, sfmt, samples; int hd, hs; NSUInteger tw, th; uint64_t serial, reg_gen, ser_gen, range_dirty; int range_external, range_depth_nonro; __unsafe_unretained id<MTLTexture> range_color, range_depth; int layered, mfx; } g_pass;
+static struct { uint32_t cfmt[8], dfmt, sfmt, samples; int hd, hs; NSUInteger tw, th; uint64_t serial, reg_gen, ser_gen, range_dirty; int range_external, range_depth_nonro; __unsafe_unretained id<MTLTexture> range_color, range_depth; int layered, mfx, noatt; } g_pass;
 /* TOTK_MFX=interp (totk_mfx.m): the canvas is the float target the game composes the frame in and then copies to the
    presented texture (docked: 1920x1080, the 1600x900 scene upscaled into it; handheld: 1280x720, the scene drawn in it).
    Before the first UI draw into it (a TOTK UI vertex shader) the pass is ended and the canvas copied: that is the scene.
@@ -3733,7 +3768,7 @@ static void pass_dims(MTL4RenderPassDescriptor *pd, NSUInteger nc, NSUInteger *w
         NSUInteger aw = mip_extent(a.texture.width, a.level), ah = mip_extent(a.texture.height, a.level);
         *w = *w ? MIN(*w, aw) : aw; *h = *h ? MIN(*h, ah) : ah;
     }
-    if (!*w) *w = *h = 1;
+    if (!*w) { *w = pd.renderTargetWidth ? pd.renderTargetWidth : 1; *h = pd.renderTargetHeight ? pd.renderTargetHeight : 1; }   // a pass with no attachment: its set size
 }
 
 // ---------- DM_NVN_PASSGPU=<文件>：逐通道 GPU 时间（阶段边界时间戳计数器） ----------
@@ -4324,12 +4359,15 @@ static void mfx_snapshot_scene(void) {
 }
 static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only);
 static id<MTL4RenderCommandEncoder> rp_begin(void) { return rp_begin_ex(0); }
+static int rt_none(void); static void noatt_dims(NSUInteger *w, NSUInteger *h);
+static int g_rpb_why;   // pass dumps: why the last rp_begin_ex gave no encoder (1 no targets set, 2 no Metal attachment, 3 encoder creation)
 static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
     if (g_enc) return g_enc;
+    g_rpb_why = 0;
     chunk_maybe_split();
     memset(g_zskip_cand_ok, 0, sizeof g_zskip_cand_ok);
     g_enc_mode = clear_only;
-    if (!R.has_rt) { RED_ONCE(3, "绘制前没有设置渲染目标"); return nil; }
+    if (!R.has_rt) { RED_ONCE(3, "绘制前没有设置渲染目标"); g_rpb_why = 1; return nil; }
     int lay_first = 0, lay_n = lay_decide(clear_only, &lay_first);   // TOTK: layered pass over lay_n layers from lay_first (see g_lay)
     if (!lay_n && !clear_only && g_cg_force_layers) { lay_n = g_cg_force_layers; lay_first = 0; }   // TOTK: the merged cube-face-set pass (nvn_cube_group.h): six temps, one layer per member
     // 附件范围候选的版本在捕获任何附件之前取；建立途中有变化则不续用。
@@ -4365,6 +4403,8 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
         any = 1;
         pd.colorAttachments[i].loadAction = R.clear_c[i] ? MTLLoadActionClear : MTLLoadActionLoad;
         pd.colorAttachments[i].clearColor = R.cc[i];
+        { static long xs = -2; if (xs == -2) { const char *e = getenv("DM_EXP_CLEAR_SER"); xs = e ? strtol(e, NULL, 0) : -1; }   // measurement only: a loaded target of this serial starts magenta (pixels no draw covers show up)
+          if (xs >= 0 && (long)R.rt.color[i]->serial == xs && !R.clear_c[i]) { pd.colorAttachments[i].loadAction = MTLLoadActionClear; pd.colorAttachments[i].clearColor = MTLClearColorMake(1, 0, 1, 1); } }
         int cov = tbdr_on() && !R.clear_c[i] && (g_fd_dw || g_fd_di) && fz_load_covers(i, pd.colorAttachments[i].texture, pd.colorAttachments[i].level);
         if (!R.clear_c[i] && (g_fd_dw || g_fd_di) && !cov) PD("Q %llu c%d 读入不可省 why=%d", g_stat_pass + 1, i, g_fd_why);
         if (cov) {
@@ -4414,6 +4454,15 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
                 if (pd.depthAttachment.texture && pd.depthAttachment.loadAction == MTLLoadActionLoad) pd.depthAttachment.loadAction = MTLLoadActionDontCare;
                 if (pd.stencilAttachment.texture && pd.stencilAttachment.loadAction == MTLLoadActionLoad) pd.stencilAttachment.loadAction = MTLLoadActionDontCare; }
       if (ns) { if (pd.depthAttachment.texture) pd.depthAttachment.storeAction = MTLStoreActionDontCare; if (pd.stencilAttachment.texture) pd.stencilAttachment.storeAction = MTLStoreActionDontCare; } }
+    /* NVN draws with no render target set (Bayonetta 3; TOTK never does): only rasterization, the fragment shaders write
+       storage buffers or images (the game computes its exposure that way). Metal takes such a pass with a set size and no
+       attachments; the size is the viewport's extent (or the scissor's), and a later draw that needs more reopens the pass. */
+    int noatt = 0;
+    if (!any && clear_only != 1 && rt_none()) {
+        NSUInteger w, h; noatt_dims(&w, &h);
+        pd.renderTargetWidth = w; pd.renderTargetHeight = h; pd.defaultRasterSampleCount = 1; any = noatt = 1;
+        PD("P %llu none %lux%lu（无渲染目标）", g_stat_pass + 1, (unsigned long)w, (unsigned long)h);
+    }
     if (!any) {
         static int n; if (n++ < 8) {   /* TOTK: report what the attachments were (the pass is skipped, its draws are lost) */
             for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i]) MLOG("【红】pass without Metal targets (clear_only %d): color %d serial %llu format %#x %ux%u target %d view %s%#x -> %s", clear_only, i,
@@ -4423,6 +4472,9 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
                 R.rt.depth->d.width, R.rt.depth->d.height, tex_mtl(R.rt.depth) ? "texture" : "no texture");
             if (!R.rt.n && !R.rt.depth) MLOG("【红】pass without Metal targets: no attachments set (clear_only %d)", clear_only);
         }
+        g_rpb_why = 2;
+        if (passdump()) for (int i = 0; i < R.rt.n && i < 8; i++) PD("S %llu c%d ser=%llu nvnfmt=%#x %ux%u view=%d tex=%d", g_stat_pass, i, R.rt.color[i] ? (unsigned long long)R.rt.color[i]->serial : 0ull,
+            R.rt.color[i] ? R.rt.color[i]->d.format : 0, R.rt.color[i] ? R.rt.color[i]->d.width : 0, R.rt.color[i] ? R.rt.color[i]->d.height : 0, R.rt.has_cview[i], R.rt.color[i] && tex_mtl(R.rt.color[i]) ? 1 : 0);
         return nil;
     }
     if (lay_n) pd.renderTargetArrayLength = (NSUInteger)lay_n;
@@ -4478,7 +4530,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
         g_pass.dfmt = g_pass.hd ? (uint32_t)dt.pixelFormat : 0; g_pass.sfmt = stt ? (uint32_t)stt.pixelFormat : 0;
         if (dt || stt) g_pass.samples = (uint32_t)(dt ? dt : stt).sampleCount;
         pass_dims(pd, (NSUInteger)R.rt.n, &g_pass.tw, &g_pass.th);
-        g_pass.layered = lay_n != 0;
+        g_pass.layered = lay_n != 0; g_pass.noatt = noatt;
         if (rt_range_on()) { g_pass.reg_gen = reg0; g_pass.ser_gen = ser0; }
         if (rt_range_on()) { g_pass.range_dirty=dirty0; g_pass.range_color=pd.colorAttachments[0].texture; g_pass.range_depth=pd.depthAttachment.texture; }
         g_enc_pso = nil; g_enc_dss = nil;
@@ -4495,6 +4547,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
     if (mfx_enabled()) mfx_pass_setup(pd);   // TOTK: MetalFX scene / UI attachments, G-buffer depth
     else if (uw_ratio()) canvas_learn(pd);   // key 4: the canvas the UI is squeezed in
     g_enc = enc_r_begin(pd);
+    if (!g_enc) g_rpb_why = 3;
     args_dirty_all();
     g_stat_pass++;
     if (lay_n) { g_lay.active = 1; g_lay.base = g_lay.cur = lay_first; g_lay.count = lay_n; if (g_cg_force_layers) g_lay.cur = g_cg_cur;
@@ -4511,6 +4564,7 @@ static void rt_dims(NSUInteger *tw, NSUInteger *th) {
         t0 = tex_mtl(R.rt.color[i]); level = R.rt.has_cview[i] && R.rt.cview[i].set_levels ? R.rt.cview[i].base_level : 0;
     }
     if (!t0 && R.rt.depth) { t0 = tex_mtl(R.rt.depth); level = R.rt.has_dview && R.rt.dview.set_levels ? R.rt.dview.base_level : 0; }
+    if (!t0 && rt_none()) { noatt_dims(tw, th); return; }
     *tw = t0 ? mip_extent(t0.width, level) : 1; *th = t0 ? mip_extent(t0.height, level) : 1;
 }
 // 有挂起的清除但通道里没有绘制：开一次通道把清除落地
@@ -4812,6 +4866,11 @@ static MTLCompileOptions *totk_precise_opts(void) {
     dispatch_once(&once, ^{
         MTLCompileOptions *x = [MTLCompileOptions new];
         if (@available(macOS 15.0, *)) x.mathMode = MTLMathModeSafe; else x.fastMathEnabled = NO;
+        /* DM_PRESERVE_INVARIANCE=1 (Bayonetta 3 sets it): the translated vertex shaders mark gl_Position [[invariant]], which
+           Metal honours only with preserveInvariance. A game that draws a depth pre-pass and then its colour pass with a
+           LEQUAL / EQUAL test needs the two positions bit-identical, as on the Switch: without it, part of the colour pass
+           fails the depth test and keeps the previous frame (ghostly characters, trails, blocks). Default off (TOTK). */
+        { const char *e = getenv("DM_PRESERVE_INVARIANCE"); if (e && atoi(e)) { x.preserveInvariance = YES; MLOG("vertex positions compiled invariant (DM_PRESERVE_INVARIANCE=1)"); } }
         /* TOTK_FAST_MATH=1 (measurement only): fast math for every translated shader. Known to break the tile-light vertex
            shader's integer-division idiom, so pictures from such runs are not evidence of correctness. */
         if (getenv("TOTK_FAST_MATH") && atoi(getenv("TOTK_FAST_MATH"))) { if (@available(macOS 15.0, *)) x.mathMode = MTLMathModeFast; else x.fastMathEnabled = YES; MLOG("【实验】TOTK_FAST_MATH=1：着色器用快速数学"); }
@@ -5372,9 +5431,18 @@ static id<MTLTexture> tex_by_id(int tid) {   // 调用方持 g_rmu | Caller hold
     v = base;
     MTLTextureSwizzleChannels vsw = MTLTextureSwizzleChannelsDefault;
     int need_swz = tex_swizzle_sel(&r.t, r.has_v && r.v.set_swizzle ? r.v.swz : NULL, r.has_v && r.v.set_format ? r.v.format : r.t.d.format, &vsw) || !swizzle_eq(base.swizzle, MTLTextureSwizzleChannelsDefault);
-    if (need_swz || (r.has_v && (r.v.set_format || r.v.set_levels || r.v.set_layers || r.v.set_target))) {
+    if (need_swz || (r.has_v && (r.v.set_format || r.v.set_levels || r.v.set_layers || r.v.set_target || r.v.set_stencil))) {
         uint32_t pf = (uint32_t)base.pixelFormat; uint8_t swz[4];
         if (r.v.set_format && !(nvn_fmt_to_mtl(r.v.format, &pf, swz) && pf)) pf = (uint32_t)base.pixelFormat;
+        if (r.v.set_stencil) {   // Bayonetta 3: the stencil plane of a depth-stencil texture, read as an unsigned integer texture
+            if (base.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) pf = MTLPixelFormatX32_Stencil8;
+            else if (base.pixelFormat != MTLPixelFormatStencil8) MDIE("texture id %d: stencil view of Metal format %lu", tid, (unsigned long)base.pixelFormat);
+            if (pf != base.pixelFormat && !(base.usage & MTLTextureUsagePixelFormatView)) {
+                base = tex_upgrade_pfv(&rp->t, base, (MTLPixelFormat)pf);
+                if (g_tex_prepare_split) return nil;
+                sg = g_ser_gen;
+            }
+        }
         { uint32_t upf; int ubpp; if (r.v.set_format && bc1_fmt(r.v.format) && pf_astc4(base.pixelFormat)) pf = (uint32_t)bc1_astc_pf(r.v.format);   // TOTK: BC1 view of a transcoded (ASTC) texture
           else if (r.v.set_format && tc_pf(r.v.format) != MTLPixelFormatInvalid && tc_pf(r.t.d.format) == base.pixelFormat) pf = (uint32_t)tc_pf(r.v.format);   // TOTK: view of a BC2/3/4/5/7 texture stored transcoded (tex_tc)
           else if (r.v.set_format && bc_unpack(r.v.format, &upf, &ubpp)) pf = upf; }   // 无 BC：BC 视图跟底图一样换成解压后的格式 | No BC: a BC view is switched to the decompressed format just like the base texture
@@ -5500,6 +5568,7 @@ static size_t arena_alloc(size_t n, id<MTLBuffer> *buf) {
 // ---------- Draw state ----------
 static struct {
     const prog_t *prog;
+    const prog_t *stage_prog[5];   // graphics stage -> the program bound for it (NVN binds programs per stage mask)
     blend_st blend[8]; color_st color; chmask_st chmask; ms_st ms; poly_st poly; ds_st ds;
     va_st attr[16]; int nattr; vs_st stream[16]; int nstream;
     NVNbufferRange vbuf[16];
@@ -5509,6 +5578,19 @@ static struct {
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; int depth_clamp; int render_disabled; int raster_discard;
     float blend_color[4]; int64_t copy_stride;
 } S;
+// No render target set: no colour target and no depth / stencil (a pass of rasterization only, see rp_begin_ex)
+static int rt_none(void) {
+    if (!R.has_rt || R.rt.depth) return 0;
+    for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i]) return 0;
+    return 1;
+}
+// The size of such a pass: the extent of viewport 0, else of the scissor (1..16384)
+static void noatt_dims(NSUInteger *w, NSUInteger *h) {
+    double x1 = 0, y1 = 0;
+    if (S.has_vp) { x1 = ceil(fmax(S.vp[0][0], S.vp[0][0] + S.vp[0][2])); y1 = ceil(fmax(S.vp[0][1], S.vp[0][1] + S.vp[0][3])); }
+    if ((x1 < 1 || y1 < 1) && R.has_sc) { x1 = (double)R.sc.x + R.sc.w; y1 = (double)R.sc.y + R.sc.h; }
+    *w = x1 < 1 ? 1 : x1 > 16384 ? 16384 : (NSUInteger)x1; *h = y1 < 1 ? 1 : y1 > 16384 ? 16384 : (NSUInteger)y1;
+}
 static void udc_note_draw(NvProg *pr) {
     if (R.has_rt) for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i]) { zskip_del(R.rt.color[i]->serial); g_zskip_cand_ok[i] = 0; }   // 零源集合：真画了就不再是全零 | Zero-source set: once really drawn it is no longer all zeros
     /* TOTK (after D2R Mobile 44a6770): the program's image bindings and fragment colour mask are worked out once per program
@@ -5533,6 +5615,38 @@ static void udc_note_draw(NvProg *pr) {
                 && (S.ds.fail_f != NVN_STENCIL_OP_KEEP || S.ds.zfail_f != NVN_STENCIL_OP_KEEP || S.ds.zpass_f != NVN_STENCIL_OP_KEEP
                     || S.ds.fail_b != NVN_STENCIL_OP_KEEP || S.ds.zfail_b != NVN_STENCIL_OP_KEEP || S.ds.zpass_b != NVN_STENCIL_OP_KEEP)) { t->wrote = 1; t->wwhy = 5; }
     }
+}
+/* Per-stage program binding (NVN: BindProgram(p, stages) replaces only the stages in the mask; a stage p lacks becomes
+   unbound). Bayonetta 3 binds a vertex-only and a fragment-only program; TOTK binds whole graphics programs and compute
+   programs on their own. The replay draws with one program, so:
+   - a compute-only bind makes that program current, as before (the graphics stages stay bound for later draws);
+   - a graphics bind whose program covers every bound graphics stage makes it current, as before (TOTK's case);
+   - otherwise the bound stages are combined into a host program, one per distinct combination (cached by the component
+     programs and their serials; a component's new SetShaders gives a new serial and so a new combination). */
+static int prog_stage_index(const prog_t *p, int stage) {
+    for (unsigned i = 0; p && i < p->nstage; i++) { uint32_t st; memcpy(&st, (const uint8_t *)p->sd[i].control + 0x714, 4); if ((int)st == stage) return (int)i; }
+    return -1;
+}
+extern uint64_t nvn_new_serial(void);
+static const prog_t *prog_combined(void) {
+    typedef struct { const prog_t *part[5]; uint64_t ser[5]; prog_t *prog; } combo_t;
+    static combo_t *tab; static size_t n, cap;
+    uint64_t ser[5]; for (int s = 0; s < 5; s++) ser[s] = S.stage_prog[s] ? S.stage_prog[s]->serial : 0;
+    for (size_t i = 0; i < n; i++) if (!memcmp(tab[i].part, S.stage_prog, sizeof tab[i].part) && !memcmp(tab[i].ser, ser, sizeof ser)) return tab[i].prog;
+    prog_t *c = calloc(1, sizeof *c); if (!c) MDIE("combined program allocation");
+    c->magic = 0x474f5250;   /* "PROG", as nvnProgramInitialize writes it */
+    for (int s = 0; s < 5; s++) { int k = prog_stage_index(S.stage_prog[s], s); if (k >= 0) c->sd[c->nstage++] = S.stage_prog[s]->sd[k]; }
+    c->serial = nvn_new_serial();
+    if (n == cap) { cap = cap ? cap * 2 : 64; tab = realloc(tab, cap * sizeof *tab); if (!tab) MDIE("combined program table"); }
+    combo_t *e = &tab[n++]; memcpy(e->part, S.stage_prog, sizeof e->part); memcpy(e->ser, ser, sizeof ser); e->prog = c;
+    if (n <= 4 || n % 1000 == 0) MLOG("[prog] combined program %zu: %u stages from per-stage binds", n, c->nstage);
+    return c;
+}
+static const prog_t *prog_bind(const prog_t *np, int stages) {
+    if (!(stages & NVN_SHADER_STAGE_ALL_GRAPHICS_BITS)) return np;   // compute only
+    for (int s = 0; s < 5; s++) if (stages & (1 << s)) S.stage_prog[s] = prog_stage_index(np, s) >= 0 ? np : NULL;
+    int mixed = 0; for (int s = 0; s < 5; s++) mixed |= S.stage_prog[s] && S.stage_prog[s] != np;
+    return mixed ? prog_combined() : np;
 }
 static void state_reset(void) {
     memset(&S, 0, sizeof S);
@@ -7497,7 +7611,7 @@ static int first_draw_covers(int i, id<MTLTexture> t, NSUInteger level) {
 static int state_op(uint32_t op, const void *a) {
     switch (op) {
         case OP_SCISSOR: R.sc = *(const p_scissor *)a; R.has_sc = 1; break;
-        case OP_BIND_PROGRAM: { const prog_t *np = ((const p_bind_program *)a)->prog; if (np != S.prog) { S.prog = np; g_pso_dirty = 1; args_program_changed(); } break; }
+        case OP_BIND_PROGRAM: { const p_bind_program *bp = a; const prog_t *np = prog_bind(bp->prog, bp->stages); if (np != S.prog) { S.prog = np; g_pso_dirty = 1; args_program_changed(); } break; }
         case OP_BIND_STATE: {
             const p_bind_state *b = a; void *dst = NULL; size_t n = 0;
             blend_st bs;
@@ -9717,6 +9831,7 @@ static void draw_inner(const p_draw *dw, const p_draw_idx *di) {
     if (g_fz.active && g_enc && g_fz.phase == 2 && !fz_p2_draw(pr, dw, di, g_fz.lmap2, &fz_fn)) {   // 证不出：结束合并通道（前一个通道的结果照常写回），按后一个通道的原目标重开 | Cannot be proven: end the merged render pass (the earlier pass's result is stored as usual) and reopen with the later pass's original targets
         static int once3; if (!once3++) MLOG("可读 tile 通道合并：后一个通道的绘制证不出，退回分开（首例 通道 %llu）", g_stat_pass);
         g_fz_fallback++; rp_end(); }
+    if (g_enc && g_pass.noatt) { NSUInteger w, h; noatt_dims(&w, &h); if (w > g_pass.tw || h > g_pass.th) rp_end(); }   // no render target: this draw needs a larger pass
     if (R.has_sc && !g_enc) {
         NSUInteger tw0 = 0, th0 = 0; rt_dims(&tw0, &th0);
         long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
@@ -9749,7 +9864,7 @@ frz_plain:;
     if (!g_uw_ui && uw_on_canvas() && pr && pr->sh[0] && mfx_ui_vs(pr->sh[0]->key)) g_uw_ui = 1;   // key 4: the UI begins
     id<MTLRenderCommandEncoder> en = rp_begin_ex(mode);
     g_fd_dw = NULL; g_fd_di = NULL;
-    if (!en) { g_draw_skip[8]++; return; }
+    if (!en) { g_draw_skip[8]++; PD("S %llu no-encoder has_rt=%d n=%d why=%d mode=%d", g_stat_pass, R.has_rt, R.rt.n, g_rpb_why, mode); return; }
     if (g_pass.mfx || g_mfx.role) {   // TOTK_MFX: every draw into the canvas after the scene copy goes to the UI layer too
         int r = 0;
         if (g_pass.mfx) {
@@ -9782,6 +9897,12 @@ frz_plain:;
     /* TOTK diagnostic TOTK_GPU_NODEPTH_FROM=<frame>: from that frame on, no depth test / write for any draw. */
     { static long nodepth_from = -2; static id<MTLDepthStencilState> nodss; if (nodepth_from == -2) { const char *e = getenv("TOTK_GPU_NODEPTH_FROM"); nodepth_from = e ? atol(e) : -1; }
       if (nodepth_from >= 0 && (long)atomic_load(&g_cur_frame) >= nodepth_from) { if (!nodss) { MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new]; dd.depthCompareFunction = MTLCompareFunctionAlways; dd.depthWriteEnabled = NO; nodss = [g_dev newDepthStencilStateWithDescriptor:dd]; } cur_ds = nodss; } }
+    /* Measurement only, DM_EXP_NODEPTH_SER=<serial>: no depth test / write for the draws into that colour target (apart from
+       them, every pass keeps its tests: tells the colour pass failing the depth test from draws that never come). */
+    { static long nd_ser = -2; static id<MTLDepthStencilState> nd_dss; if (nd_ser == -2) { const char *e = getenv("DM_EXP_NODEPTH_SER"); nd_ser = e ? strtol(e, NULL, 0) : -1; }
+      if (nd_ser >= 0 && R.rt.n > 0 && R.rt.color[0] && (long)R.rt.color[0]->serial == nd_ser) {
+          if (!nd_dss) { MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new]; dd.depthCompareFunction = MTLCompareFunctionAlways; dd.depthWriteEnabled = NO; nd_dss = [g_dev newDepthStencilStateWithDescriptor:dd]; }
+          cur_ds = nd_dss; cur_ds_pass = 0; } }
     if (cur_ds != g_enc_dss) { enc_r_dss(en, cur_ds); g_enc_dss = cur_ds; }
     if (g_rt_ovr && g_pass.hs) enc_r_stencil_ref(en, g_rt_ovr == 3 ? 0x40 : 0, 0); else enc_r_stencil_ref(en, S.st_ref[0], S.st_ref[1]);
     // 视口 / 剪裁（夹到目标尺寸内）
@@ -9842,7 +9963,9 @@ frz_plain:;
         if (ux != 1) { sx0 = lround(cx + (sx0 - cx) / ux); sx1 = lround(cx + (sx1 - cx) / ux); }
         long x0 = sx0 < 0 ? 0 : sx0, y0 = R.sc.y <= 0 ? 0 : R.sc.y + so, x1 = sx1, y1 = vs != 1 ? (long)th : (long)R.sc.y + R.sc.h + so;
         if (x1 > (long)tw) x1 = tw; if (y1 > (long)th) y1 = th;
-        if (x1 <= x0 || y1 <= y0) { g_draw_skip[10]++; return; }
+        if (x1 <= x0 || y1 <= y0) { g_draw_skip[10]++;
+            PD("S %llu scissor-empty sc=%d,%d,%d,%d tgt=%lux%lu ux=%g vs=%g so=%ld", g_stat_pass, R.sc.x, R.sc.y, R.sc.w, R.sc.h, (unsigned long)tw, (unsigned long)th, (double)ux, (double)vs, (long)so);
+            return; }
         sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
     }
     enc_r_scissor(en, sc);
@@ -10098,6 +10221,27 @@ static id<MTL4ComputeCommandEncoder> disp_enc(void) {
     if (g_disp_n % 20000 == 0) MLOG("[nvn] 计算派发 至 %llu 次：其中 %llu 次（%.0f%%）接在已开的计算编码器里，没有另开编码器", (unsigned long long)g_disp_n, (unsigned long long)g_disp_shared, 100.0 * (double)g_disp_shared / (double)g_disp_n);
     return g_blit;
 }
+/* Indirect draw records (p_draw_indirect tail, Bayonetta 3): read {count, instances, first, base vertex, base instance}
+   (elements) or {count, instances, first, base instance} (arrays) from memory now and write them into the record.
+   Approximation: arguments a GPU pass of this same submission writes are seen as they are in memory at replay, usually the
+   previous frame's. 0 = nothing to draw. */
+static int draw_resolve(const op_hdr *h, void *rec, int indexed) {
+    size_t at = indexed ? DRAW_TAIL_AT(p_draw_idx) : DRAW_TAIL_AT(p_draw);
+    if (h->size < 8 + at + sizeof(p_draw_indirect)) return 1;
+    p_draw_indirect t; memcpy(&t, (uint8_t *)rec + at, sizeof t);
+    if (t.magic != DRAW_INDIRECT_MAGIC) return 1;
+    if (t.count_addr) { uint32_t cnt; if (g_nupd) upd_guard(t.count_addr, t.count_addr + 4); memcpy(&cnt, (const void *)(uintptr_t)t.count_addr, 4); if (t.index >= cnt) return 0; }
+    if (g_nupd) upd_guard(t.args, t.args + 20);
+    uint32_t v[5]; memcpy(v, (const void *)(uintptr_t)t.args, indexed ? 20 : 16);
+    if (!v[0] || !v[1]) return 0;
+    if (indexed) {
+        p_draw_idx *d = rec; unsigned isz = d->itype == NVN_INDEX_TYPE_UNSIGNED_BYTE ? 1 : d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? 2 : 4;
+        d->count = (int32_t)v[0]; d->instances = (int32_t)v[1]; d->ibuf = t.ibuf + (uint64_t)v[2] * isz; d->base_vertex = (int32_t)v[3]; d->base_instance = (int32_t)v[4];
+    } else {
+        p_draw *d = rec; d->count = (int32_t)v[0]; d->instances = (int32_t)v[1]; d->first = (int32_t)v[2]; d->base_instance = (int32_t)v[3];
+    }
+    return 1;
+}
 static void dispatch(const p_dispatch *dp) {
     zskip_clear();
     if (!S.prog) { RED_ONCE(27, "派发前没有绑定程序"); return; }
@@ -10117,6 +10261,7 @@ static void dispatch(const p_dispatch *dp) {
         hm_put_id(&g_cps, &k, ps);
     }
     if (g_nupd) upd_guard_stage(cs, 5);   // TOTK: renamed uniform updates touched by this dispatch's storage / texture buffers
+    if (cs->builtin && dp->x == DISPATCH_INDIRECT) { RED_ONCE(32, "indirect dispatch of a built-in kernel"); return; }
     if (cs->builtin) {   // 内嵌计算核：n = uniform 缓冲 0，src = 存储缓冲 0，dst = 存储缓冲 1 | Built-in compute kernel: n = uniform buffer 0, src = storage buffer 0, dst = storage buffer 1
         const p_bind_buf *u = &S.ubo[5][0], *a0 = &S.ssbo[5][0], *a1 = &S.ssbo[5][1];
         if (g_nupd) { upd_guard(u->addr, u->addr + 16); upd_guard(a0->addr, a0->addr + (a0->size ? a0->size : 8)); upd_guard(a1->addr, a1->addr + (a1->size ? a1->size : 8)); }   // the built-in kernel reads its uniform from memory
@@ -10137,16 +10282,32 @@ static void dispatch(const p_dispatch *dp) {
     }
     const uint16_t *tg = cs->rf.tg;
     if (!tg[0]) { RED_ONCE(29, "计算着色器缺线程组大小反射"); return; }
+    /* Indirect dispatch (Bayonetta 3): the GPU reads the group counts from {x, y, z} at dp->caller. Shaders that read the
+       grid size see the counts in memory at replay, the closest value the host has (the GPU may still change them). */
+    void *ib = NULL; uint64_t io = 0; int indirect = dp->x == DISPATCH_INDIRECT;
+    if (indirect) {
+        if (g_nupd) upd_guard(dp->caller, dp->caller + 12);
+        if (!mtl_addr(dp->caller, 12, &ib, &io)) { RED_ONCE(31, "indirect dispatch arguments outside every memory pool"); return; }
+    }
     rp_end();
     int reuse = disp_reuse_on() && !pg_on();
     id<MTLComputeCommandEncoder> ce;
     if (reuse) ce = disp_enc();
     else { if (g_blit) { enc_b_end(g_blit); g_blit = nil; } ce = pg_compute(); }
     enc_c_pso(ce, ps);
-    g_dispatch_grid[0] = (uint32_t)dp->x; g_dispatch_grid[1] = (uint32_t)dp->y; g_dispatch_grid[2] = (uint32_t)dp->z;
+    if (indirect) memcpy(g_dispatch_grid, (const void *)(uintptr_t)dp->caller, 12);
+    else { g_dispatch_grid[0] = (uint32_t)dp->x; g_dispatch_grid[1] = (uint32_t)dp->y; g_dispatch_grid[2] = (uint32_t)dp->z; }
+    if (passdump()) {   // pass dumps: the dispatch, its grid and the storage buffers it can write
+        char b[600]; size_t o = 0;
+        for (int i = 0; i < 16 && o < sizeof b - 64; i++) if (S.ssbo[5][i].addr) o += snprintf(b + o, sizeof b - o, " s%d=%#llx+%llu", i, (unsigned long long)S.ssbo[5][i].addr, (unsigned long long)S.ssbo[5][i].size);
+        PD("C %llu cs=%.16s grid=%ux%ux%u%s tg=%ux%ux%u%s", g_stat_pass, cs->key, g_dispatch_grid[0], g_dispatch_grid[1], g_dispatch_grid[2], indirect ? " indirect" : "", tg[0], tg[1], tg[2], b);
+    }
     encode_args(ce, cs, 5, 0);
     if (atomic_load(&g_draw_log) > 0) MLOG("[uw] F%llu pass %llu dispatch cs %.8s grid %dx%dx%d", (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, cs->key, dp->x, dp->y, dp->z);
-    enc_c_dispatch(ce, MTLSizeMake(dp->x, dp->y, dp->z), MTLSizeMake(tg[0], tg[1], tg[2]));
+    if (!indirect) enc_c_dispatch(ce, MTLSizeMake(dp->x, dp->y, dp->z), MTLSizeMake(tg[0], tg[1], tg[2]));
+    else if ([(id)ce respondsToSelector:@selector(dispatchThreadgroupsWithIndirectBuffer:threadsPerThreadgroup:)])   // Metal 4: a GPU address
+        [(id<MTL4ComputeCommandEncoder>)ce dispatchThreadgroupsWithIndirectBuffer:((__bridge id<MTLBuffer>)ib).gpuAddress + io threadsPerThreadgroup:MTLSizeMake(tg[0], tg[1], tg[2])];
+    else [ce dispatchThreadgroupsWithIndirectBuffer:(__bridge id<MTLBuffer>)ib indirectBufferOffset:io threadsPerThreadgroup:MTLSizeMake(tg[0], tg[1], tg[2])];
     if (!reuse) enc_c_end(ce);
     bright_lut(cs);   // 3D 画面加亮：游戏算完调色表之后重写 | 3D picture brightening: rewrite after the game finishes computing the color lookup table
     /* TOTK_EXPO_LOG=<file> (diagnostic): after each dispatch of the exposure kernel (ae725063), copy floats 96..127 of its
@@ -10771,8 +10932,8 @@ void mtl_exec(const uint8_t *p) {
                 if (c->stencil_mask) { R.clear_s = 1; R.cs = (uint32_t)c->stencil; }
                 break;
             }
-            case OP_DRAW: g_exec_next = p + h.size; draw(a, NULL); g_exec_next = NULL; break;   // 前瞻起点 | Lookahead start point
-            case OP_DRAW_IDX: g_exec_next = p + h.size; draw(NULL, a); g_exec_next = NULL; break;
+            case OP_DRAW: if (!draw_resolve(&h, (void *)a, 0)) break; g_exec_next = p + h.size; draw(a, NULL); g_exec_next = NULL; break;   // 前瞻起点 | Lookahead start point
+            case OP_DRAW_IDX: if (!draw_resolve(&h, (void *)a, 1)) break; g_exec_next = p + h.size; draw(NULL, a); g_exec_next = NULL; break;
             // 状态没变就不置脏（游戏每次绘制前常重发同值的程序 / 状态块 / 顶点格式；脏标志只决定是否重取管线 / 深度模板对象，值相同则对象相同）
             // Do not mark dirty if the state did not change (the game often re-sends the same program / state block / vertex format before each draw; the dirty flag only decides whether to re-fetch the pipeline / depth-stencil object, and equal values mean the same object)
             case OP_SCISSOR: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
@@ -11282,7 +11443,9 @@ static int fps_overlay_prepare(int slot, MTLViewport vp, MTLViewport *ovp, float
     int scale = fps_overlay_scale(vp.height);
     uint64_t mfx_at = atomic_load(&g_mfxup_last), gen_at = atomic_load(&g_mfxi_last), cur = atomic_load(&g_cur_frame);   // the last game frame MetalFX did the upscale (" MFX") / an interpolated frame was shown ("+50")
     int gen = gen_at && cur - gen_at < 30 ? fps_overlay_gen_value() : 0;
-    fps_overlay_info info = {fps_overlay_value(), (int)lround(vp.width), (int)lround(vp.height), mfx_at && cur - mfx_at < 30, gen > 0 ? gen : 0, atomic_load(&g_pic_big)};
+    uint64_t src = atomic_load(&g_pic_src);
+    fps_overlay_info info = {fps_overlay_value(), (int)lround(vp.width), (int)lround(vp.height), mfx_at && cur - mfx_at < 30, gen > 0 ? gen : 0, atomic_load(&g_pic_big),
+                             (int)(src & 0xffffffff), (int)(src >> 32)};
     if (hud_compact()) { char text[96]; fps_overlay_text(&info, text, sizeof text); hud_publish(HUD_FPS, text, 0); return 0; }   // shown in the window's corner panel
     pthread_mutex_lock(&mu);
     if (g_fps_key[slot].scale != scale || memcmp(&g_fps_key[slot].info, &info, sizeof info)) {
@@ -11467,6 +11630,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
         cx = crop[0]; cy = crop[1]; cw = crop[2]; ch = crop[3];
     }
     if (crop) atomic_store(&g_pic_big, cw > 1920 || ch > 1080);   // a game frame (interpolated frames come without the crop)
+    if (crop) atomic_store(&g_pic_src, (uint64_t)ch << 32 | cw);   // the game frame's size, for the HUD (BY3_HUD_RENDER)
     present_pipeline(dst.pixelFormat);
     double dw = dst.width, dh = dst.height, s = fmin(dw / cw, dh / ch);
     MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
@@ -12148,9 +12312,20 @@ static void *link_main(void *arg) {   // 显示节拍线程：切到节拍模式
     g_link_started = 0;
     return NULL;
 }
+/* DM_PRESENT_LINK_FALLBACK=1 (Bayonetta 3's launcher; default off, TOTK unchanged): when the display link goes silent while
+   the app is active (macOS pauses CAMetalDisplayLink for a window it believes covered, e.g. full screen on another
+   monitor while another app has focus), present in classic mode instead of dropping frames, so the picture keeps moving;
+   the link is tried again once the window has been reported visible for 10 s. */
+static _Atomic int g_link_fallback; static _Atomic uint64_t g_link_fallback_at;
+static int link_fallback_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_PRESENT_LINK_FALLBACK"); on = e && !strcmp(e, "1"); } return on; }
 static void link_sync(void) {   // 游戏出图线程每帧调：把节拍对象的状态对齐到 g_dm_present_link 与省电模式（运行中可改） | Called every frame by the game's present thread: aligns the display link object's state to g_dm_present_link and the power-saving mode (can change at run time)
     static int applied; int want = g_dm_present_link;
     if (want < 0 || want > 2) { g_dm_present_link = applied == 3 ? 1 : applied; return; }
+    if (want && atomic_load(&g_link_fallback)) {
+        int visible = runtime_front_window_visible() != 0;   // unknown (-1) counts as visible
+        if (visible && now_ns() - atomic_load(&g_link_fallback_at) > 10000000000ull) { atomic_store(&g_link_fallback, 0); MLOG("[present] display link tried again (window visible)"); }
+        else want = 0;
+    }
     if (want && mtl_fps_target() == 30) want = 3;   // 省电模式：显示节拍 30 Hz | Power-saving mode: display link at 30 Hz
     if (want == applied) return;
     g_link_mode = want;
@@ -12343,6 +12518,9 @@ void mtl_present_wait(uint64_t tk) {
         if (!g_stall_t0) { g_stall_t0 = last ? last : now; g_stall_drop = 0; g_stall_red = 0; g_stall_logged = 0; g_stall_n++; }
         g_stall_drop += n;
         int active = dm_focus_now() == 1; uint64_t since = dm_focus_in_since(), from = g_stall_t0 > since ? g_stall_t0 : since;
+        if (active && link_fallback_on() && !atomic_load(&g_link_fallback)) {
+            atomic_store(&g_link_fallback, 1); atomic_store(&g_link_fallback_at, now);
+            MLOG("[present] display link silent while active: presenting in classic mode (DM_PRESENT_LINK_FALLBACK)"); }
         if (active && !g_stall_logged && now - from >= STALL_NS) { g_stall_logged = 1;
             MLOG("显示节拍 %.0f ms 没回调（激活中，%s）：丢掉排队未上屏的 %llu 帧，游戏继续（第 %llu 段；节拍回来自动照常）", (now - from) / 1e6, window_seen(), (unsigned long long)n, (unsigned long long)g_stall_n); }
         if (active && !g_stall_red && now - from >= STALL_RED_NS) { g_stall_red = 1; MLOG("【红】显示节拍激活中连续 %.1f 秒没回调，出图全靠兜底丢帧，画面不动（%s）", (now - from) / 1e9, window_seen()); }

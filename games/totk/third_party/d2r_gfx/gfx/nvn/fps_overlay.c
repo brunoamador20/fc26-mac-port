@@ -153,7 +153,10 @@ void fps_overlay_text(const fps_overlay_info *info, char *text, size_t n) {
     if (info->gen > 0 && info->fps >= 0) snprintf(gen, sizeof gen, "+%d", info->gen > 999 ? 999 : info->gen);   // interpolated frames a second (key 2)
     // MetalFX did the upscale in the last frames (key 3 selects the manual MetalFX mode); 2K: true 2K output.
     // The whole line in the system font, so switching MetalFX does not switch the font.
-    snprintf(text, n, "FPS %s%s  %s%s%s", fps, gen, ss, info->mfx ? TOTK_UI("  MetalFX已开启", "  MetalFX on") : "", info->big ? "  2K" : "");
+    static int render = -1; if (render < 0) { const char *e = getenv("BY3_HUD_RENDER"); render = e && !strcmp(e, "1"); }
+    char rs[16] = "";
+    if (render && info->render_w > 0) { size_text(rs, sizeof rs - 3, info->render_w, info->render_h); strcat(rs, " > "); }
+    snprintf(text, n, "FPS %s%s  %s%s%s%s", fps, gen, rs, ss, info->mfx ? TOTK_UI("  MetalFX已开启", "  MetalFX on") : "", info->big ? "  2K" : "");
 }
 
 void fps_overlay_raster(const fps_overlay_info *info, int scale, uint8_t *out, int *box_w, int *box_h) {
