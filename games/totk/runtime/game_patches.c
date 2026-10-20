@@ -94,6 +94,11 @@ static uint32_t adrp_reg(unsigned rd, uint64_t site, uint64_t target) {
     return 0x90000000u | ((imm & 3u) << 29) | ((imm >> 2) << 5) | (rd & 31u);
 }
 static uint32_t adrp_x9(uint64_t site, uint64_t target) { return adrp_reg(9, site, target); }
+static uint32_t branch_to(uint64_t site, uint64_t target) {   /* b <target>, both offsets in main */
+    int64_t delta = (int64_t)target - (int64_t)site;
+    if ((delta & 3) || delta < -(1 << 27) || delta >= (1 << 27)) runtime_fail("patch branch outside range");
+    return 0x14000000u | ((uint32_t)(delta >> 2) & 0x3ffffffu);
+}
 
 /* iOS cannot write code pages at run time: tools/export (TOTK_EXPORT_IOS, runtime/loader.c) runs these same patches on the
    Mac and the patched text is embedded in the app. On the device the loader only checks that the patched words are there. */
@@ -422,6 +427,39 @@ static void patch_pchtxt(Module *m) {
     fprintf(stderr, "[totk] TOTK_PCHTXT %s: %u patches, %u bytes in main (build id %s)\n", path, count, bytes, want);
 }
 
+/* High frame rates (#61, sky-island trampolines): main+0xce3fec (1.0.0) compares X+0x28 with 100 and, when greater,
+   scales the velocity Link takes over from the ground body by 0.1. X is the game's time object ([GOT]+0xc8; X+0x38 the
+   30 Hz ratio, X+0x28 = 30 / (ratio * time scale)); at the shipping 30 Hz the check means "time slowed below 0.3", but
+   above 100 FPS it fires with time running normally and the trampolines stop bouncing. A veneer in main's text padding
+   (+128, after the 1.2.1 ultrawide veneers) compares X+0x28 * X+0x38 = 30 / time scale instead: the same value at 30 Hz,
+   independent of the frame rate. Same code in all four versions (1.4.3: game_patches_v143.c). TOTK_HIGHFPS_FIX=0 keeps
+   the original check (Mac). */
+static void patch_slowmo_bounce(Module *m) {
+    const char *e = getenv("TOTK_HIGHFPS_FIX");
+    if (!CODE_PATCHED_AT_BUILD && e && !strcmp(e, "0")) return;
+    const uint64_t site = GAME_ADDR(0xce3fec), stub = ((m->text_end + 15) & ~15ULL) + 128;
+    if (stub + 20 > ((m->text_end + 15) & ~15ULL) + 0x400) runtime_fail("bounce veneer layout");
+    static const uint32_t original[3] = {0xbd402900,   /* ldr s0, [x8, #0x28] */
+                                         0x52a85908,   /* mov w8, #0x42c80000 (100.0) */
+                                         0x1e270101};  /* fmov s1, w8 */
+    if (!CODE_PATCHED_AT_BUILD) {
+        for (unsigned i = 0; i < 3; i++) {
+            uint32_t w; memcpy(&w, m->base + site + 4 * i, 4);
+            if (w != original[i]) runtime_fail("bounce check: original instruction mismatch");
+        }
+        for (unsigned i = 0; i < 20; i++) if (m->base[stub + i]) runtime_fail("bounce veneer padding not empty");
+    }
+    const uint32_t veneer[5] = {0xbd402900,   /* ldr s0, [x8, #0x28]: X+0x28 */
+                                0xbd403901,   /* ldr s1, [x8, #0x38]: the 30 Hz ratio (the next original instruction sets s1 again) */
+                                0x1e210800,   /* fmul s0, s0, s1 */
+                                0x52a85908,   /* mov w8, #0x42c80000: the original 100.0 */
+                                branch_to(stub + 16, site + 8)};
+    for (unsigned i = 0; i < 5; i++) put_word(m, stub + 4 * i, veneer[i], "bounce veneer");
+    put_word(m, site, branch_to(site, stub), "bounce check");
+    fprintf(stderr, "[totk] %s high-FPS fix: trampoline slow-motion check uses the time scale, veneer +%#llx\n",
+            TOTK_GAME_VERSION, (unsigned long long)stub);
+}
+
 void runtime_game_patches(Module *m) {
     runtime_survey_init(m);
     const size_t n = sizeof fps60_sites / sizeof fps60_sites[0];
@@ -431,6 +469,7 @@ void runtime_game_patches(Module *m) {
            step and the 60 FPS patch), so the phone is not held at the shipping 30 fps; here we only verify the words. */
         patch_realtime(m);
         patch_render_res(m);
+        patch_slowmo_bounce(m);
         for (size_t i = 0; i < n; i++) {
             uint32_t word;
             memcpy(&word, m->base + fps60_sites[i].offset, sizeof word);
@@ -448,6 +487,7 @@ void runtime_game_patches(Module *m) {
     else fprintf(stderr,"[totk] real-time frame step off (TOTK_REALTIME=0)\n");
     patch_render_res(m);
     patch_output_res(m);
+    patch_slowmo_bounce(m);
     patch_trap(m);
 #if defined(TOTK_GAME_V121)
     { static const uint64_t sites[] = {0xcb4b10, 0x12521cc, 0x19b36f0, 0x1ecdf68};   /* camera x2, viewport x2 (aspect_patch.h) */
