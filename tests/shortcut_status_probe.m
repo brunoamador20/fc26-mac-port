@@ -63,6 +63,9 @@ int main(int argc, const char **argv) { @autoreleasepool {
     press(20); tick(); expect(panel, @"Picture: MetalFX 2K");
     press(20); tick(); expect(panel, @"Picture: native 2K");
     press(20); tick(); expect(panel, @"Picture: off");
+    expect(panel, @"Edge smoothing (MetalFX Temporal): off");
+    press(23); tick(); expect(panel, @"Edge smoothing (MetalFX Temporal): on");
+    press(23); tick(); expect(panel, @"Edge smoothing (MetalFX Temporal): off");
     /* Startup/diagnostic paths can set the canvas without a key press. */
     shortcut_test_output_size(3840, 2160); tick(); expect(panel, @"Picture: native 3840×2160");
     shortcut_test_output_size(2560, 1440);
