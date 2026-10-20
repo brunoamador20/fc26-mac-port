@@ -524,7 +524,41 @@ def step_code(tree, game, keys, env, logs, *, version="v0", mod=None):
     report_path.write_text(json.dumps(report, indent=2) + '\n')
 
 
-def step_data(tree, game, keys, logs, *, firmware=None, shared_fonts=None):
+HEAPDEF = 'System/HeapSize/Product.Nin_NX_NVN.HeapDef.byml.zs'
+
+
+def mod_heapdef(mod):
+    """The mod's replacement of the heap-size table, when it has one: the 2K overlay is then built on top of it, so the
+    mod's own heap sizes and the 2K texture heaps both hold. The player's manifest must leave that file to the app."""
+    path = mod / 'romfs' / HEAPDEF if mod else None
+    return path if path and path.is_file() else None
+
+
+def check_mod_overlays(tree, mod, version):
+    """A mod folder may hold files the app replaces itself. They are not a build problem - the player's manifest leaves
+    such paths out by itself (games/totk/scripts/make_mod_manifest.py), so the app's version is the one loaded - but say
+    so, instead of leaving somebody wondering why the mod's version of a file does nothing. The heap table is the one the
+    build folds in (see mod_heapdef), so it is not reported."""
+    if not (mod and (mod / 'romfs').is_dir()):
+        return []
+    replaced = set()
+    folders = [tree / f'extracted/{version}/romfs-patches']
+    folders += sorted(p for p in (tree / f'extracted/{version}/romfs-patches-out').glob('*') if p.is_dir())
+    for folder in folders:
+        manifest = folder / 'manifest.tsv'
+        if manifest.is_file():
+            for line in manifest.read_text().splitlines():
+                name = line.split('\t', 1)[0]
+                if name and not name.startswith('#'):
+                    replaced.add(name)
+    clashes = sorted(name for name in replaced if name != HEAPDEF and (mod / 'romfs' / name).is_file())
+    if clashes:
+        say(f"1/4 code: {mod.name}/romfs also holds {clashes[0]}, which the app replaces itself; a player's manifest "
+            f"leaves it out, so the app's version of it is the one loaded")
+    return clashes
+
+
+def step_data(tree, game, keys, logs, *, firmware=None, shared_fonts=None, mod=None):
     py = tree / '.venv/bin/python'
     romfs = tree / 'extracted/v0/romfs'
     index = romfs / 'index.json'
@@ -563,9 +597,12 @@ def step_data(tree, game, keys, logs, *, firmware=None, shared_fonts=None):
     if not (tree / 'extracted/v0/romfs-patches/manifest.tsv').exists():
         say('2/4 data: RomFS overlays (quick-menu capture timing, game-over retry)')
         run([py, 'scripts/make_romfs_patches.py'], logs / 'romfs_patches.log', cwd=tree)
-    if not (tree / 'extracted/v0/romfs-patches-out/2560x1440/manifest.tsv').exists():
-        say('2/4 data: RomFS overlay for the 2560x1440 output (key 3 in the game)')
-        run([py, 'scripts/make_output_res_overlay.py', '2560x1440'], logs / 'output_res_overlay.log', cwd=tree)
+    heapdef = mod_heapdef(mod)
+    if heapdef or not (tree / 'extracted/v0/romfs-patches-out/2560x1440/manifest.tsv').exists():
+        say('2/4 data: RomFS overlay for the 2560x1440 output (key 3 in the game)'
+            + (' on top of the mod\'s heap sizes' if heapdef else ''))
+        run([py, 'scripts/make_output_res_overlay.py', '2560x1440', *(['--heapdef', heapdef] if heapdef else [])],
+            logs / 'output_res_overlay.log', cwd=tree)
 
 
 def build_hactool(tree, logs):
@@ -668,7 +705,7 @@ static FILE *mng_open_base(const char *path) {
     return source/'hactool'
 
 
-def step_update_data(tree, game, update, keys, logs, *, version='v112'):
+def step_update_data(tree, game, update, keys, logs, *, version='v112', mod=None):
     expected = VERSIONS[version]
     folder = tree/f'extracted/{version}/romfs'
     index = folder/'index.json'
@@ -690,11 +727,16 @@ def step_update_data(tree, game, update, keys, logs, *, version='v112'):
         report = json.loads(index.read_text())
         check(f'{expected["display_version"]} RomFS', report['romfs_sha256'], expected['romfs']['sha256'])
         check(f'{expected["display_version"]} RomFS size', report['romfs_size'], expected['romfs']['size'])
+    heapdef = mod_heapdef(mod)
+    if heapdef:
+        say(f'2/4 update: the overlays are built on the mod\'s heap sizes ({heapdef})')
     steps = [('make_romfs_patches.py', []), ('make_output_res_overlay.py', ['2560x1440'])]
     if version == 'v143':   # a TOTK_RENDER_RES scene above 1600x900 grows the same heaps (runtime/game_patches_v143.c)
         steps += [('make_output_res_overlay.py', [canvas, '--scene', scene])
                   for canvas in ('1920x1080', '2560x1440') for scene in ('1920x1080', '2560x1440')]
     for i, (script, arguments) in enumerate(steps):
+        if heapdef and script == 'make_output_res_overlay.py':   # every variant of the file keeps the mod's heap sizes
+            arguments = [*arguments, '--heapdef', heapdef]
         run([tree/'.venv/bin/python', 'scripts/'+script, *arguments, '--version', version],
             logs/(version+'-'+script+(f'-{i}' if i > 1 else '')+'.log'), cwd=tree)
 
@@ -1273,9 +1315,11 @@ def main(argv):
     step_code(tree, game, keys, env, logs, mod=None if update else mod)
     if update:
         step_code(tree, update, keys, env, logs, version=version, mod=mod)   # a mod is for the updated main, not for 1.0.0
-    step_data(tree, game, keys, logs, firmware=firmware, shared_fonts=shared_fonts)
+    step_data(tree, game, keys, logs, firmware=firmware, shared_fonts=shared_fonts, mod=None if update else mod)
     if update:
-        step_update_data(tree, game, update, keys, logs, version=version)
+        step_update_data(tree, game, update, keys, logs, version=version, mod=mod)
+    if mod:
+        check_mod_overlays(tree, mod, version)
     step_shaders(tree, logs, version=version)
     step_shader_libs(tree, logs, version=version)
     step_binary(tree, game, keys, env, logs, version=version)
