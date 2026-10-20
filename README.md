@@ -155,13 +155,16 @@ python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.
   --mod "/path/to/The Second Quest 1.4.3"
 ```
 
-`--mod` takes the mod folder as it comes (its `exefs/` code patches and its `romfs/`, which is installed separately as
-described above; the build only reads `exefs/`). Why a build flag at all: the app has no module loader - at start it maps
-the three code modules it was built from (main, sdk, subsdk0), rewritten for Apple silicon and bound by SHA-256, and
-nothing in it reads a mod's `exefs/` the way Ryujinx or a Switch does. So the code side goes in one step earlier:
-`--mod` merges the mod's main-module patches into the verified retail module before it is rewritten. RomFS (data) mods
-are unaffected and still load at start. Several mods with code patches: merge them in the mod manager first (TKMM's
-output is one folder with one `exefs/` and one `romfs/`), then build with `--mod <that folder>`.
+`--mod` takes the mod folder as it comes, `exefs/` and `romfs/` together (either half alone works too). Why a build
+flag at all: the app has no module loader - at start it maps the three code modules it was built from (main, sdk,
+subsdk0), rewritten for Apple silicon and bound by SHA-256, and nothing in it reads a mod's `exefs/` the way Ryujinx or
+a Switch does. So the code side goes in one step earlier: `--mod` merges the mod's main-module patches into the verified
+retail module before it is rewritten. The data side needs no new loader either, but the build now installs it for you:
+at the end it copies the mod's `romfs/` into `~/Library/Application Support/MacNativeGames/TOTK/mods/<version>`
+(unchanged files skipped, files the mod dropped removed) and writes the manifest against the app it just built
+(`make_mod_manifest.py`), so the app plays with the mod as it stands - no second command. Several mods with code
+patches: merge them in the mod manager first (TKMM's output is one folder with one `exefs/` and one `romfs/`), then
+build with `--mod <that folder>`.
 The patches are applied to the verified retail main of the version
 being built - a `.pchtxt` as the game's own patch loader reads it, a `.ips` / `.ips32` with the emulator offset
 convention - after checking that no edit lands on a site the app patches itself, that no two patches change the same
@@ -256,7 +259,7 @@ Language: the game and the launcher's own text (startup screen, shader warm-up p
 - Supports base 1.0.0, or base plus the separate 1.1.2, 1.2.1 or 1.4.3 update NSP/NSZ. Other versions, DLC, combined packages, compressed base games (NSZ/XCZ) and personalized tickets remain unsupported. On iPhone and iPad only 1.4.3 has been tested; places no player has reported can show missing objects, and on an iPhone 14 iOS can close the game when memory runs out (see [iPhone and iPad](#iphone-and-ipad)).
 - No online features, no amiibo.
 - New shaders can cause compilation stutters. Cache reuse reduces these, but does not guarantee stutter-free gameplay.
-- The 148 automated tests cover generated container/update fixtures, relocation formats, work-folder isolation, packaging, desktop migration, shader extraction (BNSH, agl `.sharcb` and game-module shaders), the shared shader list and the players' contribution file, first-import cache preservation, the Metal toolchain lookup, mod code-patch merging (IPS / IPS32 / pchtxt against synthetic NSO modules, with the reserved-site list read out of the C sources and the file named by its module or build id), the RomFS manifest that leaves the app's own overlay files out by itself and 27 native RomFS path cases. GitHub Actions is configured to run the source tests and the native path parser under the undefined-behavior sanitizer, without game data or keys. A complete Mac build also passed with a local XCI-derived NSP fixture and generated common ticket. An independent retail base NSP and gameplay from that input have not yet been tested.
+- The 170 automated tests cover generated container/update fixtures, relocation formats, work-folder isolation, packaging, desktop migration, shader extraction (BNSH, agl `.sharcb` and game-module shaders), the shared shader list and the players' contribution file, first-import cache preservation, the Metal toolchain lookup, mod code-patch merging (IPS / IPS32 / pchtxt against synthetic NSO modules, with the reserved-site list read out of the C sources and the file named by its module or build id), the build's own mod install (RomFS copied into the mods folder, dropped files removed and hand-made ones kept, the real `make_mod_manifest.py` run against a fake RomFS), the RomFS manifest that leaves the app's own overlay files out by itself and 27 native RomFS path cases. GitHub Actions is configured to run the source tests and the native path parser under the undefined-behavior sanitizer, without game data or keys. A complete Mac build also passed with a local XCI-derived NSP fixture and generated common ticket. An independent retail base NSP and gameplay from that input have not yet been tested.
 
 ## How it works
 
@@ -449,7 +452,7 @@ python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.
   --mod "/路径/The Second Quest 1.4.3"
 ```
 
-`--mod` 原样接收模组文件夹（它的 `exefs/` 代码补丁，以及按上文单独安装的 `romfs/`；构建只读 `exefs/`）。为什么要一个构建参数：App 没有模块加载器——启动时它映射的是构建时的那三个代码模块（main、sdk、subsdk0），已经改写为 Apple 芯片版本并按 SHA-256 绑定，里面没有任何东西会像 Ryujinx 或 Switch 那样去加载模组的 `exefs/`。所以代码这一半只能在更早一步进去：`--mod` 在改写之前把模组的主模块补丁合并进核对过的原版模块；RomFS（数据）部分不受影响，仍在启动时加载。多个带代码补丁的模组建议先在模组管理器里合并（TKMM 的输出就是一个文件夹，一套 `exefs/`、一套 `romfs/`），再用 `--mod <那个文件夹>` 构建。
+`--mod` 原样接收模组文件夹，`exefs/` 和 `romfs/` 一起（只有其中一半也可以）。为什么要一个构建参数：App 没有模块加载器——启动时它映射的是构建时的那三个代码模块（main、sdk、subsdk0），已经改写为 Apple 芯片版本并按 SHA-256 绑定，里面没有任何东西会像 Ryujinx 或 Switch 那样去加载模组的 `exefs/`。所以代码这一半只能在更早一步进去：`--mod` 在改写之前把模组的主模块补丁合并进核对过的原版模块。数据这一半也不需要新的加载器，但构建现在会替你装好：结束时把模组的 `romfs/` 复制到 `~/Library/Application Support/MacNativeGames/TOTK/mods/<版本>`（未变化的文件跳过，模组已删掉的文件移除），并对着刚构建好的 App 生成清单（`make_mod_manifest.py`），所以构建出来的 App 直接就是这个模组的状态，不用再敲第二条命令。多个带代码补丁的模组建议先在模组管理器里合并（TKMM 的输出就是一个文件夹，一套 `exefs/`、一套 `romfs/`），再用 `--mod <那个文件夹>` 构建。
 
 补丁只打在当前版本、核对过的原版 main 上：`.pchtxt` 按游戏自带补丁加载器的规则读，`.ips` / `.ips32` 按模拟器的偏移约定（含 0x100 字节 NSO 头）读；打之前会检查没有任何改动落在 App 自己打补丁的位置、没有两个补丁改同一批字节、且每处改动都在 main 自己的段内。合并后的模块再改写为 Apple 芯片版本，App 按它的 SHA-256 绑定。`--work` 里的 `analysis/phase12-validation.json`（1.0.0）或 `analysis/<version>-port/phase12-validation.json` 在 `mod_exefs` 下记录模组目录、每个补丁文件的 SHA-256 和它改动的地址。模组附带的额外代码模块（`subsdk9` 这类 hook 框架的模块）不会被加载，构建会明确提示：这样的模组保留主模块补丁和整个 RomFS，但依赖那个模块的那部分代码改动不会生效。逐步说明见 [docs/mods.md](docs/mods.md)。
 
@@ -516,7 +519,7 @@ west = y
 - 着色器缓存：`~/Library/Application Support/MacNativeGames/TOTK/shader-cache`（删掉会全部重新翻译）
 - 公共清单里还没有的着色器：`~/Library/Application Support/MacNativeGames/TOTK/shader-list-contribution.txt`
 - 日志：`~/Library/Logs/MacNativeGames/totk.log`（上一次运行：`totk.previous.log`）
-- 模组：`~/Library/Application Support/MacNativeGames/TOTK/mods/<v0|v112|v121|v143>`。其中的 `manifest.tsv` 以制表符分隔列出模组替换或新增的每个 RomFS 文件：路径、大小、SHA-256 和原文件的 SHA-256（游戏里没有的新文件写 `-`）；文件按相同路径存放。可用 `python3 games/totk/scripts/make_mod_manifest.py <模组文件夹> --app <Tears of the Kingdom.app>` 生成，游戏里没有的文件会作为新增文件写入；只是大小写和游戏里的路径不同的会报错（路径区分大小写）。模组的 RomFS（数据）部分在游戏运行时加载。模组对主模块的代码补丁（`exefs/*.ips`、`*.ips32`、`*.pchtxt`）改用 `--mod <模组文件夹>` 在构建时合并，因为代码模块在构建时已改写为 Apple 芯片版本并按 SHA-256 绑定；会落在 App 自己打补丁的位置（60 帧、分辨率、超宽屏、布料）上的补丁会被拒绝。模组附带的额外代码模块（`subsdk9`）不会被加载（App 跑的是 main、sdk、subsdk0），构建会明确提示。游戏启动时校验所有列出的文件，不一致即停止；游戏运行中模组文件被改动也会停止。删除该文件夹即可不带模组运行。详细步骤见 [docs/mods.md](docs/mods.md)。
+- 模组：`~/Library/Application Support/MacNativeGames/TOTK/mods/<v0|v112|v121|v143>`。其中的 `manifest.tsv` 以制表符分隔列出模组替换或新增的每个 RomFS 文件：路径、大小、SHA-256 和原文件的 SHA-256（游戏里没有的新文件写 `-`）；文件按相同路径存放。可用 `python3 games/totk/scripts/make_mod_manifest.py <模组文件夹> --app <Tears of the Kingdom.app>` 生成，游戏里没有的文件会作为新增文件写入；只是大小写和游戏里的路径不同的会报错（路径区分大小写）。模组的 RomFS（数据）部分在游戏运行时加载（带 `--mod` 构建时会自动复制到该目录并生成清单）。模组对主模块的代码补丁（`exefs/*.ips`、`*.ips32`、`*.pchtxt`）改用 `--mod <模组文件夹>` 在构建时合并，因为代码模块在构建时已改写为 Apple 芯片版本并按 SHA-256 绑定；会落在 App 自己打补丁的位置（60 帧、分辨率、超宽屏、布料）上的补丁会被拒绝。模组附带的额外代码模块（`subsdk9`）不会被加载（App 跑的是 main、sdk、subsdk0），构建会明确提示。游戏启动时校验所有列出的文件，不一致即停止；游戏运行中模组文件被改动也会停止。删除该文件夹即可不带模组运行。详细步骤见 [docs/mods.md](docs/mods.md)。
 - 按键图标：`python3.14 games/totk/scripts/make_button_icons.py <模组文件夹> --app <Tears of the Kingdom.app> --style keyboard`（或 `--style xbox`）生成一个模组，把游戏按键提示里的 Switch 图标换成 Mac 键盘按键（A B X Y 对应 J K I U、W A S D、方向键等）或 Xbox 按键（按 Switch 位置排列的 B A Y X、LB/RB、LT/RT、Menu/View）。它用你自己的 RomFS 重绘图标字体（项目里不含任何游戏内容）并写好 manifest；文件夹里已有的文件会保留。需要 Python 3.14 和 `python3.14 -m pip install fonttools`。文件夹里已有字体包（别的模组的，或者上次生成的）时会停下，加 `--replace` 才覆盖，换风格也要加它。Xbox 图标对应默认的按位置映射；设了 `TOTK_FACE_BUTTONS=label` 或在 `controls.txt` 里改过面键时会对不上。删除字体文件后运行 `make_mod_manifest.py` 即可恢复。以固定图片显示的提示（部分教程动画）仍是 Switch 图标。
 
 ## 已知问题

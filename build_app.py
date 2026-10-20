@@ -26,7 +26,9 @@ signature, or signed again by a dump tool once all four code modules match, shar
      translated into a bundled seed, ready for GPU warm-up even with an empty cache on the first launch
   4. the game binary and either a macOS app bundle or an unsigned iPhone/iPad IPA (large game data is cloned when possible);
      for the Mac the startup shaders are then compiled once into this Mac's Metal cache (about 2 minutes on an M4), so the
-     first start does not compile them in the background (games/totk/tools/warm_metal_cache.m)
+     first start does not compile them in the background (games/totk/tools/warm_metal_cache.m); with --mod the mod's RomFS
+     files are copied into the player's mod folder for this version and its manifest is written
+     (games/totk/scripts/make_mod_manifest.py), so the build is playable with the mod as it stands
 
 Every intermediate file is in the work folder (default: "<game file folder>/TOTK_build"); a second run reuses
 what is already done and correct. Mac saves, shader cache and logs go to the user's Library folders; iOS keeps saves
@@ -556,6 +558,90 @@ def check_mod_overlays(tree, mod, version):
         say(f"1/4 code: {mod.name}/romfs also holds {clashes[0]}, which the app replaces itself; a player's manifest "
             f"leaves it out, so the app's version of it is the one loaded")
     return clashes
+
+
+def mods_folder(version):
+    """<data>/mods/<version>: where the launcher points the game for a player's RomFS mods (runtime/romfs.c,
+    TOTK_ROMFS_MODS)."""
+    return Path.home() / 'Library/Application Support/MacNativeGames' / APPS['totk'][2] / 'mods' / version
+
+
+def manifest_paths(path):
+    """The RomFS paths a manifest.tsv lists (none when there is no manifest)."""
+    names = set()
+    if path.is_file():
+        for line in path.read_text(errors='replace').splitlines():
+            name = line.split('\t', 1)[0]
+            if name and not name.startswith('#'):
+                names.add(name)
+    return names
+
+
+def copy_mod_files(source, dest):
+    """Copy a mod's RomFS tree into the player's mod folder, skipping the files already copied (same size and
+    modification time): returns (copied, already there)."""
+    copied = kept = 0
+    for file in sorted(source.rglob('*')):
+        if not file.is_file():
+            continue
+        target = dest / file.relative_to(source)
+        if target.is_file() and target.stat().st_size == file.stat().st_size \
+                and int(target.stat().st_mtime) == int(file.stat().st_mtime):
+            kept += 1
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(file, target)
+        copied += 1
+    return copied, kept
+
+
+def remove_stale_mod_files(dest, names):
+    """Delete what an earlier manifest listed and this mod no longer holds, and nothing else: a file the player put
+    there by hand is not in the manifest, so it stays. Returns how many were removed."""
+    removed = 0
+    for name in sorted(names):
+        parts = Path(name).parts
+        if not parts or Path(name).is_absolute() or '..' in parts:
+            continue
+        path = dest / name
+        if path.is_file():
+            path.unlink()
+            removed += 1
+            parent = path.parent
+            while parent != dest and parent.is_dir() and not any(parent.iterdir()):
+                parent.rmdir()
+                parent = parent.parent
+    return removed
+
+
+def install_mod_romfs(mod, tree, version, out, py, logs):
+    """Copy a mod's RomFS files into the player's mod folder for this version and write its manifest
+    (scripts/make_mod_manifest.py), so a build with --mod plays with the mod as it stands - no second command. The
+    manifest leaves out the paths the app replaces itself, the heap table included: mod_heapdef (see above) folded its
+    sizes into the 2K overlay, so the app's table is the one to load."""
+    source = mod / 'romfs'
+    dest = mods_folder(version)
+    if not source.is_dir():
+        say(f'4/4 app: {mod.name} has no romfs/, so the mod folder {dest} is left as it is')
+        return None
+    present = {path.relative_to(source).as_posix() for path in source.rglob('*') if path.is_file()}
+    previous = manifest_paths(dest / 'manifest.tsv')
+    copied, kept = copy_mod_files(source, dest)
+    removed = remove_stale_mod_files(dest, previous - present)
+    say(f'4/4 app: {mod.name}\'s RomFS files are in {dest} ({copied} copied'
+        + (f', {kept} already there' if kept else '') + (f', {removed} no longer in the mod removed' if removed else '')
+        + ')')
+    try:
+        run([py, 'scripts/make_mod_manifest.py', dest, '--app', out, '--version', version],
+            logs / f'mod-manifest-{version}.log', cwd=tree)
+    except BuildError as e:
+        raise BuildError(f'the app itself is built, but {dest} would stop the game at start (fix the mod folder, then '
+                         f'write the manifest again with scripts/make_mod_manifest.py): {e}')
+    lines = [line for line in (logs / f'mod-manifest-{version}.log').read_text(errors='replace').splitlines()
+             if line.strip()]
+    for line in (lines[:-1][:3] + lines[-1:]) if len(lines) > 1 else lines:
+        say(f'   {line}')
+    return dest
 
 
 def step_data(tree, game, keys, logs, *, firmware=None, shared_fonts=None, mod=None):
@@ -1196,7 +1282,8 @@ def parse_args(argv):
     ap.add_argument('--work', type=Path, help='work folder (default: TOTK_build next to the game file)')
     ap.add_argument('--mod', type=Path, metavar='FOLDER',
                     help='a mod folder prepared before the build: its exefs/ IPS / IPS32 / pchtxt patches for the main '
-                         'module are merged into the code before it is rewritten (docs/mods.md)')
+                         'module are merged into the code before it is rewritten, and its romfs/ files are installed '
+                         'into the player\'s mod folder with a fresh manifest (docs/mods.md)')
     ap.add_argument('--shader-cache', type=Path, help=argparse.SUPPRESS)   # removed: the seed comes from the game data and the shared list
     ap.add_argument('--no-shader-reminder', action='store_true', help='iOS: do not install the Mac agent that asks, while an iPhone / iPad with the game is connected, to send the shaders the shared list lacks')
     fonts = ap.add_mutually_exclusive_group()
@@ -1223,9 +1310,10 @@ def main(argv):
     if update and (not update.is_file() or input_kind(update) not in ('nsp', 'nsz')):
         raise BuildError('--update must be a separate cumulative NSP or NSZ')
     mod = args.mod.expanduser().resolve() if args.mod else None
-    if mod and not (mod / 'exefs').is_dir():
-        raise BuildError(f'--mod expects a mod folder prepared before the build (its files under exefs/ and romfs/): '
-                         f'{mod} has no exefs/ folder. See docs/mods.md.')
+    if mod and not ((mod / 'exefs').is_dir() or (mod / 'romfs').is_dir()):
+        raise BuildError(f'--mod expects a mod folder prepared before the build (its files under exefs/ and/or romfs/): '
+                         f'{mod} has neither. See docs/mods.md.')
+    code_mod = mod if mod and (mod / 'exefs').is_dir() else None   # a data-only mod has no code to merge
     version = 'v0'
     firmware = args.firmware.expanduser().resolve() if args.firmware else None
     shared_fonts = args.shared_fonts.expanduser().resolve() if args.shared_fonts else None
@@ -1312,9 +1400,10 @@ def main(argv):
             raise BuildError('needs about 25 GB free for the work folder (the app itself is an APFS clone of it when on the same volume)')
     if update:
         version, update = identify_update(tree, update, keys, logs)
-    step_code(tree, game, keys, env, logs, mod=None if update else mod)
+    step_code(tree, game, keys, env, logs, mod=None if update else code_mod)
     if update:
-        step_code(tree, update, keys, env, logs, version=version, mod=mod)   # a mod is for the updated main, not for 1.0.0
+        step_code(tree, update, keys, env, logs, version=version,
+                  mod=code_mod)   # a mod is for the updated main, not for 1.0.0
     step_data(tree, game, keys, logs, firmware=firmware, shared_fonts=shared_fonts, mod=None if update else mod)
     if update:
         step_update_data(tree, game, update, keys, logs, version=version, mod=mod)
@@ -1350,6 +1439,10 @@ def main(argv):
         if r.returncode: raise BuildError(f'the app does not start: {(r.stdout + r.stderr).strip()}')
         say(f'   checked in {time.time() - t1:.0f} s')
         step_warm_metal(tree, out, logs)
+        if mod:
+            install_mod_romfs(mod, tree, version, out, py, logs)   # data mods: <data>/mods/<version> + its manifest
+    elif mod:
+        say('4/4 app: an iPhone / iPad build loads no player mod folder, so --mod merged its code patches only')
     say(f'done in {(time.time() - t0) / 60:.0f} min: {out}')
     if args.platform=='macos':
         say('Open it from Finder. Moving it afterwards (also to /Applications) keeps the macOS check when it stays on the same '
