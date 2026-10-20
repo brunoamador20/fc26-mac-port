@@ -330,3 +330,28 @@ pacing is not the cause.
   Why LOD 0 breaks here and not on the Switch is open. One guess: high-detail meshes drawn before their data is
   streamed in.
 - Launcher: LOD is off in every preset, and checking it shows a warning. The 120 fps option stays: the user wants it.
+
+### 2026-10-19: ghostly characters and trails: not the LOD patch; invariance and the stencil mask
+
+Correction of the entry above: the user turned "Improved LOD v2" and "Remove Film Grain" off and the picture stayed
+broken. A longer run without the LOD patch showed the same blocks too. One run per setup had not been enough. The
+launcher still leaves LOD off by default; its warning overstates the evidence.
+
+What the picture shows: whatever moves (Bayonetta, enemies, effects) is translucent or a black silhouette. Moving the
+camera leaves trails and blocks. Cutscenes with a still camera look right. Live captures (shots every ~15 frames, a
+pass dump and a render-target dump of the user's game) give the frame's structure:
+- 830488 is a depth-only pre-pass (563 draws, stencil on). 830508 is the colour pass with `LEQUAL` on that depth, into
+  ser 41, which is loaded, not cleared. A pixel the colour pass misses keeps the previous frame.
+- `58d326a2` is a post pass (scene, a half-size layer, a 200x112 blur), not TAA: there is no history.
+
+Two real defects found; neither alone is shown to fix the picture yet:
+- **Invariance.** The translated vertex shaders declare `gl_Position [[invariant]]`, but Metal honours that only
+  with `MTLCompileOptions.preserveInvariance`, which the layer never set. Without it the pre-pass and the colour pass
+  may compute different depths for the same vertex. `DM_PRESERVE_INVARIANCE=1` sets it; the Bayonetta runtime sets it
+  by default; TOTK is unchanged.
+- **Stencil read as depth.** Pass 830489 (`cd871b70`) gathers the stencil plane through an `X32_Stencil8` view and
+  ORs the raw bits into a per-tile "character here" mask (image ser 204, read by later passes). The variant answer
+  marks every depth-format texture `_depth`, so the slot is declared `depth2d<float>`, which cannot read a stencil
+  view. Under test: the cached MSL of that one shader, edited by hand to `texture2d<uint>` with
+  `as_type<float4>(...gather(...))` (compiles). The real fix belongs in the variant answer (a stencil-mode view is
+  not `_depth`) and in the translator's MSL rewrite.

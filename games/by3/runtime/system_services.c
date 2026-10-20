@@ -133,6 +133,9 @@ __attribute__((constructor)) static void register_system_services(void) {
        patch; without it a game that advances per frame would run twice as fast. */
     setenv("DM_PRESENT_HZ", "60", 0);
     setenv("TOTK_UNCAPPED", "0", 0);
+    /* It draws a depth pre-pass, then the colour pass with a LEQUAL test: positions must match bit for bit between the two
+       (nvn_mtl.m totk_precise_opts, preserveInvariance). */
+    setenv("DM_PRESERVE_INVARIANCE", "1", 0);
     /* Its shader binaries mix GLSLC GPU code versions (1.15 and 1.16 seen first); the graphics layer's measured driver
        table stops at 1.14. The layer reads only three control-section fields (code length, stage, compute group size)
        and stops on implausible values, so a newer layout would show at once. */

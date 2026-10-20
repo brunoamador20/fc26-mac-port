@@ -4768,6 +4768,11 @@ static MTLCompileOptions *totk_precise_opts(void) {
     dispatch_once(&once, ^{
         MTLCompileOptions *x = [MTLCompileOptions new];
         if (@available(macOS 15.0, *)) x.mathMode = MTLMathModeSafe; else x.fastMathEnabled = NO;
+        /* DM_PRESERVE_INVARIANCE=1 (Bayonetta 3 sets it): the translated vertex shaders mark gl_Position [[invariant]], which
+           Metal honours only with preserveInvariance. A game that draws a depth pre-pass and then its colour pass with a
+           LEQUAL / EQUAL test needs the two positions bit-identical, as on the Switch: without it, part of the colour pass
+           fails the depth test and keeps the previous frame (ghostly characters, trails, blocks). Default off (TOTK). */
+        { const char *e = getenv("DM_PRESERVE_INVARIANCE"); if (e && atoi(e)) { x.preserveInvariance = YES; MLOG("vertex positions compiled invariant (DM_PRESERVE_INVARIANCE=1)"); } }
         /* TOTK_FAST_MATH=1 (measurement only): fast math for every translated shader. Known to break the tile-light vertex
            shader's integer-division idiom, so pictures from such runs are not evidence of correctness. */
         if (getenv("TOTK_FAST_MATH") && atoi(getenv("TOTK_FAST_MATH"))) { if (@available(macOS 15.0, *)) x.mathMode = MTLMathModeFast; else x.fastMathEnabled = YES; MLOG("【实验】TOTK_FAST_MATH=1：着色器用快速数学"); }
