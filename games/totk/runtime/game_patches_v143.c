@@ -62,6 +62,60 @@ static uint32_t branch(uint64_t pc,uint64_t target){
     if((delta&3)||delta<-(1<<27)||delta>=(1<<27))runtime_fail("1.4.3 patch branch outside range");
     return 0x14000000|(((uint32_t)(delta>>2))&0x3ffffff);
 }
+/* The actor animation update has a second, unscaled clock for cloth/hair
+ * (ordinary animation already receives FrameRateMgr's real-time step). Its
+ * explicit time-factor path still constructs {factor / 30, factor} every
+ * rendered frame. At 120 FPS that advances four seconds per real second.
+ * Correct only that clock, retaining pauses, slow motion and the fallback to
+ * the ordinary clock. 1.4.3 inlines the update in two actor paths; two other
+ * callers share the out-of-line update at +0x2a0e40. Its third caller already
+ * passes measured time and MUST NOT be scaled a second time.
+ *
+ * The inline veneers use only the original destination s register and x8,
+ * which the next original load overwrites. At the two call boundaries x8/s4
+ * are caller-saved scratch; the veneer tail-calls the original function with
+ * its original LR. No stack, flags, ordinary-clock arguments or callee-saved
+ * registers are changed. Stubs follow the four 32-byte aspect veneers. */
+static void patch_secondary_animation(Module *m,uint64_t data,uint64_t stub){
+    const char *enabled=getenv("TOTK_CLOTH_REALTIME");
+    if(enabled&&!strcmp(enabled,"0"))return;   /* diagnostic comparison */
+    const Patch sites[]={
+        {0x246eac,0x1e200940,0}, /* fmul s0,s10,s0: inline clock */
+        {0x345904,0x1e210801,0}, /* fmul s1,s0,s1: inline clock */
+        {0x24944c,0x94015e7d,0}, /* bl 0x2a0e40: actor with transform override */
+        {0x28bc98,0x9400546a,0}, /* bl 0x2a0e40: includes both transform branches */
+    };
+    enum { WORDS=19 };
+    if(stub+WORDS*4>((m->text_end+0x3fff)&~0x3fffULL)||data+8>m->size)
+        runtime_fail("1.4.3 secondary animation patch layout");
+    uint32_t code[WORDS]={
+        adrp(8,(uintptr_t)m->base+stub,(uintptr_t)m->base+data),
+        0xbd400100,0x1e200940,0xbd0367e0, /* ratio * factor -> sp+0x364 */
+        0xbd400500,0x1e200940,branch(stub+24,0x246eb0), /* seconds * factor */
+        adrp(8,(uintptr_t)m->base+stub+28,(uintptr_t)m->base+data),
+        0xbd400101,0x1e210801,0xbd0117e1, /* ratio * factor -> sp+0x114 */
+        0xbd400501,0x1e210801,branch(stub+52,0x345908),
+        adrp(8,(uintptr_t)m->base+stub+56,(uintptr_t)m->base+data),
+        0xbd400104,0x1e240842,0x1e240863, /* s2/s3 *= measured 30 Hz ratio */
+        branch(stub+72,0x2a0e40),
+    };
+    uint32_t jumps[]={branch(sites[0].off,stub),branch(sites[1].off,stub+28),
+        branch(sites[2].off,stub+56)|0x80000000u,branch(sites[3].off,stub+56)|0x80000000u};
+    for(unsigned i=0;i<sizeof sites/sizeof *sites;i++){
+        if(sites[i].off+4>m->text_end)runtime_fail("1.4.3 secondary animation site outside text");
+        uint32_t word;memcpy(&word,m->base+sites[i].off,4);
+        if(word!=(TARGET_OS_IPHONE?jumps[i]:sites[i].original))
+            runtime_fail("1.4.3 secondary animation instruction mismatch");
+    }
+#if TARGET_OS_IPHONE
+    if(memcmp(m->base+stub,code,sizeof code))runtime_fail("1.4.3 embedded secondary animation veneer mismatch");
+#else
+    for(unsigned i=0;i<sizeof code;i++)if(m->base[stub+i])runtime_fail("1.4.3 secondary animation padding in use");
+    memcpy(m->base+stub,code,sizeof code);
+    for(unsigned i=0;i<sizeof sites/sizeof *sites;i++)memcpy(m->base+sites[i].off,jumps+i,4);
+#endif
+    fprintf(stderr,"[totk] 1.4.3 cloth/hair clock: real-time seconds and ratio at 4 guarded actor sites; ordinary animation and time factors retained\n");
+}
 static void patch_realtime(Module *m){
     const char *enabled=getenv("TOTK_REALTIME");if(enabled&&!strcmp(enabled,"0"))return;
     uint64_t data=(m->file_size+0x3fff)&~0x3fffULL;
@@ -103,6 +157,7 @@ static void patch_realtime(Module *m){
  #endif
     frame_step_data=(_Atomic uint64_t *)(void *)(m->base+data);
     frame_interval_data=(_Atomic uint32_t *)(void *)(m->base+data+8);frame_step_store(1.0f/60.0f);
+    patch_secondary_animation(m,data,stub+176);
     fprintf(stderr,"[totk] 1.4.3 real-time frame step: 7 guarded sites, producer veneer +%#llx; original half-step selector and ratio/inverse/seconds/FPS calculations retained\n",(unsigned long long)stub);
 }
 static void patch_output_res(Module *m);
