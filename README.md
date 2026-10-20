@@ -2,6 +2,9 @@
 
 # English
 
+**Breath of the Wild 1.6.0 is now officially supported on Mac!**
+**Tears of the Kingdom 1.0.0, 1.2.1 and 1.4.3 are now officially supported on Mac, iPhone and iPad!**
+
 > **Use your AI assistant to help you build the Mac app. We recommend Claude Code, Codex, or any other AI assistant you prefer.**
 
 [English](#english) | [中文](#chinese)
@@ -31,7 +34,7 @@ Update history:
 
 | Date | Platform | Update |
 |---|---|---|
-| Oct 20 | Mac | Two leaks fixed for both games: the GPU write-back to memory left a 16 KiB buffer and a blit context per level (3.7 GB in 30 minutes of Breath of the Wild), and finalised texture serials were never forgotten (17 million entries) |
+| Oct 20 | Mac | Two memory leaks fixed for both games |
 | Oct 20 | Mac | **Breath of the Wild 1.6.0** (early): a card image holding the base game, the update and the add-on content builds its own app with the same command; title, saves, the Great Plateau and the DLC packs work, keys 2 (frame interpolation) and 3 (MetalFX 2K) work |
 | Oct 19 | Mac | Key 4 switches to a true 21:9 ultrawide view and back (1.2.1, 1.4.3); the HUD keeps its shape in the middle 16:9 |
 | Oct 19 | iPhone, iPad | Tested with 1.4.3: a fresh install shows the game from the first launch, without a played cache |
@@ -244,6 +247,9 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 
 # 中文说明
 
+**正式支持旷野之息 1.6.0 mac了！**
+**正式支持王国之泪 1.0.0,1.2.1，1.4.3 Mac iPhone iPad了！**
+
 > **请使用你的 AI 助理帮你完成 Mac App 的构建。推荐 Claude Code、Codex，或其他你喜欢的 AI 助理。**
 
 [英文说明](#english) | [中文说明](#chinese)
@@ -273,7 +279,7 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 
 | 日期 | 平台 | 更新 |
 |---|---|---|
-| 10 月 20 日 | Mac | 修了两处两个游戏都有的泄漏：GPU 结果写回内存每一级留下一个 16 KiB 缓冲和一个 blit 编码器（旷野之息 30 分钟漏 3.7 GB），已 Finalize 的贴图序号从不忘掉（1,700 万条） |
+| 10 月 20 日 | Mac | 修了两处两个游戏都有的内存泄漏|
 | 10 月 20 日 | Mac | **旷野之息 1.6.0**（早期）：本体 + 更新 + 追加内容合在一起的卡带镜像用同一条命令打成单独的 App；标题、存档、初始台地和 DLC 内容包都能用，2 键（补帧）和 3 键（MetalFX 2K）都能用 |
 | 10 月 19 日 | Mac | 按 4 切换真正的 21:9 超宽画面（1.2.1、1.4.3），HUD 保持原比例、在中间 16:9 区域 |
 | 10 月 19 日 | iPhone、iPad | 用 1.4.3 实测：全新安装、没有玩过的缓存，第一次启动就能看到游戏画面 |
