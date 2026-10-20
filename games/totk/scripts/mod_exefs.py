@@ -14,10 +14,13 @@ What is merged (v1): the code patches for **main** only, read from `<mod>/exefs/
                     names no module or build by itself, so it is read as a main patch only when it is named main, or
                     main's build id the way Atmosphere and the mod managers name patches (exefs/<build id>.ips); a
                     patch for another module, or named after another build of main, is left out with a note.
-  *.pchtxt          the community text form, applied exactly as the runtime's own TOTK_PCHTXT experiment does:
+  *.pchtxt          the community text form, read as the runtime's own TOTK_PCHTXT experiment reads it:
                     "@nsobid-<build id>" must name this version's main, then "<main address> <hex bytes>" lines
-                    between "@enabled" and "@stop". The build id may be the 16-byte one (32 hex digits, as the
-                    rewriter's tables use it) or the 20 bytes the runtime compares.
+                    between "@enabled" and "@stop", with "@disabled" switching a section back off (a mod author who
+                    keeps an edit around without applying it) and "@flag offset_shift 0x100" accepted - any other
+                    shift is refused, since these addresses already leave the 0x100-byte NSO header out. The build id
+                    may be the 16-byte one (32 hex digits, as the rewriter's tables use it) or the 20 bytes the
+                    runtime compares.
   main.npdm         ignored with a note: the native loader never reads a module's npdm (the module metadata comes
                     from the tables built from the retail code).
 
@@ -214,7 +217,13 @@ def parse_ips(data, path):
 
 
 def parse_pchtxt(text, identity, path):
-    """A community pchtxt patch for main: the same reading the runtime's TOTK_PCHTXT does.
+    """A community pchtxt patch for main: the same reading the runtime's TOTK_PCHTXT does, plus the format's own
+    section switches.
+
+    @enabled and @disabled switch the lines that follow on and off, so a file that turns a section off (the usual way a
+    mod author keeps an edit around without applying it) applies only the sections it enabled; @stop ends the file.
+    @flag offset_shift is read and checked: 0x100 is the shift an IPS form counts (the NSO header), which is what these
+    addresses already leave out, so any other shift is refused instead of putting every edit 0x100 or so elsewhere.
 
     identity: the NSO header's build ID bytes (0x40, 20 bytes) as hex; the runtime compares 20 bytes and the
     rewriter's tables key on the first 16, and a mod may name either."""
@@ -231,6 +240,12 @@ def parse_pchtxt(text, identity, path):
             continue
         if line.startswith('@enabled'):
             enabled = True
+            continue
+        if line.startswith('@disabled'):
+            enabled = False
+            continue
+        if line.startswith('@flag'):
+            _check_pchtxt_flag(line.split(), path, number)
             continue
         if line.startswith('@stop'):
             break
@@ -258,6 +273,27 @@ def parse_pchtxt(text, identity, path):
     if not records:
         raise ModError(f'{path}: no patch lines between @enabled and @stop')
     return records
+
+
+def _check_pchtxt_flag(fields, path, number):
+    """One "@flag <name> <value>" line of a pchtxt: only offset_shift 0x100 is honoured, anything else is refused.
+
+    These patches are applied at main addresses - the 0x100-byte NSO header is not counted, which is exactly what an
+    IPS form's offsets leave out (IPS_HEADER) - so 0x100 is the one shift that describes what is done here. A file that
+    asks for another shift is not applied: it would put every edit somewhere else."""
+    name = fields[1] if len(fields) > 1 else ''
+    value = fields[2] if len(fields) > 2 else ''
+    if name != 'offset_shift':
+        raise ModError(f'{path}:{number}: @flag {name or "(none)"} is not supported (only offset_shift 0x100 is)')
+    if not value:
+        raise ModError(f'{path}:{number}: @flag offset_shift needs a value (0x100)')
+    try:
+        shift = int(value, 16)
+    except ValueError:
+        raise ModError(f'{path}:{number}: @flag offset_shift {value} is not a hex number') from None
+    if shift != HEADER_SIZE:
+        raise ModError(f'{path}:{number}: @flag offset_shift {value} is not supported: these patches are applied at '
+                       f'main addresses, so only 0x100 (the NSO header an IPS form counts) holds here')
 
 
 # ---- the merge ----

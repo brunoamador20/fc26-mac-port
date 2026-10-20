@@ -144,6 +144,45 @@ class Case(unittest.TestCase):
         self.assertEqual(image[0x40:0x44], b'\xaa\xbb\xcc\xdd')
         self.assertEqual(image[0x44:0x46], TEXT[0x44:0x46])
 
+    def test_pchtxt_disabled_section_is_not_applied(self):
+        self.retail()
+        text = f'@nsobid-{BUILD_ID.hex()}\n@enabled\n40 aabbccdd\n@disabled\n44 eeff\n@stop\n'
+        self.patch(text)
+        self.apply()
+        image = image_of(self.output.read_bytes())
+        self.assertEqual(image[0x40:0x44], b'\xaa\xbb\xcc\xdd')
+        self.assertEqual(image[0x44:0x46], TEXT[0x44:0x46])     # the section after @disabled is left alone
+
+    def test_pchtxt_enabled_after_disabled_applies_again(self):
+        self.retail()
+        text = (f'@nsobid-{BUILD_ID.hex()}\n@enabled\n40 aabbccdd\n@disabled\n44 eeff\n@enabled\n4a 0102\n@stop\n')
+        self.patch(text)
+        self.apply()
+        image = image_of(self.output.read_bytes())
+        self.assertEqual(image[0x40:0x44], b'\xaa\xbb\xcc\xdd')
+        self.assertEqual(image[0x44:0x46], TEXT[0x44:0x46])
+        self.assertEqual(image[0x4a:0x4c], b'\x01\x02')
+
+    def test_pchtxt_offset_shift_of_the_nso_header_is_accepted(self):
+        self.retail()
+        text = f'@nsobid-{BUILD_ID.hex()}\n@flag offset_shift 0x100\n@enabled\n40 aabbccdd\n@stop\n'
+        self.patch(text)
+        self.apply()
+        self.assertEqual(image_of(self.output.read_bytes())[0x40:0x44], b'\xaa\xbb\xcc\xdd')
+
+    def test_pchtxt_another_offset_shift_is_refused(self):
+        self.retail()
+        text = f'@nsobid-{BUILD_ID.hex()}\n@flag offset_shift 0x0\n@enabled\n40 aabbccdd\n@stop\n'
+        self.patch(text)
+        with self.assertRaisesRegex(mod_exefs.ModError, r'@flag offset_shift 0x0 is not supported'):
+            self.apply()
+
+    def test_pchtxt_other_flag_is_refused(self):
+        self.retail()
+        self.patch(f'@nsobid-{BUILD_ID.hex()}\n@flag some_flag 1\n@enabled\n40 aabbccdd\n@stop\n')
+        with self.assertRaisesRegex(mod_exefs.ModError, '@flag some_flag is not supported'):
+            self.apply()
+
     def test_pchtxt_for_another_build_is_refused(self):
         self.retail()
         self.patch(pchtxt([(0x40, b'\xaa')], build_id='00' * 16))
