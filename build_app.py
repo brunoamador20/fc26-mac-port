@@ -1132,41 +1132,21 @@ def main(argv):
         path=path.resolve()
         while not path.exists(): path=path.parent
         return path
-    work_volume=existing_volume_path(work.parent if work.parent.exists() else game.parent)
-    output_volume=existing_volume_path(out.parent if out.parent.exists() else game.parent)
-    free=shutil.disk_usage(work_volume).free/2**30
-    output_free=shutil.disk_usage(output_volume).free/2**30
-    same_volume=os.stat(work_volume).st_dev==os.stat(output_volume).st_dev
-    base_cached=(work/'totk/extracted/v0/romfs/romfs.bin').exists()
-    say(f'work folder {work} ({free:.0f} GB free on its volume)')
-    if args.platform=='ios':
-        if same_volume:
-            required=(60 if update else 45) if not base_cached else (40 if update else 18)
-        else:
-            required=(40 if update else 25) if not base_cached else (25 if update else 18)
-        if free<required:
-            raise BuildError(f'iOS build needs about {required} GB free on the work/output volume for the IPA archive')
-        if not same_volume and output_free<18:
-            raise BuildError('the output volume needs about 18 GB free for the iOS IPA')
-    else:
-        if update and free<40 and not base_cached:
-            raise BuildError('needs about 40 GB free for a fresh base + update build (19 GB extra with base data cached)')
-        if free<25 and not base_cached:
-            raise BuildError('needs about 25 GB free for the work folder (the app itself is an APFS clone of it when on the same volume)')
     logs = work / 'logs'
     env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
     t0 = time.time()
     fresh_work = not work.exists()
+    # The game decides the platforms, the work folder and the disk space needed, so it is identified before those checks.
     tree = prepare_work(work, py, logs)
     which = identify_game(tree, game, keys, logs)
     if which == 'botw':
+        if fresh_work and not args.work:   # BotW_build next to the game file, not TOTK_build
+            shutil.rmtree(work)
         if args.platform == 'ios':
             raise BuildError('Breath of the Wild has no iPhone / iPad build yet: build the Mac app (leave out --platform ios)')
         if update:
             raise BuildError('Breath of the Wild: the card image already holds its update and add-on content, so leave out --update')
-        if not args.work:   # BotW_build next to the game file, not TOTK_build
-            if fresh_work:
-                shutil.rmtree(work)
+        if not args.work:
             work = game.parent / 'BotW_build'
             logs = work / 'logs'
             tree = prepare_work(work, py, logs)
@@ -1197,6 +1177,27 @@ def main(argv):
         say('Open it from Finder. The first start verifies the game data (15 GB + 1.4 GB of add-on content) and keeps a record; '
             'saves, the shader cache and the log go to ~/Library/Application Support/MacNativeGames/BotW and ~/Library/Logs/MacNativeGames/botw.log.')
         return
+    work_volume=existing_volume_path(work.parent if work.parent.exists() else game.parent)
+    output_volume=existing_volume_path(out.parent if out.parent.exists() else game.parent)
+    free=shutil.disk_usage(work_volume).free/2**30
+    output_free=shutil.disk_usage(output_volume).free/2**30
+    same_volume=os.stat(work_volume).st_dev==os.stat(output_volume).st_dev
+    base_cached=(work/'totk/extracted/v0/romfs/romfs.bin').exists()
+    say(f'work folder {work} ({free:.0f} GB free on its volume)')
+    if args.platform=='ios':
+        if same_volume:
+            required=(60 if update else 45) if not base_cached else (40 if update else 18)
+        else:
+            required=(40 if update else 25) if not base_cached else (25 if update else 18)
+        if free<required:
+            raise BuildError(f'iOS build needs about {required} GB free on the work/output volume for the IPA archive')
+        if not same_volume and output_free<18:
+            raise BuildError('the output volume needs about 18 GB free for the iOS IPA')
+    else:
+        if update and free<40 and not base_cached:
+            raise BuildError('needs about 40 GB free for a fresh base + update build (19 GB extra with base data cached)')
+        if free<25 and not base_cached:
+            raise BuildError('needs about 25 GB free for the work folder (the app itself is an APFS clone of it when on the same volume)')
     if update:
         version, update = identify_update(tree, update, keys, logs)
     step_code(tree, game, keys, env, logs)
