@@ -22,7 +22,7 @@ Play your own copy of **The Legend of Zelda: Tears of the Kingdom** natively on 
 > [!TIP]
 > **Every shader in the shared list is ready before you play.** On a Mac the game does not stop to compile it, and on an iPhone or iPad nothing is missing from the picture. The more places players cover, the smoother the game gets for everyone.
 
-The [shared shader list](docs/shader-list.md) now holds **44,550 shader variants** (38,168 shaders) from the Mac, iPhone and iPad. Every build makes them from the player's own game files, so the list holds identifiers only, never game data. Helping takes no setup:
+The [shared shader list](docs/shader-list.md) now holds **45,231 shader variants** (38,682 shaders) from the Mac, iPhone and iPad. Every build makes them from the player's own game files, so the list holds identifiers only, never game data. Helping takes no setup:
 
 1. **Play.** When your game meets a shader the list does not have yet, it notes it in `shader-list-contribution.txt`.
 2. **On a Mac, every 500 new shaders it asks you once, before the game starts.** Click "Send": the GitHub form opens and the file is shown, ready to drag in. An iPhone or iPad never asks during play: while it is connected to the Mac that built its app (cable or the same Wi-Fi), the Mac asks instead. "Don't remind me again" stops the reminders.
@@ -269,7 +269,7 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 > [!TIP]
 > **公共清单里的每个着色器，开玩之前就已经准备好。** Mac 上不用停下来现场编译，iPhone 和 iPad 上画面也不会缺东西。大家玩过的地方越多，所有人玩得越流畅。
 
-[公共着色器清单](docs/shader-list.md)现在有 **44,550 个着色器变体**（38,168 个着色器），来自 Mac、iPhone 和 iPad。每次打包都用玩家自己的游戏文件生成，所以清单里只有标识，不含任何游戏数据。参与不需要任何设置：
+[公共着色器清单](docs/shader-list.md)现在有 **45,231 个着色器变体**（38,682 个着色器），来自 Mac、iPhone 和 iPad。每次打包都用玩家自己的游戏文件生成，所以清单里只有标识，不含任何游戏数据。参与不需要任何设置：
 
 1. **照常玩。** 游戏遇到清单里还没有的着色器，会自动记进 `shader-list-contribution.txt`。
 2. **在 Mac 上，每攒够 500 个，它会在游戏启动前问你一次。** 点“发送”，GitHub 提交页面会打开，文件也会显示出来，拖进去就行。iPhone 和 iPad 玩的时候从不提醒：设备连着打包它的那台 Mac（线连或同一 Wi‑Fi）时，由 Mac 来问。点“不要提醒了”以后就不再问。
