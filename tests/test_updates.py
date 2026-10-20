@@ -30,6 +30,14 @@ def update_nca(managed=True):
                     for i in range(6)) + data[0xc00:]
 
 
+def fake_data_bundle(tree, version, _logs, **_names):
+    """build_app.data_bundle without the 16 GB image or codesign: an empty bundle folder."""
+    bundle = tree / f'build/data-bundles/GameData-{version}.bundle'
+    (bundle / 'Contents/Resources').mkdir(parents=True, exist_ok=True)
+    (bundle / 'Contents/Resources/romfs.bin').write_bytes(b'image')
+    return bundle
+
+
 class Updates(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -252,7 +260,7 @@ class Updates(unittest.TestCase):
         def fake_clone(_source, target):
             target.parent.mkdir(parents=True,exist_ok=True)
             target.write_bytes(b'synthetic payload')
-        with patch.object(build_app,'clone',side_effect=fake_clone), \
+        with patch.object(build_app,'data_bundle',side_effect=fake_data_bundle),patch.object(build_app,'clone',side_effect=fake_clone), \
              patch.object(build_app,'sign_app',side_effect=build_app.BuildError('seal rejected')):
             with self.assertRaisesRegex(build_app.BuildError,'seal rejected'):
                 build_app.step_app(tree,out,self.root/'logs',version='v143')
@@ -287,7 +295,7 @@ class Updates(unittest.TestCase):
             self.assertEqual(old.read_bytes(),b'old running app')
             checks.append(True)
             return SimpleNamespace(stdout=str(old.resolve())+'\n' if len(checks)==1 else '')
-        with patch.object(build_app,'clone',side_effect=fake_clone),patch.object(build_app,'sign_app'), \
+        with patch.object(build_app,'data_bundle',side_effect=fake_data_bundle),patch.object(build_app,'clone',side_effect=fake_clone),patch.object(build_app,'sign_app'), \
              patch.object(build_app.subprocess,'run',side_effect=processes),patch.object(build_app.time,'sleep') as pause:
             build_app.step_app(tree,out,self.root/'logs',version='v143')
         self.assertEqual(len(checks),2);pause.assert_called_once_with(2)

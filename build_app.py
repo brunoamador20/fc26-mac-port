@@ -777,14 +777,36 @@ def step_binary(tree, game, keys, env, logs, *, version="v0", title='0100f2c0115
             say(f'   no app icon, the app gets the default one ({str(e).splitlines()[0]})')
 
 
+_libc = None
+
+
+def clonefile(src, dst):
+    """macOS clonefile(2): an APFS clone of a file or a whole folder (no extra space) in one call, without starting a
+    program for it (an app holds about 50,000 shader files per version: one cp each took minutes, 2026-10-19). False
+    when it cannot: another volume or file system, or dst exists."""
+    global _libc
+    if _libc is None:
+        import ctypes
+        _libc = ctypes.CDLL(None, use_errno=True)
+        _libc.clonefile.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32]
+    return _libc.clonefile(os.fsencode(src), os.fsencode(dst), 0) == 0
+
+
 def clone(src, dst):
-    """APFS clone when on the same volume (no extra space), else a copy."""
+    """APFS clone when on the same volume (no extra space), else a copy; an existing dst is replaced."""
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if subprocess.run(['cp', '-c', src, dst], capture_output=True).returncode:
+    if dst.exists() or dst.is_symlink():
+        dst.unlink()
+    if not clonefile(src, dst):
         shutil.copy2(src, dst)
 
 
 def copy_tree(src, dst):
+    """The files of src in dst: one clone of the whole folder when dst does not exist yet, else file by file."""
+    if not dst.exists():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if clonefile(src, dst):
+            return
     for p in sorted(src.rglob('*')):
         if p.is_file():
             clone(p, dst / p.relative_to(src))
@@ -803,6 +825,50 @@ def remove_tree(path):
     shutil.rmtree(path)
 
 
+def data_bundle(tree, version, logs, *, bundle_id=BUNDLE_ID):
+    """The RomFS image (16 GB) as a bundle of its own, signed once and kept in the work folder (build/data-bundles). The
+    app carries a clone of it in Contents/Helpers, and the app's seal records only its signature: sealing the image
+    inside the app hashed all 16 GB on every packaging (88 s on an M4 Mac mini, 2026-10-20), now only when the image
+    changed (the stamp names the image file: size, mtime, inode). The game opens the image through a link at its usual
+    place, extracted/<version>/romfs/romfs.bin, and checks its SHA-256 itself as before (runtime/romfs.c)."""
+    image = tree / f'extracted/{version}/romfs/romfs.bin'
+    bundle = tree / f'build/data-bundles/GameData-{version}.bundle'
+    stamp = bundle.with_name(bundle.name + '.json')
+    st = image.stat()
+    want = dict(format=1, size=st.st_size, mtime_ns=st.st_mtime_ns, inode=st.st_ino)
+    try:
+        if json.loads(stamp.read_text()) == want and (bundle / 'Contents/_CodeSignature/CodeResources').is_file():
+            return bundle
+    except (OSError, ValueError):
+        pass
+    say('4/4 app: signing the game data once (a minute or two; later builds reuse it)')
+    tmp = bundle.with_name(bundle.name + '.partial')
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    clone(image, tmp / 'Contents/Resources/romfs.bin')
+    import plistlib
+    (tmp / 'Contents/Info.plist').write_bytes(plistlib.dumps(dict(
+        CFBundleIdentifier=f'{bundle_id}.data.{version}', CFBundleName='Game data', CFBundlePackageType='BNDL',
+        CFBundleShortVersionString=VERSIONS[version]['display_version'], CFBundleVersion='1')))
+    run(['codesign', '--force', '--sign', '-', tmp], logs / f'sign-data-{version}.log')
+    stamp.unlink(missing_ok=True)
+    if bundle.exists():
+        shutil.rmtree(bundle)
+    tmp.rename(bundle)
+    write_stamp = stamp.with_name(stamp.name + '.tmp')
+    write_stamp.write_text(json.dumps(want))
+    write_stamp.replace(stamp)
+    return bundle
+
+
+def place_data_bundle(bundle, app, res, version):
+    """The signed game data in the app (Contents/Helpers), and the link the game opens it by."""
+    copy_tree(bundle, app / 'Contents/Helpers' / bundle.name)
+    link = res / f'extracted/{version}/romfs/romfs.bin'
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(os.path.relpath(app / 'Contents/Helpers' / bundle.name / 'Contents/Resources/romfs.bin', link.parent))
+
+
 def sign_app(app, logs):
     # Seal the bundle, including Info.plist and game resources. Copied helper
     # executables keep their existing signatures and byte identity.
@@ -819,7 +885,7 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
     res = tmp / 'Contents/Resources/totk'   # the launcher's game folder, for both games (app/launcher.m)
     clone(tree / ('build/totk-native' if version == 'v0' else f'build/totk-native-{version}'), res/'build/totk-native')
     files = ['build/spirv-cross/spirv-cross', f'rewritten/{version}/main.patched.bin', f'rewritten/{version}/sdk.patched.bin',
-             f'rewritten/{version}/subsdk0.patched.bin', f'extracted/{version}/romfs/romfs.bin', f'extracted/{version}/romfs/runtime-index.bin']
+             f'rewritten/{version}/subsdk0.patched.bin', f'extracted/{version}/romfs/runtime-index.bin']   # romfs.bin: data_bundle
     files += ['build/pso_manifest.tsv', 'build/pso_title.tsv']   # exported from the game's shared shader list (games/totk/Makefile)
     for index in expected.get('aoc', {}):   # Breath of the Wild: the add-on content volumes (runtime/aoc_romfs.c)
         files += [f'extracted/{version}/aoc/{index}/romfs.bin', f'extracted/{version}/aoc/{index}/runtime-index.bin']
@@ -842,10 +908,12 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
         except (ValueError, KeyError, OSError, TypeError) as error:
             raise BuildError(f'invalid prepared startup shader seed: {error}') from None
         copy_tree(seed, res/'build/shader-seed')
-        for src in sorted(seed.glob('*.metal')):
-            lib = tree/f'build/shader-libs/{sha256(src)}.metallib'
+        for src in sorted(seed.glob('*.metal')):   # each named in the manifest, its hash just checked
+            lib = tree/f'build/shader-libs/{report["files"][src.name]}.metallib'
             if lib.is_file():
                 clone(lib, res/'build/shader-libs'/lib.name)
+    # after the checks above: signing it is slow
+    place_data_bundle(data_bundle(tree, version, logs, bundle_id=bundle_id), tmp, res, version)
     clone(tree / 'build/app-launcher', tmp / f'Contents/MacOS/{executable}')
     info = dict(CFBundleDevelopmentRegion='en', CFBundleExecutable=executable, CFBundleIdentifier=bundle_id, CFBundleName=app_name,
                 CFBundleDisplayName=app_name, CFBundlePackageType='APPL', CFBundleShortVersionString=expected['display_version'],
