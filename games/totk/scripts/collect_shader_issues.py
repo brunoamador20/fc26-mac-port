@@ -64,7 +64,12 @@ def contribution_rows(text):
 
 
 def gh(*args):
-    return subprocess.run(['gh', *args], capture_output=True, text=True, check=True).stdout
+    try:
+        return subprocess.run(['gh', *args], capture_output=True, text=True, check=True).stdout
+    except FileNotFoundError:
+        # A maintainer's tool (#85): players send their file through the game's prompt or the issue form instead
+        sys.exit('needs the GitHub CLI (gh), signed in: brew install gh && gh auth login. Players do not need this tool: '
+                 "attach shader-list-contribution.txt to a \"Shader list contribution\" issue instead.")
 
 
 def download(url, token):
