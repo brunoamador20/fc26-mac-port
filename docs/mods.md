@@ -1,13 +1,19 @@
-# Player mods (RomFS)
+# Player mods
 
 [English](#english) | [中文](#chinese)
 
 <a id="english"></a>
 ## English
 
-The Mac app loads **RomFS mods only**. `exefs/` files are not loaded (the runtime uses the rewritten
-`main`, `sdk` and `subsdk0`, and IPS or pchtxt files are not picked up automatically), and the app does
-not scan folders for mods. Whether a mod is used is decided by one file: `manifest.tsv`.
+A mod reaches the game in one of two ways:
+
+- **RomFS content** is loaded while the game runs. Whether a mod is used is decided by one file:
+  `manifest.tsv`. The app does not scan folders for mods.
+- **Code patches for the main module** (`exefs/main.pchtxt`, `exefs/*.ips`, `exefs/*.ips32`) are merged into
+  the app **at build time** with `--mod`. See [Code patches](#code) below.
+
+Nothing under `exefs/` is loaded while the game runs: the app runs the three code modules it was built from,
+rewritten for Apple silicon and bound to their SHA-256. The build is the only place code can change.
 
 The launcher points `TOTK_ROMFS_MODS` at
 
@@ -75,6 +81,73 @@ The game reads the installed folder as it is; it does not follow the folder you 
 If the new version removes files, set the old version folder aside (or delete it after a backup) before
 copying, or the removed files stay active. Generate the manifest again after every change.
 
+<a id="code"></a>
+### Code patches (build time)
+
+A mod that changes the game's code ships `exefs/` files: an IPS or IPS32 patch, or the newer text form
+(`.pchtxt`). Those can be merged into the app while it is built:
+
+```bash
+python3 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys" --mod "/path/to/Mod"
+```
+
+The folder you pass holds the mod's files in the usual layout - `exefs/` for code, `romfs/` for data - and
+its `romfs/` half is still installed separately (see above); the build only reads `exefs/`. With
+`--update` the patch is merged into the updated module, which is the one the app runs.
+
+What the build does, in order:
+
+1. Extracts and verifies the retail ExeFS, as always. The patch is only ever applied to the verified
+   retail module of the version being built, never to an already rewritten one.
+2. Applies the mod's patches. Offsets are **main addresses** - the address space the game's code lives
+   in, the same numbers the app's own patch tables use:
+
+   - `.pchtxt`: the community format, read exactly as the runtime reads it. The first line must be
+     `@nsobid-<build id>`: the 16 bytes the rewriter's tables use (32 hex digits) or the 20 bytes the
+     runtime compares (40 hex digits; the runtime's own `TOTK_PCHTXT` experiment takes only that longer
+     form). Patch lines `<hex main address> <hex bytes>` follow, and only lines between `@enabled` and
+     `@stop` count. That line is what ties the file to this main, so it may be named anything.
+   - `.ips` / `.ips32`: applied as emulators apply them, whose offsets count the 0x100-byte NSO header,
+     so the build subtracts 0x100. A record below 0x100, a truncated file or a missing `EOF` is an error.
+     The file names neither its module nor its build, so it is read as a main patch only when it is named
+     `main`, or after main's build id (`exefs/<build id>.ips`, the Atmosphere and mod-manager
+     convention). Anything else is left out with a note: a patch for `sdk` or `subsdk9`, or one named
+     after another build of main. An `.ips` named `main` has no id to check, so name it after the build
+     id, or ship a `.pchtxt`, when you want that check.
+
+3. Checks the result before building on it. The patch is refused, with the address and the reason, when
+   it lands outside main's text, rodata or data (the padding after text is reserved), when two patch
+   files change the same bytes, when it changes nothing, or when it touches a site the app patches
+   itself - the 60 FPS and real-time frame-step sites, render/output resolution, ultrawide, cloth, and
+   the rewriter's registered cuts. Leave those features to the app (`TOTK_FPS60`, `TOTK_REALTIME`,
+   `TOTK_RENDER_RES`, `TOTK_OUTPUT_RES`, `TOTK_ASPECT`): the runtime re-checks the original instruction
+   at each of its sites and stops the game if it changed.
+4. Rewrites the patched module for Apple silicon and binds the app to its SHA-256. The report in `--work`
+   (`analysis/phase12-validation.json` for 1.0.0, `analysis/<version>-port/phase12-validation.json`
+   otherwise, under `mod_exefs`) records the mod folder, every patch file's SHA-256, the addresses it
+   changed and the merged module's hash.
+
+The iPhone / iPad build merges the same way: `--mod` with `--platform ios`.
+
+What else a mod's `exefs/` may hold:
+
+| In the mod's `exefs/` | Result |
+| --- | --- |
+| `*.pchtxt`, `*.ips`, `*.ips32` for main | merged into the build; an `.ips` must be named `main` or after main's build id, while a `.pchtxt` names its build in `@nsobid-` and may be named anything |
+| `main.npdm` | ignored with a note: the native loader never reads a module's metadata |
+| `subsdk9` and other extra code modules | **not loaded**, with a note in the build output and in the report: the app loads the three modules it was built from (main, sdk, subsdk0), so the module's own code never runs |
+| a whole replacement `main` | refused: ship a patch instead, so the build can check it against this version |
+
+An extra module is how a mod built with a hooking framework (exlaunch and the like) changes code while
+the game runs: its trampolines never install here. Such a mod - The Second Quest is one - keeps its main
+patches and its whole RomFS, but not the part of its code changes that lives in that module. Making one
+work means the app growing a module loader (rewriting the module for Apple silicon and answering its
+service calls), which this version does not do; open an issue with the module and what it changes if you
+need it.
+
+Changing the mod after a build means building again (the mod's bytes are part of the app). A merge that
+already happened is reused: the rewrite is skipped while the recorded hash matches.
+
 ### Notes
 
 - Do not edit `manifest.tsv` by hand; regenerate it.
@@ -85,18 +158,56 @@ copying, or the removed files stay active. Generate the manifest again after eve
   choose one file.
 - The build replaces a few RomFS files itself: `UI/LayoutArchive/Common.Product.<n>.Nin_NX_NVN.blarc.zs` (quick-menu
   timing; `<n>` is 100, 110 or 140 depending on the version), `Event/EventFlow/DmF_SY_GameOver.bfevfl.zs`, and with the
-  2K output `System/HeapSize/Product.Nin_NX_NVN.HeapDef.byml.zs`. A mod that replaces one of them stops the start with
-  "two overlays replace the same file"; leave that file out of the mod for now (UI translation mods hit this, #73).
-- `exefs/` is not loaded; only RomFS content works. (`TOTK_PCHTXT` is a developer experiment for pchtxt
-  patches, not a general mod loader.)
+  2K output `System/HeapSize/Product.Nin_NX_NVN.HeapDef.byml.zs`. A mod replacing one of them cannot be loaded next to
+  the app's own version (the start would stop with "two overlays replace the same file"), so the manifest leaves those
+  paths to the app and says which file it left out (UI translation mods hit this, #73).
+- `make_mod_manifest.py` handles all of them itself: a mod file whose path the app replaces is left out of the manifest
+  (with a line saying so), because both overlays cannot be loaded. The heap table is the exception the build can fold in:
+  with `--mod` the 2K overlay is built *on top of* the mod's table, so the mod's own heap sizes and the 2K texture heaps
+  both hold, and the manifest line says whether the app's table carries them (`already carries these heap sizes`) or
+  tells you to build with `--mod`.
+- A mod manager (TKMM, or Ryujinx's `mods/contents/<title id>/<name>`) hands you `exefs/` and `romfs/` in one folder:
+  pass that folder to `--mod` - its `exefs` patches are merged, and a manager's merged `.ips` may hold several mods'
+  records in one file - then copy its `romfs/` into the version's mods folder and generate the manifest (no `--exclude`
+  needed: the manager's heap table and the app's 2K overlay are reconciled for you). Generate the manifest again after
+  every re-merge in the manager: the game checks every file's hash at start.
+- A mod with a code patch also needs its `exefs/` patch to match the game version the app is built from.
+  The build checks what the file itself says: a `.pchtxt` is refused when its `@nsobid-` names another
+  main, and an `.ips` / `.ips32` named after a build id is left out when that id is not this main's.
 - This guide covers the Mac app; installing mods into the iPhone/iPad app container is not covered.
+
+### When the start stops
+
+The game closes the window and writes one line to `~/Library/Logs/MacNativeGames/totk.log` instead of starting with data
+it cannot trust. The line above it names the file.
+
+- `two overlays replace the same file` - the manifest lists a path the app replaces itself: a manifest written by hand
+  or by another tool, since `make_mod_manifest.py` leaves those paths out by itself. Regenerate it with that script.
+- `two overlays add the same file` - two overlays (the app's, or two mod folders) add one path the RomFS lacks.
+- `RomFS overlay integrity mismatch` - a file in the mods folder differs from the SHA-256 in the manifest: files were
+  copied in after the manifest was written. Regenerate it (`make_mod_manifest.py` writes nothing for a mismatching dump).
+- `RomFS overlay names a file the RomFS lacks` / `adds a file the RomFS already has` - a replacement's original is wrong
+  (a file copied from another game version); regenerate the manifest and rebuild the app for that version.
+- `RomFS overlay file changed while the game ran` - the folder was edited during play; restart the game (and regenerate
+  the manifest).
+
+The window can also vanish with no line of ours: a mod's data can make Metal abort the process (the log then has a host
+call stack, for example `-[MTLTextureDescriptorInternal validateWithDevice:]` "requests 9 mipmap levels, but the
+dimensions (1, 1, 1) can only support 1"). A texture with more mip levels than its size holds is something the Switch
+never checks and Metal refuses to build; the app caps the chain at what the dimensions allow and logs
+`[tex] <w>x<h>x<d> ... 声明 N 级 mip ...`, so check the mod's texture if the picture looks wrong.
 
 <a id="chinese"></a>
 ## 中文
 
-Mac App 只加载 **RomFS mod**。`exefs/` 里的文件不会被加载（运行时用的是改写后的 `main`、`sdk` 和
-`subsdk0`，IPS 和 pchtxt 不会自动生效），App 也不会扫描文件夹找 mod。是否使用某个 mod，完全由
-`manifest.tsv` 决定。
+一个 mod 有两种方式进入游戏：
+
+- **RomFS 内容**在游戏运行时加载，是否生效完全由 `manifest.tsv` 决定，App 不会扫描文件夹找 mod。
+- **主模块的代码补丁**（`exefs/main.pchtxt`、`exefs/*.ips`、`exefs/*.ips32`）在**构建时**用 `--mod`
+  合并进 App，见下面的「代码补丁（构建时合并）」。
+
+`exefs/` 里的文件在运行时一律不加载：App 跑的是构建时改写好的三个代码模块，按 SHA-256 绑定。代码只能
+在构建这一环节改变。
 
 启动器把 `TOTK_ROMFS_MODS` 指向
 
@@ -161,6 +272,63 @@ Mac App 只加载 **RomFS mod**。`exefs/` 里的文件不会被加载（运行�
 文件，先把旧的版本目录整个移走（或备份后删除）再复制，否则被删掉的文件会继续生效。每次改动后
 都要重新生成清单。
 
+### 代码补丁（构建时合并）
+
+改了游戏代码的 mod 会带 `exefs/` 文件：IPS、IPS32 补丁，或者新的文本格式 `.pchtxt`。这些可以在
+构建 App 时合并进去：
+
+```bash
+python3 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys" --mod "/path/to/Mod"
+```
+
+传入的文件夹按 mod 的常见结构放文件——代码在 `exefs/`、数据在 `romfs/`。构建只读 `exefs/`，
+`romfs/` 那一半仍按上面的步骤单独安装。带 `--update` 时补丁合并进更新后的模块，也就是 App 实际运行的
+那个。
+
+构建做的事，按顺序：
+
+1. 照常解出并核对原版 ExeFS。补丁只打在当前版本、核对过的原版模块上，绝不会打在已经改写过的模块上。
+2. 打补丁。偏移量都是**主地址**（游戏代码所在的地址空间，和 App 自己补丁表用的数字一致）：
+
+   - `.pchtxt`：社区文本格式，读取规则和运行时完全一致。第一行必须是 `@nsobid-<build id>`：改写器
+     表里用的 16 字节（32 位十六进制）或运行时比较的 20 字节（40 位十六进制；运行时自己的
+     `TOTK_PCHTXT` 实验只认长的这种）。后面是 `<十六进制主地址> <十六进制字节>` 行，只有 `@enabled`
+     与 `@stop` 之间的行生效。这一行就是文件和这个 main 的绑定，所以文件名可以随便起。
+   - `.ips` / `.ips32`：按模拟器的用法应用，其偏移量包含 0x100 字节的 NSO 头，构建时会减掉 0x100。
+     偏移小于 0x100、文件截断、缺少 `EOF` 都算错误。这种文件本身不写模块名和 build id，所以只有名字是
+     `main`，或者是 main 的 build id（`exefs/<build id>.ips`，Atmosphere 和模组管理器的约定）时才会
+     当作 main 补丁读入；其余情况（给 `sdk`、`subsdk9` 的补丁，或者名字里是另一个 build id 的补丁）
+     会留出清单并提示。名字叫 `main` 的 `.ips` 没有 id 可核对，想要这道检查就按 build id 命名，或者
+     改成 `.pchtxt`。
+
+3. 打完后先检查再往下走。以下情况会被拒绝，并指出地址和原因：补丁落在 main 的 text、rodata、data
+   之外（text 之后的填充区是保留的）；两个补丁文件改同一批字节；补丁什么都没改；补丁改到了 App 自己
+   打补丁的位置——60 帧与实时单帧步进的地址、渲染/输出分辨率、超宽屏、布料，以及改写器登记的 cut。
+   这些功能请交给 App（`TOTK_FPS60`、`TOTK_REALTIME`、`TOTK_RENDER_RES`、`TOTK_OUTPUT_RES`、
+   `TOTK_ASPECT`）：运行时会逐个核对那里原来的指令，被改了就直接停止游戏。
+4. 把打过补丁的模块改写为 Apple 芯片版本，App 按它的 SHA-256 绑定。`--work` 里的报告（1.0.0 是
+   `analysis/phase12-validation.json`，其他版本是 `analysis/<version>-port/phase12-validation.json`，
+   字段 `mod_exefs`）记录 mod 目录、每个补丁文件的 SHA-256、改动的地址和合并后模块的哈希。
+
+iPhone / iPad 构建同样处理：`--mod` 加 `--platform ios`。
+
+mod 的 `exefs/` 里可能还有这些文件，构建这样处理：
+
+| mod 的 `exefs/` 里 | 结果 |
+| --- | --- |
+| 给 main 的 `*.pchtxt`、`*.ips`、`*.ips32` | 合并进构建；`.ips` 必须叫 `main` 或按 main 的 build id 命名，`.pchtxt` 由 `@nsobid-` 指定版本、文件名任意 |
+| `main.npdm` | 忽略并提示：原生加载器不读模块元数据 |
+| `subsdk9` 等额外代码模块 | **不加载**：构建输出和报告里都会注明；App 只加载构建时的三个模块（main、sdk、subsdk0），模块自己的代码不会运行 |
+| 整个替换的 `main` | 拒绝：请改成补丁，构建才能按版本核对 |
+
+用 exlaunch 这类 hook 框架做的 mod，运行时改代码的部分就在这种额外模块里：它的 trampoline 在本 App
+里不会安装。像 The Second Quest 这样的 mod，主模块补丁和整个 RomFS 都会生效，但依赖那个模块的那部分
+代码改动不会。要支持它就得让 App 具备模块加载能力（把模块也改写为 Apple 芯片版本，并实现它用到的
+服务），本版本没有做；需要的话请带上模块和它改了什么开个 issue。
+
+构建之后再改 mod 就要重新构建（mod 的字节已经是 App 的一部分）。已经合并过的结果会复用：记录的哈希
+一致时跳过改写。
+
 ### 注意
 
 - 不要手改 `manifest.tsv`，每次重新生成。
@@ -169,8 +337,35 @@ Mac App 只加载 **RomFS mod**。`exefs/` 里的文件不会被加载（运行�
   文件夹嵌套进去。两个 mod 改同一个路径时，只能选一个文件。
 - 构建本身也会替换几个 RomFS 文件：`UI/LayoutArchive/Common.Product.<n>.Nin_NX_NVN.blarc.zs`（快捷菜单时机，`<n>`
   按版本是 100、110 或 140）、`Event/EventFlow/DmF_SY_GameOver.bfevfl.zs`，开 2K 输出时还有
-  `System/HeapSize/Product.Nin_NX_NVN.HeapDef.byml.zs`。模组如果也替换其中一个，启动时会报“two overlays replace the
-  same file”并停止，目前只能把那个文件从模组里去掉（界面翻译模组会碰到，见 #73）。
-- `exefs/` 不会被加载，只有 RomFS 内容生效。（`TOTK_PCHTXT` 是开发者的 pchtxt 实验入口，不是
-  通用的 mod 加载器。）
+  `System/HeapSize/Product.Nin_NX_NVN.HeapDef.byml.zs`。模组如果也替换其中一个，就无法和 App 自己的版本同时加载
+  （启动会报“two overlays replace the same file”），所以清单会把这些路径留给 App，并说明排除了哪个文件
+  （界面翻译模组会碰到，见 #73）。
+- 这些文件由 `make_mod_manifest.py` 自己处理：路径与 App 自身替换项相同的模组文件不会写进清单（并打印一行说明），
+  因为两份覆盖无法同时加载。堆表是构建能合并的例外：带 `--mod` 时 2K 覆盖文件是**在模组那份堆表之上**生成的，模组自己的
+  堆大小和 2K 贴图堆同时成立；清单那一行会告诉你 App 是否已经带着这些堆大小（`already carries these heap sizes`），
+  否则提示你用 `--mod` 重新构建。
+- 模组管理器（TKMM，或 Ryujinx 的 `mods/contents/<title id>/<name>`）给出的是同一个文件夹里的 `exefs/` 和 `romfs/`：
+  把这个文件夹交给 `--mod`（里面的 `exefs` 补丁会合并，管理器合并出来的 `.ips` 可能一个文件里装着好几个模组的记录），
+  再把它 `romfs/` 的内容拷进对应版本的 mods 目录并生成清单（不需要再手动 `--exclude`：管理器的堆表和 App 的 2K 覆盖
+  文件会自动协调）。每次在管理器里重新合并后都要重新生成清单：游戏启动时会逐个校验文件哈希。
+- 带代码补丁的 mod，其 `exefs/` 补丁也要和构建所用的游戏版本一致。构建按文件自己写的东西核对：`.pchtxt` 的
+  `@nsobid-` 不是这个 main 就拒绝；按 build id 命名的 `.ips` / `.ips32`，id 不是这个 main 就留出并提示。
 - 本文面向 Mac App；iPhone/iPad 的 App 容器内安装未在此说明。
+
+### 启动停止时
+
+游戏会关掉窗口，并在 `~/Library/Logs/MacNativeGames/totk.log` 写下最后一行原因，它上面一行就是出问题的文件。
+
+- `two overlays replace the same file`：清单里列了 App 自己也会替换的路径——通常是手工写的清单或别的工具写的清单，
+  因为 `make_mod_manifest.py` 自己就会把这类路径排除。用那个脚本重新生成即可。
+- `two overlays add the same file`：两个覆盖（App 的或两个模组目录）新增了同一个 RomFS 里没有的路径。
+- `RomFS overlay integrity mismatch`：模组目录里的文件和清单里的 SHA-256 不一致，也就是生成清单之后又拷了文件进去。
+  重新生成清单即可（`make_mod_manifest.py` 遇到对不上的文件不会写清单）。
+- `RomFS overlay names a file the RomFS lacks` / `adds a file the RomFS already has`：替换项的“原件”对不上（文件是从
+  别的游戏版本拷来的）；按对应版本重新生成清单并重新构建 App。
+- `RomFS overlay file changed while the game ran`：游戏运行中改了文件夹；重启游戏并重新生成清单。
+
+窗口也可能直接消失、日志里没有上面这些行：某个模组的数据能让 Metal 直接终止进程（此时日志里有宿主调用栈，例如
+`-[MTLTextureDescriptorInternal validateWithDevice:]` 报 “requests 9 mipmap levels, but the dimensions (1, 1, 1) can only
+support 1”）。mip 级数超过尺寸允许的贴图在 Switch 上没人检查，Metal 却拒绝创建；App 会把级数裁到尺寸允许的数量并记一行
+`[tex] <w>x<h>x<d> ... 声明 N 级 mip ...`，画面不对时应检查该模组的贴图。
