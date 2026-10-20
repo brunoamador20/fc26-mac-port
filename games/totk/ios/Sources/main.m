@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <math.h>
 #include "runtime.h"
+#include "dmsh_chain.h"
 #import "touch_pad.h"
 
 int totk_host_main(int argc, char **argv);
@@ -80,7 +81,21 @@ void runtime_shortcut_help_toggle(void) {}
     setenv("TOTK_ROMFS_PATCHES_OUT",[res stringByAppendingPathComponent:@"romfs-patches-out"].fileSystemRepresentation,1);
     setenv("TOTK_SHARED_FONTS",[res stringByAppendingPathComponent:@"shared-fonts"].fileSystemRepresentation,1);
     setenv("TOTK_SHADER_SEED_DIR",[res stringByAppendingPathComponent:@"shader-seed"].fileSystemRepresentation,1);
-    setenv("TOTK_SHADER_CACHE",[docs stringByAppendingPathComponent:@"shader-cache"].fileSystemRepresentation,1);
+    /* One folder per translation chain, as on the Mac: the runtime refuses translations of another chain, and the seed
+       import keeps files that are already there. Builds before the v5 chain (2026-10-20) kept them directly in
+       shader-cache; those, and other chains' folders, are only cache and are removed in the background. */
+    NSString *cacheRoot = [docs stringByAppendingPathComponent:@"shader-cache"], *chainDir = @"rt-" DMSH_CHAIN;
+    NSString *cache = [cacheRoot stringByAppendingPathComponent:chainDir];
+    [fm createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
+    setenv("TOTK_SHADER_CACHE",cache.fileSystemRepresentation,1);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
+        NSFileManager *files = [NSFileManager new]; NSUInteger removed = 0;
+        for (NSString *name in [files contentsOfDirectoryAtPath:cacheRoot error:nil] ?: @[]) {
+            if ([name isEqualToString:chainDir]) continue;
+            if ([files removeItemAtPath:[cacheRoot stringByAppendingPathComponent:name] error:nil]) removed++;
+        }
+        if (removed) fprintf(stderr,"[shader-cache] removed %lu entries of earlier translation chains\n",(unsigned long)removed);
+    });
     // Shaders the shared list lacks (totk_shader_contrib.h), in the Files app for players who want to send them; only the Mac asks.
     setenv("TOTK_SHADER_CONTRIB",[docs stringByAppendingPathComponent:@"shader-list-contribution.txt"].fileSystemRepresentation,1);
     setenv("DM_NVN_SHMAP",[res stringByAppendingPathComponent:@"shader-seed/shader_map.tsv"].fileSystemRepresentation,1);
