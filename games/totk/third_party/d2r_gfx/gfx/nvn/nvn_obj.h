@@ -177,13 +177,30 @@ void botw_dead_forget(const uint64_t *serials, size_t n);
    fragment shader 0af88d51 (a 3-vertex triangle: five texel reads around the fragment's own coordinates, an edge-directed
    sharpening of the sampled colour; no dynamic resolution, so the valid region is the whole source). MetalFX replaces the
    whole draw (mfxup_dock; botw.md). */
-#define BOTW_MFXUP_DOCK_KEY(fs) int botw_ = !strncmp((fs)->key, "0af88d51bb12a2346b03bb2586d131def5a631271df192779b701efba6eb7f70-", 65);
+void botw_mfx_scene_ready(void);   /* the upscale draw happened (or MetalFX replaced it): the canvas holds the scene */
+#define BOTW_MFXUP_DOCK_KEY(fs) int botw_ = !strncmp((fs)->key, "0af88d51bb12a2346b03bb2586d131def5a631271df192779b701efba6eb7f70-", 65); if (botw_) botw_mfx_scene_ready();
 #define BOTW_AND_NOT_DOCK && !botw_
 #define BOTW_MFXUP_DOCK_REGION(cw, ch, src) if (botw_ && !why) { (cw) = (src).width; (ch) = (src).height; }
 /* Breath of the Wild's upscale draw writes RGB only (mask 0x7): the canvas keeps its cleared alpha, which nothing reads
    (the final copy into the swapchain is opaque); MetalFX writes alpha too. TOTK's draw writes all four. */
 #define BOTW_MFXUP_MASK_BAD (botw_ ? (S.chmask.mask & 0x7) != 0x7 : (S.chmask.mask & 0xf) != 0xf)
+/* Key 2 (MetalFX frame interpolation, totk_mfx.m): Breath of the Wild's canvas is RGB10A2 (no float format), its scene is
+   finished by the upscale draw 0af88d51 (every later draw into the canvas is UI: the scene copy is taken before the first of
+   them), and its camera block is vertex uniform 0, 2336 bytes (view, view-projection, projection, inverse view, near / far,
+   aspect, field of view and size at the same offsets as TOTK's 2368-byte block; botw.md). */
+#define MFX_CANVAS_FMT_OK(f) (pf_is_float(f) || (f) == MTLPixelFormatRGB10A2Unorm)
+int botw_mfx_ui_draw(void *prog);   /* a draw into the canvas after the upscale draw is UI; the canvas is also drawn into before the scene (cleared and used early in the frame), those draws are not */
+void botw_mfx_frame_reset(void);
+#define MFX_UI_DRAW(pr) botw_mfx_ui_draw((__bridge void *)(pr))
+#define BOTW_MFX_FRAME_RESET() botw_mfx_frame_reset();
+#define MFX_CAM_SLOT 0
+#define MFX_CAM_SIZE 2336
 #else
+#define MFX_CANVAS_FMT_OK(f) pf_is_float(f)
+#define MFX_UI_DRAW(pr) mfx_ui_vs(pr->sh[0]->key)
+#define BOTW_MFX_FRAME_RESET()
+#define MFX_CAM_SLOT 1
+#define MFX_CAM_SIZE 2368
 #define BOTW_MFXUP_MASK_BAD (S.chmask.mask & 0xf) != 0xf
 #define BOTW_MFXUP_DOCK_KEY(fs)
 #define BOTW_AND_NOT_DOCK

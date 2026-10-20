@@ -2161,6 +2161,29 @@ static int gpu_owned(uint64_t k) { pthread_mutex_lock(&g_smu); int d = nvn_hm_ge
 
 static uint64_t *g_dead_put; static int g_dead_put_n, g_dead_put_cap; static uint64_t g_dead_put_total;
 static int serial_is_dead(uint64_t k) { pthread_mutex_lock(&g_smu); int d = nvn_hm_get(&g_dead_serial, &k) != NULL; pthread_mutex_unlock(&g_smu); return d; }
+/* 2026-10-20: a finalised serial is forgotten (dropped from g_dead_serial and g_gpu_owned) once nothing can bring it back:
+   no recording copy names it (dm_nvn_pin_has_serial: only a recording's texture copy brings a serial to the replay) and
+   no texture-pool slot is registered with it (g_treg_refs, kept by mtl_reg_tex and tex_by_id's redirect: such a slot still
+   follows the serial to the live texture at its memory). Before, both sets only grew: Breath of the Wild finalises about
+   80 textures a frame and had 17.4 million entries after 30 minutes on a static screen, TOTK about 130 MB in 27 minutes. */
+static nvn_hmap g_treg_refs = {.klen = 8};   /* serial -> pool slots registered with it (g_rmu) */
+static uint64_t g_serial_forgotten;
+static void treg_ref_locked(uint64_t serial, int delta) {   /* g_rmu held */
+    if (!serial) return;
+    uintptr_t n = (uintptr_t)nvn_hm_get(&g_treg_refs, &serial);
+    n = delta > 0 ? n + 1 : n ? n - 1 : 0;
+    if (n) nvn_hm_put(&g_treg_refs, &serial, (void *)n); else nvn_hm_del(&g_treg_refs, &serial);
+}
+static void serial_forget_locked_rmu(uint64_t k) {   /* g_rmu held (g_rmu -> g_pin_mu and g_rmu -> g_smu are the allowed orders) */
+    extern int dm_nvn_pin_has_serial(uint64_t serial);
+    if (!k || nvn_hm_get(&g_treg_refs, &k) || dm_nvn_pin_has_serial(k)) return;
+    pthread_mutex_lock(&g_smu);
+    if (nvn_hm_del(&g_dead_serial, &k)) g_serial_forgotten++;
+    nvn_hm_del(&g_gpu_owned, &k);
+    pthread_mutex_unlock(&g_smu);
+}
+static inline int registry_lock(void); static inline void registry_unlock(void);
+static void serial_forget_if_unreferenced(uint64_t k) { registry_lock(); serial_forget_locked_rmu(k); registry_unlock(); }
 static void dead_put_note(uint64_t k) {
     pthread_mutex_lock(&g_smu);
     if (g_dead_put_n == g_dead_put_cap) { g_dead_put_cap = g_dead_put_cap ? g_dead_put_cap * 2 : 256; g_dead_put = realloc(g_dead_put, g_dead_put_cap * sizeof *g_dead_put); if (!g_dead_put) MDIE("dead-serial list"); }
@@ -2377,6 +2400,11 @@ static int wb_level_back(const tex_t *t, id<MTLTexture> mt, unsigned level, unsi
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     uint32_t lw = MAX(t->d.width >> level, 1u), lh = MAX(t->d.height >> level, 1u);
     size_t lp = (size_t)((lw + bw - 1) / bw) * bpb, lr = (lh + bh - 1) / bh;
+    /* This runs on the game's thread (nvnMemoryPoolInvalidateMappedRange), which has no autorelease pool: without one the
+       autoreleased command buffer kept its blit encoder and this read-back buffer for ever (one 16 KiB buffer and one
+       blit context per written-back level: Breath of the Wild writes back about 130 a second, 3.7 GB of GPU memory in 30
+       minutes; TOTK's AGXG16GFamilyBuffer / BlitContext pairs growing by the thousands per lap were the same). */
+    @autoreleasepool {
     id<MTLBuffer> buf = [g_dev newBufferWithLength:lp * lr options:MTLResourceStorageModeShared];
     if (!buf) return 0;
     id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = enc_b_begin(cb);
@@ -2385,6 +2413,7 @@ static int wb_level_back(const tex_t *t, id<MTLTexture> mt, unsigned level, unsi
     enc_b_end(b); cb_commit(cb); cb_wait(cb);
     if (nvn_swizzle(&t->d, level, layer, (const uint8_t *)buf.contents, lp, t->mem)) return 0;
     g_wb_bytes += lp * lr;
+    }
     return 1;
 }
 void mtl_pool_invalidate(const pool_t *p, uint64_t off, uint64_t n) {
@@ -3444,7 +3473,8 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     MLOG("内存 至帧 %llu：常驻 %llu MB，显卡已分配 %llu MB，延迟释放队列 %lu，驻留集 %lu 个，内存池 %d 个（峰值 %d / 跟踪表容量 %d），贴图重传累计 %llu 次", frame, rss_mb, gpu, nd, nr, live, peak, cap, (unsigned long long)g_pkg_reuploads);
     MLOG("已死序号纹理累计 %llu 张（替换前即为泄漏来源）", (unsigned long long)g_dead_put_total);
     pthread_mutex_lock(&g_smu); unsigned dead_n = g_dead_serial.n, owned_n = g_gpu_owned.n; pthread_mutex_unlock(&g_smu);
-    MLOG("序号表：已销毁 %u 个，GPU 画过 %u 个（两张表都只增不减，见 mtl_dead_forget）", dead_n, owned_n);
+    registry_lock(); unsigned refs_n = g_treg_refs.n; registry_unlock();
+    MLOG("序号表：已销毁 %u 个，GPU 画过 %u 个（没有录制副本和池槽位引用后忘掉的累计 %llu 个；池槽位引用着 %u 个序号）", dead_n, owned_n, (unsigned long long)g_serial_forgotten, refs_n);
     pthread_mutex_lock(&g_smu); int ndet = g_stor_ndet; pthread_mutex_unlock(&g_smu);
     MLOG("可压缩贴图跨格式换主 %llu 次（其中换回原贴图 %llu 次），暂存旧登记 %d 个（TOTK_COMPRESSED_ALIAS=1 恢复跨格式共用）", (unsigned long long)g_stor_handover, (unsigned long long)g_stor_taken_back, ndet);
     MLOG("共享存储贴图：条目 %llu，共用 %llu 次，格式视图 %llu 次，重建 %llu 次，闲置回收 %llu，随内存池释放 %llu", (unsigned long long)g_stor_entries, (unsigned long long)g_stor_shared, (unsigned long long)g_stor_viewed, (unsigned long long)g_stor_recreated, (unsigned long long)g_stor_swept, (unsigned long long)g_stor_dropped);
@@ -3473,13 +3503,14 @@ void mtl_tex_release(tex_t *t) {
     BOTW_SERIAL_NOTE(t->serial, "nvnTextureFinalize") BOTW_TEX_RELEASE_KEEP(t->serial) serial_del(t->serial);
     pthread_mutex_lock(&g_smu); nvn_hm_put(&g_dead_serial, &t->serial, (void *)1); ser_bump_locked(t->serial); pthread_mutex_unlock(&g_smu);   // view caches of this serial look again (dead-serial follow)
     treg_drop_serial(t->serial);
+    serial_forget_if_unreferenced(t->serial);   // nothing names it any more: no need to remember it
 }
 /* TOTK (2026-10-17): not yet. A finalized serial must stay remembered while a texture-pool slot still names it: tex_by_id
    follows such a slot to the live texture at the same storage only for a remembered serial. The first version forgot a
    serial once no recording's texture copy had it (and did not remember unpinned ones at all): analysis/long20b made not one
    dead-serial texture where long19 made 538,563, i.e. slots kept textures of finalized serials instead of following them.
    Forgetting needs the number of slots per serial; until then the set keeps every finalized serial, as before. */
-void mtl_dead_forget(const uint64_t *serials, size_t n) { BOTW_DEAD_FORGET(serials, n) (void)serials; (void)n; }
+void mtl_dead_forget(const uint64_t *serials, size_t n) { BOTW_DEAD_FORGET(serials, n) for (size_t i = 0; i < n; i++) serial_forget_if_unreferenced(serials[i]); }
 
 // ---------- 渲染通道：SetRenderTargets 开新通道；通道里第一条命令之前的清除并进 load 动作 ----------
 // ---------- Render passes: SetRenderTargets opens a new pass; clears before the first command in the pass are folded into the load action ----------
@@ -4148,7 +4179,7 @@ static void mfx_pass_setup(MTL4RenderPassDescriptor *pd) {
         if (to_swap) {
             if (g_mfx.last_c0 && g_mfx.canvas != g_mfx.last_c0) { g_mfx.canvas = g_mfx.last_c0; MLOG("[mfx] canvas: texture %llu (%ux%u), copied to presented texture %llu", (unsigned long long)g_mfx.canvas, g_mfx.swap_w, g_mfx.swap_h, (unsigned long long)t0->serial); }
         } else if (c0.width >= 640 && fabs((double)c0.width * g_mfx.swap_h / ((double)c0.height * g_mfx.swap_w) - 1) < 0.01 && pd.colorAttachments[0].level == 0 &&
-                   pf_is_float(c0.pixelFormat) && !pd.depthAttachment.texture)
+                   MFX_CANVAS_FMT_OK(c0.pixelFormat) && !pd.depthAttachment.texture)
             g_mfx.last_c0 = t0->serial;
     }
     id<MTLTexture> dt = pd.depthAttachment.texture;
@@ -4967,6 +4998,9 @@ void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
     g_treg_changed++;
     g_reg_gen++;
     if (g_treg[id_].view) treg_clear_view_locked(id_);
+    uint64_t was = g_treg[id_].ok ? g_treg[id_].t.serial : 0;   // the serial this slot named before: one reference less (serial_forget_locked_rmu)
+    if (t && t->serial != was) treg_ref_locked(t->serial, 1);
+    if (was && (!t || t->serial != was)) { treg_ref_locked(was, -1); serial_forget_locked_rmu(was); }
     g_treg[id_].ok = t != NULL; if (t) g_treg[id_].t = *t; g_treg[id_].has_v = v != NULL;
     if (v) g_treg[id_].v = *v; else memset(&g_treg[id_].v, 0, sizeof g_treg[id_].v);   // TOTK: a registration without a view must not keep the slot's previous view (depth texture once got a stale BC3 9-level view)
     if (id_ < (1 << 20)) atomic_store_explicit(&g_tser[id_], t ? t->serial : 0, memory_order_release);
@@ -5184,7 +5218,9 @@ static id<MTLTexture> tex_by_id(int tid) {   // 调用方持 g_rmu | Caller hold
             static uint64_t n; if (n++ < 4 || n % 100000 == 0) MLOG("texture id %d: registration followed its storage from finalised serial %llu to live serial %llu (%u redirects so far)", tid, (unsigned long long)rp->t.serial, (unsigned long long)live.serial, (unsigned)n);
             if (rp->view) treg_clear_view_locked(tid);
             if (totk_life_on() && totk_life_match(&live)) totk_life_log("use fc=%llu id=%d redirect %llu -> %llu mem=%p", (unsigned long long)atomic_load(&g_cur_frame), tid, (unsigned long long)rp->t.serial, (unsigned long long)live.serial, (void *)live.mem);
+            treg_ref_locked(live.serial, 1); treg_ref_locked(rp->t.serial, -1); uint64_t was_ = rp->t.serial;
             rp->t = live; if (tid < (1 << 20)) atomic_store_explicit(&g_tser[tid], live.serial, memory_order_release);
+            serial_forget_locked_rmu(was_);
             dead = 0;
         }
     }
@@ -8768,8 +8804,8 @@ static void prepare_draw_textures(NvProg *pr) {
    projection, inverse view, near / far, aspect, field of view; floats 84..167 hold the camera of two frames earlier). */
 static void mfx_take_camera(void) {
     g_mfx.want_cam = 0;
-    const p_bind_buf *u = &S.ubo[0][1]; float cam[84];
-    if (u->addr && u->size == 2368) {
+    const p_bind_buf *u = &S.ubo[0][MFX_CAM_SLOT]; float cam[84];
+    if (u->addr && u->size == MFX_CAM_SIZE) {
         pend_materialize(u->addr, (uint8_t *)cam, sizeof cam, 0);   // the bytes this draw sees: memory plus pending inline updates
         mfx_note_camera(cam, 84);
         /* TOTK_MFX_CAMLOG=<first>-<last frame>: every captured camera (diagnostic) */
@@ -9488,7 +9524,7 @@ frz_plain:;
     if (!g_enc) { g_fd_dw = dw; g_fd_di = di; }
     if (g_enc && g_lay.active && !lay_draw_ok(pr, dw, di)) {   // TOTK: this draw cannot write its layer: end the layered pass, draw in a plain one
         PD("L %llu 分层通道内的绘制不能写层号，在此切开", g_stat_pass); rp_end(); g_lay.refuse = 1; g_lay.refused++; }
-    if (!g_mfx.scene_done && g_mfx.canvas && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_mfx.canvas && pr && pr->sh[0] && mfx_ui_vs(pr->sh[0]->key) && mfx_enabled())
+    if (!g_mfx.scene_done && g_mfx.canvas && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_mfx.canvas && pr && pr->sh[0] && MFX_UI_DRAW(pr) && mfx_enabled())
         mfx_snapshot_scene();   // TOTK_MFX: first UI draw into the canvas: copy the finished scene first
     id<MTLRenderCommandEncoder> en = rp_begin_ex(mode);
     g_fd_dw = NULL; g_fd_di = NULL;
@@ -11988,7 +12024,7 @@ static int mfx_present_frame_body(const tex_t *t, double period, int discard) {
             d.storageMode = MTLStorageModeShared; g_mfx_swap_prev = [g_dev newTextureWithDescriptor:d]; }
         if (sc && g_mfx_swap_prev) { mtl_finish_gpu(); id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder]; [b copyFromTexture:sc toTexture:g_mfx_swap_prev]; [b endEncoding]; cb_commit(cb); cb_wait(cb); }
     }
-    g_mfx.scene_done = g_mfx.ui_cleared = g_mfx.depth_done = g_mfx.want_cam = 0;
+    g_mfx.scene_done = g_mfx.ui_cleared = g_mfx.depth_done = g_mfx.want_cam = 0; BOTW_MFX_FRAME_RESET()
     if (++g_mfx.frames % 300 == 0) { char b[256]; mfx_stats(b, sizeof b); MLOG("[mfx] 至帧 %llu：%s", (unsigned long long)atomic_load(&g_cur_frame), b); }
     return slot;
 }
@@ -11997,7 +12033,7 @@ static int mfx_present_frame(const tex_t *t, double period, int discard) {
 }
 uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
     int discard = atomic_load(&g_present_discard), islot = mfx_enabled() && t ? mfx_present_frame(t, period, discard) : -1;
-    if (mfx_latch() && !mfx_enabled()) g_mfx.scene_done = g_mfx.ui_cleared = g_mfx.depth_done = g_mfx.want_cam = 0;   // key 2 / flag mfx_interp: the next frame is fully on or off
+    if (mfx_latch() && !mfx_enabled()) { g_mfx.scene_done = g_mfx.ui_cleared = g_mfx.depth_done = g_mfx.want_cam = 0; BOTW_MFX_FRAME_RESET() }   // key 2 / flag mfx_interp: the next frame is fully on or off
     if (discard) return 0;   // 票号 0 = 没有待完成的上屏，取交换链贴图处不等 | Ticket number 0 = no pending present; the swapchain texture acquire does not wait
     if (t) { xv_check(t->serial, 0, 0, "出图"); if (g_xv_npresent < 128) g_xv_present[g_xv_npresent++] = t->serial; }
     static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, present_start);
@@ -13635,6 +13671,18 @@ void botw_dead_forget(const uint64_t *serials, size_t n) {
         pthread_mutex_lock(&g_smu); int kept = nvn_hm_get(&g_bdead_kept, &k) != NULL; if (kept) { nvn_hm_del(&g_bdead_kept, &k); g_bdead_freed_n++; } pthread_mutex_unlock(&g_smu);
         if (kept) { BOTW_SERIAL_NOTE(k, "dead copy swept: texture released") serial_del(k); treg_drop_serial(k); }
     }
+}
+/* Key 2 (MetalFX frame interpolation): the scene copy is taken before the first UI draw into the canvas, and in this game
+   the canvas is also drawn into early in the frame, before the scene (cleared, a few draws); only a draw after the upscale
+   draw 0af88d51 (or after MetalFX replaced it, mfxup_dock) counts as UI. Reset every game frame (BOTW_MFX_FRAME_RESET). */
+static int g_botw_scene_ready;
+void botw_mfx_scene_ready(void) { g_botw_scene_ready = 1; }
+void botw_mfx_frame_reset(void) { g_botw_scene_ready = 0; }
+int botw_mfx_ui_draw(void *prog) {
+    NvProg *pr = (__bridge NvProg *)prog;
+    if (!pr->sh[1]) return 0;
+    if (!strncmp(pr->sh[1]->key, "0af88d51bb12a2346b03bb2586d131def5a631271df192779b701efba6eb7f70-", 65)) { g_botw_scene_ready = 1; return 0; }
+    return g_botw_scene_ready;
 }
 /* DM_NVN_TILELOG diagnostics: serials a [tile] line was logged for are remembered (what == NULL), and the serial table's
    deletions of them are logged with the reason (what), to see who drops a watched texture's host record. */
