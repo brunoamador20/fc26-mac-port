@@ -298,3 +298,23 @@ Commits: `e0c96a0` (graphics: title screen), `2706d98` (sound, patches, pacing, 
   launcher's fixed 900p now uses it). 1920x1080 and 2560x1440 stop in the game's render setup (`main+0x69de80`): a
   texture creation fails (`main+0x69ea3c`, half the largest render size), most likely the game's fixed render-target
   heap; 1280x720 also fails. Open: find and enlarge that heap.
+
+### 2026-10-19: frozen picture, and the beige wash over chapter select and gameplay
+
+**Frozen picture while sound and input go on.** macOS pauses `CAMetalDisplayLink` while it believes the window is
+covered, and then nothing reaches the screen. `DM_PRESENT_LINK_FALLBACK=1` (set by the launcher) switches to the
+classic present path when the link stays silent, and goes back when it calls again. Commit `629acec`.
+
+**Beige screen.** Chapter select and gameplay came out as a flat beige, with the UI drawn over it.
+- The final pass scales the scene by an exposure word, `S[3]`, read from a 32-byte storage buffer. That buffer was
+  always zero.
+- No CPU write ever reached it: the write watchpoint (`TOTK_WATCH_ADDR`) saw none. No dispatch, copy or update in the
+  frame wrote it either.
+- The pass dump showed three draws dropped every frame as `no-encoder`. The new reason code in that line
+  (`why=2`, no Metal attachment) showed that these draws have **no render target at all**: no colour, no depth.
+  Bayonetta computes its exposure with attachment-less draws whose fragment shaders write storage buffers.
+- Fix (shared NVN layer): such a pass opens with no attachments, a set size (the viewport's extent, or the scissor's)
+  and one sample. A later draw in it that needs a larger area reopens the pass. TOTK never draws without a target, so
+  its passes are unchanged. Dumps now show these passes as `P <pass> none WxH`.
+- Ruled out on the way: the renamed uniform-update path for `ClearBuffer` (`TOTK_UB_RENAME=0` changes nothing). The
+  81920-byte buffer that `ClearBuffer` clears is an occlusion-visibility list (`s0[object] = 0xffff`), not a histogram.
