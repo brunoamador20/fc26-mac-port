@@ -2,6 +2,7 @@
 """MacNativeGames: turn your own XCI or NSP into a native Mac app or iPhone/iPad IPA.
 
     python3 build_app.py <game.xci|game.nsp> -k <prod.keys> [--platform macos|ios] [-o <output>] [--work <folder>]
+                         [--update <update.nsp>] [--mod <mod folder>]
 
 Supported: TOTK base 1.0.0 (0100F2C0115B6000), XCI or NSP; optional --update with a supported cumulative update.
 Also Breath of the Wild 1.6.0 (01007EF00011E000) as one card image holding the base game, the update and the add-on
@@ -14,7 +15,10 @@ Nothing from the game is in this repository; everything is made from your files 
 Steps (each one checked against games/totk/assets/expected-v<version>.json, so a damaged dump or another version stops the
 build at the first wrong file; a different dump of the same version is accepted — main.npdm by Nintendo's ACID
 signature, or signed again by a dump tool once all four code modules match, shared fonts by valid BFTTF structure):
-  1. code: ExeFS out of the XCI or NSP, the three code modules rewritten for Apple silicon (games/totk/third_party/d2r)
+  1. code: ExeFS out of the XCI or NSP, a mod's main-module code patches merged when --mod is given
+     (games/totk/scripts/mod_exefs.py, after checking them against the sites the app patches itself,
+     games/totk/scripts/patch_sites.py), the three code modules rewritten for Apple silicon
+     (games/totk/third_party/d2r)
   2. data: RomFS (17 GB), the system shared fonts (from XCI firmware or an explicit font source), the RomFS overlays
   3. shaders: SPIRV-Cross (fetched at a pinned commit, compiled with clang) and the shader translator, which ships
      ready-made as a native program (games/totk/prebuilt/macos-arm64: vendor/ryujinx + patches + Service.cs, made with
@@ -418,7 +422,39 @@ def fonts_valid(folder):
         return False
 
 
-def step_code(tree, game, keys, env, logs, *, version="v0"):
+def merge_mod_exefs(tree, mod, version, logs):
+    """Merge a mod's main-module code patches into a copy of the verified retail main (scripts/mod_exefs.py): the
+    game's own patch sites are checked first, and the merged module is what the rewrite and the app are built from.
+    The retail extracted/<version>/exefs is never touched, so version identification and its pinned hashes stay put."""
+    py = tree / '.venv/bin/python'
+    staged = tree / f'extracted/{version}/mod-exefs'
+    if staged.exists():
+        shutil.rmtree(staged)
+    main, report_path = staged / 'main', tree / f'extracted/{version}/mod-exefs.json'
+    previous = {}                      # the report of the last build: the same patches keep the same rewrite
+    if report_path.is_file():
+        try:
+            previous = json.loads(report_path.read_text())
+        except ValueError:
+            previous = {}
+    run([py, 'scripts/mod_exefs.py', 'apply', '--exefs', tree / f'extracted/{version}/exefs', '--mod', mod,
+         '--version', version, '--output', main, '--report', report_path],
+        logs / f'mod-exefs-{version}.log', cwd=tree)
+    merged = json.loads(report_path.read_text())
+    if merged.get('status') != 'pass' or merged.get('version') != version:
+        raise BuildError(f'{report_path} is not a merge report for {version}')
+    if previous.get('patched_main_sha256') == merged['patched_main_sha256'] and previous.get('rewritten_main_sha256'):
+        merged['rewritten_main_sha256'] = previous['rewritten_main_sha256']     # same patches: the rewrite still holds
+        report_path.write_text(json.dumps(merged, indent=2) + '\n')
+    edits = sum(p['edit_count'] for p in merged['patches'])
+    say(f"1/4 code: merging {mod.name}'s main-module patch ({edits} edits, {merged['edit_bytes']} bytes of main) "
+        f"before the rewrite")
+    for note in merged.get('notes', []):
+        say(f'   {note}')
+    return merged, report_path
+
+
+def step_code(tree, game, keys, env, logs, *, version="v0", mod=None):
     expected = VERSIONS[version]
     update_args = [] if version == "v0" else ["--update"]
     py = tree / '.venv/bin/python'
@@ -446,23 +482,43 @@ def step_code(tree, game, keys, env, logs, *, version="v0"):
                 f"key generation); the game does not use it and the code must match {expected['display_version']}; using it")
             continue
         check(f'ExeFS {n}', got, h)
+    merged, merged_path = merge_mod_exefs(tree, mod, version, logs) if mod else (None, None)
     if not (tree / f'extracted/{version}/elf/main-inventory.json').exists():
         run([py, 'scripts/prepare_modules.py', exefs, '--output', tree / f'extracted/{version}/elf'], logs / 'prepare_modules.log', cwd=tree)
     out = tree / f'rewritten/{version}'
     out.mkdir(parents=True, exist_ok=True)
     for name in ('sdk', 'subsdk0', 'main'):
-        image, h = out / f'{name}.patched.bin', expected['rewritten_sha256'][f'{name}.patched.bin']
-        if image.exists() and sha256(image) == h:
+        image = out / f'{name}.patched.bin'
+        modded = merged is not None and name == 'main'
+        source = tree / f'extracted/{version}/mod-exefs/main' if modded else exefs / name
+        target = merged['rewritten_main_sha256'] if modded else expected['rewritten_sha256'][f'{name}.patched.bin']
+        if image.exists() and target and sha256(image) == target:
             continue
         say(f'1/4 code: rewriting {name} for Apple silicon' + (' (the big one: about a minute)' if name == 'main' else ''))
-        run([py, 'third_party/d2r/patch_nso.py', exefs / name, out, name], logs / f'rewrite_{version}_{name}.log', cwd=tree,
+        run([py, 'third_party/d2r/patch_nso.py', source, out, name], logs / f'rewrite_{version}_{name}.log', cwd=tree,
             env=dict(env, DM_RULESET='native', DM_PRIVATE_GATES='0'))
-        check(f'rewritten {name}', sha256(image), h)
+        if modded:
+            # The rewrite of the merged module is not the verified retail rewrite any more: the mod's own edits are
+            # bound by the module's hash instead (the report says so, and the loader binds itself to this digest).
+            merged['rewritten_main_sha256'] = sha256(image)
+            merged_path.write_text(json.dumps(merged, indent=2) + '\n')
+        else:
+            check(f'rewritten {name}', sha256(image), target)
     # The loader binds itself to these images (scripts/prepare_runtime.py): they are the same bytes as the rewrite that
-    # was verified site by site (python3 games/totk/scripts/verify_rewrites.py re-runs that verification, hours).
-    report = dict(format=1, status='pass', rom_version=version, scope=f'hash match with verified {expected["display_version"]} rewrite',
+    # was verified site by site (python3 games/totk/scripts/verify_rewrites.py re-runs that verification, hours) unless
+    # --mod merged a patch into main, which the report records.
+    digests = {f'{name}.patched.bin': sha256(out / f'{name}.patched.bin') for name in ('main', 'sdk', 'subsdk0')}
+    scope = f'hash match with verified {expected["display_version"]} rewrite'
+    if merged:
+        scope = (f'verified {expected["display_version"]} rewrite, with the main-module patches of {merged["folder"]} '
+                 f'merged before it ({merged["patched_main_sha256"][:16]}...); the mod\u2019s bytes are bound by hash')
+    report = dict(format=1, status='pass', rom_version=version, scope=scope,
                   module_file_sha256={**{f'extracted/{version}/exefs/{n}': want[n] for n in ('main', 'sdk', 'subsdk0')},
-                                      **{f'rewritten/{version}/{n}.patched.bin': expected['rewritten_sha256'][f'{n}.patched.bin'] for n in ('main', 'sdk', 'subsdk0')}})
+                                      **{f'rewritten/{version}/{n}': digests[n] for n in digests}},
+                  **({'mod_exefs': {key: merged[key] for key in
+                                    ('folder', 'folder_sha256', 'build_id', 'patches', 'edit_bytes', 'reserved_sites',
+                                     'retail_main_sha256', 'patched_main_sha256', 'rewritten_main_sha256',
+                                     'notes')}} if merged else {}))
     report_path = tree / ('analysis/phase12-validation.json' if version == 'v0' else f'analysis/{version}-port/phase12-validation.json')
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2) + '\n')
@@ -1096,6 +1152,9 @@ def parse_args(argv):
     ap.add_argument('-k', '--keys', type=Path, required=True, help='your prod.keys')
     ap.add_argument('-o', '--out', type=Path, help=f'the app or IPA to write (default depends on --platform; next to the game file)')
     ap.add_argument('--work', type=Path, help='work folder (default: TOTK_build next to the game file)')
+    ap.add_argument('--mod', type=Path, metavar='FOLDER',
+                    help='a mod folder prepared before the build: its exefs/ IPS / IPS32 / pchtxt patches for the main '
+                         'module are merged into the code before it is rewritten (docs/mods.md)')
     ap.add_argument('--shader-cache', type=Path, help=argparse.SUPPRESS)   # removed: the seed comes from the game data and the shared list
     ap.add_argument('--no-shader-reminder', action='store_true', help='iOS: do not install the Mac agent that asks, while an iPhone / iPad with the game is connected, to send the shaders the shared list lacks')
     fonts = ap.add_mutually_exclusive_group()
@@ -1121,6 +1180,10 @@ def main(argv):
     update = args.update.expanduser().resolve() if args.update else None
     if update and (not update.is_file() or input_kind(update) not in ('nsp', 'nsz')):
         raise BuildError('--update must be a separate cumulative NSP or NSZ')
+    mod = args.mod.expanduser().resolve() if args.mod else None
+    if mod and not (mod / 'exefs').is_dir():
+        raise BuildError(f'--mod expects a mod folder prepared before the build (its files under exefs/ and romfs/): '
+                         f'{mod} has no exefs/ folder. See docs/mods.md.')
     version = 'v0'
     firmware = args.firmware.expanduser().resolve() if args.firmware else None
     shared_fonts = args.shared_fonts.expanduser().resolve() if args.shared_fonts else None
@@ -1150,6 +1213,9 @@ def main(argv):
             raise BuildError('Breath of the Wild has no iPhone / iPad build yet: build the Mac app (leave out --platform ios)')
         if update:
             raise BuildError('Breath of the Wild: the card image already holds its update and add-on content, so leave out --update')
+        if mod:
+            raise BuildError('--mod: merging a mod\'s main-module patches is only wired for Tears of the Kingdom so far '
+                             '(the patch sites of Breath of the Wild 1.6.0 are not listed in scripts/patch_sites.py)')
         if not args.work:
             work = game.parent / 'BotW_build'
             logs = work / 'logs'
@@ -1204,9 +1270,9 @@ def main(argv):
             raise BuildError('needs about 25 GB free for the work folder (the app itself is an APFS clone of it when on the same volume)')
     if update:
         version, update = identify_update(tree, update, keys, logs)
-    step_code(tree, game, keys, env, logs)
+    step_code(tree, game, keys, env, logs, mod=None if update else mod)
     if update:
-        step_code(tree, update, keys, env, logs, version=version)
+        step_code(tree, update, keys, env, logs, version=version, mod=mod)   # a mod is for the updated main, not for 1.0.0
     step_data(tree, game, keys, logs, firmware=firmware, shared_fonts=shared_fonts)
     if update:
         step_update_data(tree, game, update, keys, logs, version=version)
