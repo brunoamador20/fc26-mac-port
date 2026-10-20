@@ -2,6 +2,7 @@
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import plistlib
 import struct
@@ -291,6 +292,24 @@ class Updates(unittest.TestCase):
             build_app.step_app(tree,out,self.root/'logs',version='v143')
         self.assertEqual(len(checks),2);pause.assert_called_once_with(2)
         self.assertEqual(old.read_bytes(),b'new app')
+
+    def test_remove_tree_retries_when_a_file_reappears(self):
+        path = self.root/'bundle.app'
+        path.mkdir()
+        (path/'keep').write_text('x')
+        calls = {'n': 0}
+        original = shutil.rmtree
+        def flaky(target, *args, **kwargs):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                raise OSError(66, 'Directory not empty')
+            original(target)
+        with patch.object(build_app.shutil, 'rmtree', side_effect=flaky), \
+             patch.object(build_app.time, 'sleep') as pause:
+            build_app.remove_tree(path)
+        self.assertFalse(path.exists())
+        self.assertEqual(calls['n'], 2)
+        pause.assert_called_once_with(0.2)
 
 
 
