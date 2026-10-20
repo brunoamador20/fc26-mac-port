@@ -83,6 +83,10 @@ copying, or the removed files stay active. Generate the manifest again after eve
 - There is one overlay directory for player mods: to use several mods, merge their files into one
   version folder and generate one manifest. Do not nest mod folders. If two mods change the same path,
   choose one file.
+- The build replaces a few RomFS files itself: `UI/LayoutArchive/Common.Product.<n>.Nin_NX_NVN.blarc.zs` (quick-menu
+  timing; `<n>` is 100, 110 or 140 depending on the version), `Event/EventFlow/DmF_SY_GameOver.bfevfl.zs`, and with the
+  2K output `System/HeapSize/Product.Nin_NX_NVN.HeapDef.byml.zs`. A mod that replaces one of them stops the start with
+  "two overlays replace the same file"; leave that file out of the mod for now (UI translation mods hit this, #73).
 - `exefs/` is not loaded; only RomFS content works. (`TOTK_PCHTXT` is a developer experiment for pchtxt
   patches, not a general mod loader.)
 - This guide covers the Mac app; installing mods into the iPhone/iPad app container is not covered.
@@ -163,6 +167,10 @@ Mac App 只加载 **RomFS mod**。`exefs/` 里的文件不会被加载（运行�
 - 游戏运行中不要改 mod 文件；加载器会在启动时记录每个文件的身份，运行中变化会停止游戏。
 - 玩家 mod 只有一个覆盖目录：多个 mod 就合并到同一个版本目录，最后生成一份清单；不要把 mod
   文件夹嵌套进去。两个 mod 改同一个路径时，只能选一个文件。
+- 构建本身也会替换几个 RomFS 文件：`UI/LayoutArchive/Common.Product.<n>.Nin_NX_NVN.blarc.zs`（快捷菜单时机，`<n>`
+  按版本是 100、110 或 140）、`Event/EventFlow/DmF_SY_GameOver.bfevfl.zs`，开 2K 输出时还有
+  `System/HeapSize/Product.Nin_NX_NVN.HeapDef.byml.zs`。模组如果也替换其中一个，启动时会报“two overlays replace the
+  same file”并停止，目前只能把那个文件从模组里去掉（界面翻译模组会碰到，见 #73）。
 - `exefs/` 不会被加载，只有 RomFS 内容生效。（`TOTK_PCHTXT` 是开发者的 pchtxt 实验入口，不是
   通用的 mod 加载器。）
 - 本文面向 Mac App；iPhone/iPad 的 App 容器内安装未在此说明。
