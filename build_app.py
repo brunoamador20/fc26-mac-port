@@ -1041,7 +1041,8 @@ def step_data_botw(tree, botw, game, keys, logs, *, shared_fonts=None):
         if aoc.exists():
             shutil.rmtree(aoc)
         say('2/4 data: extracting the add-on content (the expansion pass, 1.4 GB)')
-        run([py, botw / 'scripts/extract_aoc_romfs.py', game, '--keys', keys, '--hactool', hactool, '--output', aoc], logs / 'botw-aoc.log', cwd=tree)
+        run([py, botw / 'scripts/extract_aoc_romfs.py', game, '--keys', keys, '--hactool', hactool, '--output', aoc,
+             '--expected', botw / 'assets/expected-v1.6.0.json'], logs / 'botw-aoc.log', cwd=tree)
         for i, want in expected['aoc'].items():
             report = json.loads((aoc / i / 'index.json').read_text())
             check(f'add-on content {i}', report['romfs_sha256'], want['sha256'])
