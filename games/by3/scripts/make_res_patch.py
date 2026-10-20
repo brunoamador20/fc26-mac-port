@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(HERE.parent / 'totk/third_party/d2r'))
+sys.path.insert(0, str(HERE / 'third_party/d2r'))   # Bayonetta 3's own copy of the rewriter
 import nsoimg
 
 # (offset, register, original immediate, 'W' | 'H' | 'H16')

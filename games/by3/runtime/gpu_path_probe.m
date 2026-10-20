@@ -2,7 +2,7 @@
    production replay code on known data in its own process, with Metal API validation enabled by the Makefile. */
 #import <Metal/Metal.h>
 #include "runtime.h"
-#include "../../totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.h"
+#include "../third_party/d2r_gfx/gfx/nvn/nvn_mtl.h"
 #include <stdio.h>
 #include <string.h>
 

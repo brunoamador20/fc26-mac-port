@@ -8,7 +8,7 @@
 #include "runtime.h"
 #include "game_version.h"
 #include "totk_ui_lang.h"
-#include "../../totk/third_party/d2r_gfx/gfx/nvn/totk_mfx_mode.h"
+#include "../third_party/d2r_gfx/gfx/nvn/totk_mfx_mode.h"
 int mfxup_output_enabled(void);
 static NSWindow *window;
 uint64_t dm_nvn_frame_count(void);   /* gfx/nvn/hle_nvn.c: game frames presented so far */

@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "../../totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.h"
+#include "../third_party/d2r_gfx/gfx/nvn/nvn_mtl.h"
 typedef struct{const char *name;void *fn;const char *why;} GfxEntry;
 uint64_t g_t0_ns;
 

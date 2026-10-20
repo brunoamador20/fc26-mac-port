@@ -1,10 +1,10 @@
 /* Verify NVN physical/virtual pool aliasing through production NVN thunks, on CPU and on the Metal GPU. */
 #import <Metal/Metal.h>
 #include "runtime.h"
-#include "../../totk/third_party/d2r_gfx/gfx/nvn/nvn_protos.h"
-#include "../../totk/third_party/d2r_gfx/gfx/nvn/nvn_obj.h"
-#include "../../totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.h"
-#include "../../totk/third_party/d2r_gfx/gfx/nvn/totk_vpool.h"
+#include "../third_party/d2r_gfx/gfx/nvn/nvn_protos.h"
+#include "../third_party/d2r_gfx/gfx/nvn/nvn_obj.h"
+#include "../third_party/d2r_gfx/gfx/nvn/nvn_mtl.h"
+#include "../third_party/d2r_gfx/gfx/nvn/totk_vpool.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

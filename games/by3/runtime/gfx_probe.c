@@ -1,12 +1,12 @@
 /* Guard real TOTK-sized opaque objects through production NVN thunks. */
 #include "runtime.h"
-#include "../../totk/third_party/d2r_gfx/gfx/nvn/nvn_protos.h"
+#include "../third_party/d2r_gfx/gfx/nvn/nvn_protos.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdalign.h>
 #include <stdlib.h>
-#include "../../totk/third_party/d2r_gfx/gfx/tex/nvn_deswizzle.h"
-#include "../../totk/third_party/d2r_gfx/gfx/nvn/nvn_texture_plan.h"
+#include "../third_party/d2r_gfx/gfx/tex/nvn_deswizzle.h"
+#include "../third_party/d2r_gfx/gfx/nvn/nvn_texture_plan.h"
 static void probe_texture_plan(void) {
  nvn_refl rf = {0};
  struct { uint64_t before; uint16_t slots[NVN_REFL_MAXB]; uint64_t after; } output;

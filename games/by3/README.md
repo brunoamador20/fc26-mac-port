@@ -1,7 +1,9 @@
 # Bayonetta 3 (work in progress)
 
-An experiment: run Bayonetta 3 natively the way `games/totk` runs Tears of the Kingdom. It reuses that runtime
-(rewriter, loader, Horizon host, NVN on Metal). **It is playable**: title, menus and the story run with picture,
+An experiment: run Bayonetta 3 natively the way `games/totk` runs Tears of the Kingdom. It started from that code
+(rewriter, loader, Horizon host, NVN on Metal) and keeps its own copies of all of it in this folder (`runtime/`,
+`third_party/d2r`, `third_party/d2r_gfx`, `prebuilt/`, `scripts/`), so changes here never affect another game and
+nothing here reads `games/totk`. **It is playable**: title, menus and the story run with picture,
 sound, keyboard input and saves, from a small app with a settings window. Known gaps are listed in CHANGELOG.md.
 
 How the work was done, what was found and what went wrong on the way: [CHANGELOG.md](CHANGELOG.md).
@@ -17,15 +19,15 @@ this repository; `BY3_build/` (the work folder) and `mods/` are ignored by git.
 
 ## Build and play
 
-From `games/by3`, with the Python environment of `games/totk/requirements.txt` (`PY=<that python>`):
+From `games/by3`, with a Python environment made from `requirements.txt` in this folder (`PY=<that python>`):
 
 ```sh
 python scripts/extract_code.py "<update>.nsp" --keys prod.keys --output BY3_build/extracted/v120/exefs
 python scripts/merge_romfs.py "<base>.nsp" "<update>.nsp" --keys prod.keys --output BY3_build/extracted/v120/romfs
-(cd ../totk && for m in sdk subsdk0 main; do
-  DM_RULESET=native DM_PRIVATE_GATES=0 $PY third_party/d2r/patch_nso.py ../by3/BY3_build/extracted/v120/exefs/$m ../by3/BY3_build/rewritten/v120 $m
-done)
-$PY ../totk/scripts/prepare_modules.py BY3_build/extracted/v120/exefs --output BY3_build/extracted/v120/elf
+for m in sdk subsdk0 main; do
+  DM_RULESET=native DM_PRIVATE_GATES=0 $PY third_party/d2r/patch_nso.py BY3_build/extracted/v120/exefs/$m BY3_build/rewritten/v120 $m
+done
+$PY scripts/prepare_modules.py BY3_build/extracted/v120/exefs --output BY3_build/extracted/v120/elf
 make prepare patches mods app PY=$PY GAME="<update>.nsp" KEYS=prod.keys
 open "Bayonetta 3.app"
 ```
@@ -35,13 +37,13 @@ The app keeps running the game from `BY3_build`; do not move or delete it.
 
 ## Stage 1 (done)
 
-From `games/by3`, with the Python environment of `games/totk/requirements.txt`:
+From `games/by3`, with the Python environment of `requirements.txt`:
 
 ```sh
 python scripts/extract_code.py "<update>.nsp" --keys prod.keys --output BY3_build/extracted/v120/exefs
 python scripts/merge_romfs.py "<base>.nsp" "<update>.nsp" --keys prod.keys --output BY3_build/extracted/v120/romfs
-cd ../totk && for m in sdk subsdk0 main; do
-  DM_RULESET=native DM_PRIVATE_GATES=0 python third_party/d2r/patch_nso.py ../by3/BY3_build/extracted/v120/exefs/$m ../by3/BY3_build/rewritten/v120 $m
+for m in sdk subsdk0 main; do
+  DM_RULESET=native DM_PRIVATE_GATES=0 python third_party/d2r/patch_nso.py BY3_build/extracted/v120/exefs/$m BY3_build/rewritten/v120 $m
 done
 ```
 

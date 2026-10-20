@@ -340,19 +340,6 @@ def site_plain(ins):
     emit(LDP(S, T, 31, save - dlt)); emit(B(here(), ins.address + 4))
     return start
 
-def site_spset(ins):
-    """sp 作目的寄存器（mov sp, x18 / add sp, x18, #i：可变长数组的栈分配）：暂存在旧 sp 下方，旧 sp 留在 T，
-    执行后从 T 恢复。x18 只被读，槽不写回。
-    | sp as the destination (mov sp, x18 / add sp, x18, #i: stack allocation of a variable-length array): the scratch is saved
-    below the old sp and the old sp is kept in T, so they are restored from T after the instruction. x18 is only read; the slot is not written back."""
-    S, T = pick(regs_in(ins))
-    start = here()
-    emit(STP(S, T, 31, -16)); emit(MRS_TPIDRRO(T)); emit_slot_addr(T, S, 'K18'); emit(LDRX(S, T))
-    emit(ADDI(T, 31, 0))             # mov xT, sp
-    emit(subst(ins, S))
-    emit(LDP(S, T, T, -16)); emit(B(here(), ins.address + 4))
-    return start
-
 def site_cond(ins):
     w = struct.unpack('<I', ins.bytes)[0]
     S, T = pick(regs_in(ins))
@@ -823,7 +810,6 @@ for a in sorted(kinds):
         elif m in ('cbz', 'cbnz', 'tbz', 'tbnz'): st = site_cond(ins); stat('cond')
         elif m in ('adr', 'adrp'): st = site_pcrel(ins); stat('pcrel')
         elif m in ('blr', 'ret', 'b', 'bl') or (m == 'ldr' and '[' not in ins.op_str): raise RuntimeError(f'{a:x} {m} {ins.op_str}')
-        elif re.match(r'sp,', ins.op_str): st = site_spset(ins); stat('spset')
         else: st = site_plain(ins); stat('plain')
     elif k == 'tpidr_r': st = site_sysreg_read(ins, 'KTLS'); stat(k)
     elif k == 'tpidrro_r': st = site_sysreg_read(ins, 'KTLR'); stat(k)

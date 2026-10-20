@@ -1,20 +1,20 @@
-# Bayonetta 3 native runtime. The Horizon host is this folder's fork of games/totk/runtime (runtime/); the NVN-on-Metal
-# layer is compiled from games/totk/third_party/d2r_gfx unchanged. Everything generated goes to the work folder.
+# Bayonetta 3 native runtime. Self-contained: the Horizon host (runtime/), the rewriter (third_party/d2r), the NVN-on-Metal
+# layer (third_party/d2r_gfx), the shader translator (prebuilt/) and the scripts are this folder's own copies, forked from
+# games/totk; nothing here reads games/totk. Everything generated goes to the work folder.
 # Inputs come from scripts/extract_code.py, scripts/merge_romfs.py and the rewrite (see README.md), then:
 #   make prepare   # scripts/prepare_runtime.py: tables, RomFS index, fonts config
 #   make runtime   # BY3_build/build/by3-native
 #   make boot      # run it from the work folder (cwd: extracted/ and rewritten/ are read relative to it)
 
-TOTK := ../totk
 WORK ?= BY3_build
 OUT := $(WORK)/build
 PY ?= python3
 NATIVE_OPT ?= -O2
 
-GFX_SRC := $(wildcard $(TOTK)/third_party/d2r_gfx/gfx/nvn/*.c $(TOTK)/third_party/d2r_gfx/gfx/nvn/*.m $(TOTK)/third_party/d2r_gfx/gfx/nvn/*.S $(TOTK)/third_party/d2r_gfx/gfx/tex/*.c $(TOTK)/third_party/d2r_gfx/gfx/tex/*.m)
-GFX_OBJECTS := $(patsubst $(TOTK)/%,$(OUT)/obj/%.o,$(GFX_SRC))
-GFX_HEADERS := $(wildcard $(TOTK)/third_party/d2r_gfx/gfx/nvn/*.h $(TOTK)/third_party/d2r_gfx/gfx/nvn/include/*.h $(TOTK)/third_party/d2r_gfx/host/*.h)
-GFX_FLAGS := -std=gnu11 -Wno-error -Wno-unused-function -Wno-unused-parameter -fobjc-arc -I$(TOTK)/third_party/d2r_gfx/gfx/nvn/include
+GFX_SRC := $(wildcard third_party/d2r_gfx/gfx/nvn/*.c third_party/d2r_gfx/gfx/nvn/*.m third_party/d2r_gfx/gfx/nvn/*.S third_party/d2r_gfx/gfx/tex/*.c third_party/d2r_gfx/gfx/tex/*.m)
+GFX_OBJECTS := $(patsubst %,$(OUT)/obj/%.o,$(GFX_SRC))
+GFX_HEADERS := $(wildcard third_party/d2r_gfx/gfx/nvn/*.h third_party/d2r_gfx/gfx/nvn/include/*.h third_party/d2r_gfx/host/*.h)
+GFX_FLAGS := -std=gnu11 -Wno-error -Wno-unused-function -Wno-unused-parameter -fobjc-arc -Ithird_party/d2r_gfx/gfx/nvn/include
 
 RUNTIME_SRC := $(filter-out runtime/frontend_ios.m,$(wildcard runtime/*.c runtime/*.m runtime/*.S))
 RUNTIME_HEADERS := $(wildcard runtime/*.h)
@@ -27,13 +27,13 @@ prepare:
 $(GENERATED):
 	@echo "missing $@: run make prepare" && false
 
-$(OUT)/obj/%.o: $(TOTK)/% $(GFX_HEADERS) Makefile
+$(OUT)/obj/%.o: % $(GFX_HEADERS) Makefile
 	@mkdir -p "$(dir $@)"
 	xcrun clang $(NATIVE_OPT) -g -Wall -Wextra $(GFX_FLAGS) -c "$<" -o "$@"
 
 $(OUT)/by3-native: $(RUNTIME_SRC) $(RUNTIME_HEADERS) $(GENERATED) $(GFX_OBJECTS) Makefile
 	xcrun clang -std=c11 $(NATIVE_OPT) -g -Wall -Wextra -Werror -Wno-deprecated-declarations \
-	  -I$(TOTK)/third_party/d2r_gfx/gfx/nvn/include -I$(OUT) -I/opt/homebrew/opt/opus/include/opus -I/opt/homebrew/opt/libvpx/include \
+	  -Ithird_party/d2r_gfx/gfx/nvn/include -I$(OUT) -I/opt/homebrew/opt/opus/include/opus -I/opt/homebrew/opt/libvpx/include \
 	  $(RUNTIME_SRC) $(GFX_OBJECTS) /opt/homebrew/opt/opus/lib/libopus.a /opt/homebrew/opt/libvpx/lib/libvpx.a \
 	  -framework Metal -framework MetalFX -framework Foundation -framework QuartzCore -framework ImageIO -framework CoreGraphics \
 	  -framework CoreText -framework UniformTypeIdentifiers -fobjc-arc -framework Cocoa -framework CoreVideo -framework CoreFoundation \
@@ -49,9 +49,9 @@ SPIRV_CROSS_SOURCES := main.cpp spirv_cfg.cpp spirv_cpp.cpp spirv_cross.cpp spir
   spirv_glsl.cpp spirv_hlsl.cpp spirv_msl.cpp spirv_parser.cpp spirv_reflect.cpp
 .PHONY: shader-tools
 shader-tools: $(OUT)/shader-service/totk_xlate $(OUT)/spirv-cross/spirv-cross
-$(OUT)/shader-service/totk_xlate: $(TOTK)/prebuilt/macos-arm64/totk_xlate $(TOTK)/prebuilt/macos-arm64/totk_xlate.sha256
+$(OUT)/shader-service/totk_xlate: prebuilt/macos-arm64/totk_xlate prebuilt/macos-arm64/totk_xlate.sha256
 	@mkdir -p "$(dir $@)"
-	test "$$(shasum -a 256 "$<" | cut -d' ' -f1)" = "$$(cut -d' ' -f1 "$(TOTK)/prebuilt/macos-arm64/totk_xlate.sha256")"
+	test "$$(shasum -a 256 "$<" | cut -d' ' -f1)" = "$$(cut -d' ' -f1 "prebuilt/macos-arm64/totk_xlate.sha256")"
 	cp "$<" "$@" && chmod +x "$@"
 $(OUT)/spirv-cross/spirv-cross:
 	@mkdir -p "$(WORK)/src" "$(dir $@)obj"
@@ -73,7 +73,7 @@ boot: runtime
 patches:
 	"$(PY)" scripts/prepare_patches.py --work "$(WORK)"
 mods:
-	for d in mods/*/romfs; do [ -d "$$d" ] && "$(PY)" $(TOTK)/scripts/make_mod_manifest.py "$$d" --romfs "$(WORK)/extracted/v120/romfs"; done; true
+	for d in mods/*/romfs; do [ -d "$$d" ] && "$(PY)" scripts/make_mod_manifest.py "$$d" --romfs "$(WORK)/extracted/v120/romfs"; done; true
 
 # The app: a small launcher bundle (settings window with presets, then the game) that runs the game from the work
 # folder, which it names in Info.plist (BY3WorkFolder): nothing large is copied. Its icon comes from the game's own
@@ -84,7 +84,7 @@ KEYS ?=
 $(OUT)/launcher: app/launcher.m Makefile
 	xcrun clang -std=gnu11 -O2 -Wall -Wextra -Werror -fobjc-arc app/launcher.m -framework Cocoa -o "$@"
 $(OUT)/AppIcon.icns:
-	@if [ -n "$(GAME)" ] && [ -n "$(KEYS)" ]; then cd $(TOTK)/scripts && "$(PY)" extract_app_icon.py "$(GAME)" --keys "$(KEYS)" --title 01004a4010fea000 --output "$(abspath $@)"; \
+	@if [ -n "$(GAME)" ] && [ -n "$(KEYS)" ]; then cd scripts && "$(PY)" extract_app_icon.py "$(GAME)" --keys "$(KEYS)" --title 01004a4010fea000 --output "$(abspath $@)"; \
 	 else echo "no GAME= / KEYS=: the app gets no icon"; fi
 app: runtime shader-tools $(OUT)/launcher $(OUT)/AppIcon.icns
 	rm -rf "$(APP)" && mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources"

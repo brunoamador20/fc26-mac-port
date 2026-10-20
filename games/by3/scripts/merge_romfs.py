@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 from cryptography.hazmat.primitives.ciphers import modes
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'totk/scripts'))
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # extract_exefs / extract_romfs: this folder's copies of games/totk/scripts
 from extract_exefs import decrypt, read_at, require, load_keys, container_entries, common_tickets, nca_ctr_key
 from extract_romfs import index_romfs
 

@@ -10,7 +10,7 @@ import io
 import json
 import struct
 from pathlib import Path
-from merge_romfs import BASE_TITLE, open_program, require, load_keys   # also puts games/totk/scripts on sys.path
+from merge_romfs import BASE_TITLE, open_program, require, load_keys   # also puts this folder on sys.path
 from extract_exefs import partition_entries
 
 
