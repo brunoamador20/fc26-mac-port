@@ -3,8 +3,11 @@
 issue form) into games/totk/assets/shader_list.tsv.
 
 A player's game writes shader-list-contribution.txt (third_party/d2r_gfx/gfx/nvn/totk_shader_contrib.h) and every 500
-new rows asks the player to attach it to such an issue. This tool downloads each attachment, keeps only V rows (shader
-key + bind state; anything else in a contribution is dropped) and reports what each issue adds. Nothing changes unless
+new rows asks the player to attach it to such an issue. "Submit automatically" (gh on the player's Mac) sends it as a
+secret gist linked from an issue titled "Shader list: ..." in the form's layout; such an issue has no label (GitHub drops
+labels set by people without write access), so issues are found by label or by that title. This tool downloads each
+attachment or gist file, keeps only V rows (shader key + bind state; anything else in a contribution is dropped) and
+reports what each issue adds. Nothing changes unless
 asked: --apply writes the list, --close also thanks each merged issue and closes it.
 
 usage: collect_shader_issues.py [--repo owner/name] [--apply] [--close] [--issue N ...]
@@ -24,7 +27,9 @@ from shader_list import KEY, ShaderList, canonical  # noqa: E402
 SHADER_LIST = TOTK / 'assets/shader_list.tsv'
 REPO = 'ly05010419/MacNativeGames'
 LABEL = 'shader-list'
-ATTACHMENT = re.compile(r'https://github\.com/(?:user-attachments/files|[\w.-]+/[\w.-]+/files)/\d+/[^\s)\]>"]+')
+ATTACHMENT = re.compile(r'https://github\.com/(?:user-attachments/files|[\w.-]+/[\w.-]+/files)/\d+/[^\s)\]>"]+'
+                        r'|https://gist\.githubusercontent\.com/[\w-]+/[0-9a-f]+/raw/[^\s)\]>"]+')
+TITLE = 'Shader list:'
 MAX_BYTES = 8 << 20   # a contribution is a few hundred rows; anything this large is not one
 
 
@@ -62,7 +67,8 @@ def gh(*args):
 
 
 def download(url, token):
-    request = urllib.request.Request(url, headers={'Authorization': f'token {token}'} if token else {})
+    own = url.startswith('https://github.com/')   # the token goes to github.com only; gist raw files are public
+    request = urllib.request.Request(url, headers={'Authorization': f'token {token}'} if token and own else {})
     with urllib.request.urlopen(request, timeout=60) as reply:
         data = reply.read(MAX_BYTES + 1)
     if len(data) > MAX_BYTES:
@@ -79,8 +85,10 @@ def main():
     args = ap.parse_args()
     if args.close and not args.apply:
         ap.error('--close needs --apply')
-    issues = json.loads(gh('issue', 'list', '--repo', args.repo, '--label', LABEL, '--state', 'open', '--limit', '200',
-                           '--json', 'number,title,body,author'))
+    fields = ('--state', 'open', '--limit', '200', '--json', 'number,title,body,author')
+    labelled = json.loads(gh('issue', 'list', '--repo', args.repo, '--label', LABEL, *fields))
+    titled = json.loads(gh('issue', 'list', '--repo', args.repo, '--search', f'"{TITLE}" in:title', *fields))
+    issues = list({i['number']: i for i in labelled + [i for i in titled if i['title'].startswith(TITLE)]}.values())
     if args.issue:
         issues = [i for i in issues if i['number'] in args.issue]
     token = subprocess.run(['gh', 'auth', 'token'], capture_output=True, text=True).stdout.strip()

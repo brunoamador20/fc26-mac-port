@@ -13,6 +13,7 @@
 #include <string.h>
 
 #define TOTK_CONTRIB_STEP 500
+#define TOTK_CONTRIB_REPO "ly05010419/MacNativeGames"   // the Mac reminder's "Submit automatically" (gh issue create)
 #define TOTK_CONTRIB_ISSUE_URL "https://github.com/ly05010419/MacNativeGames/issues/new?template=shader-list.yml"
 
 static inline NSString *totk_contrib_path(void) {
