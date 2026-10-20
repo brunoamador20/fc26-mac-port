@@ -118,6 +118,93 @@ static void put_word(Module *m, uint64_t off, uint32_t word, const char *what) {
     }
 }
 
+/* Hair and cloth (PR #79 for 1.4.3, game_patches_v143.c patch_secondary_animation): the actor animation update builds a
+   second clock {seconds = factor / 30, ratio = factor} every rendered frame, so above 30 FPS hair and cloth swing too fast
+   (4x at 120 FPS). The ordinary animation clock already follows the real-time step. The older compiler inlines the update
+   in three places and calls the shared update (1.2.1 main+0x89822c) from one more; its other caller already passes
+   measured time and is left alone. Each inline place gets two veneers: at the fmul, seconds = measured seconds * factor;
+   at the store of the factor into the clock's ratio slot, ratio = measured 30 Hz ratio * factor (the ratio is stored
+   before the fmul in some places and after it in others). The call gets PR #79's veneer: s2 / s3 *= measured ratio.
+   The veneers read the real-time page (ratio at +0, seconds at +4) and save the registers they use on the stack.
+   Text padding +160 (after the bounce veneer). TOTK_CLOTH_REALTIME=0 keeps the original clock (Mac). */
+/* One inline place: fmul s<r>, s<f>, s<r> (s<r> = 1/30, s<f> = the time factor) at fmul; the factor goes into the ratio
+   slot at store, str s<f>, [sp, #off] or (pair) stp s<r>, s<f>, [x29, #off]. */
+typedef struct { uint64_t fmul, store; unsigned r, f; int off; int pair; } ClothInline;
+#if defined(TOTK_GAME_V121)
+static const ClothInline cloth_inline[3] = {{0x82192c, 0x821928, 0, 8, 0x124, 0}, {0x822a64, 0x822a40, 0, 8, 0x124, 0},
+                                            {0x83182c, 0x831830, 1, 0, 0x134, 0}};
+static const uint64_t cloth_call = 0x8222f0, cloth_update = 0x89822c;
+#elif defined(TOTK_GAME_V112)
+static const ClothInline cloth_inline[3] = {{0x9d1e64, 0x9d1e74, 0, 8, 0x104, 0}, {0x9d2d34, 0x9d2d2c, 0, 8, 0x104, 0},
+                                            {0x9e7648, 0x9e764c, 1, 0, 0x134, 0}};
+static const uint64_t cloth_call = 0x9d2774, cloth_update = 0x88a998;
+#else
+static const ClothInline cloth_inline[3] = {{0x7b5988, 0x7b598c, 0, 8, -0x40, 1}, {0x7b6b28, 0x7b6b2c, 0, 8, -0x40, 1},
+                                            {0x7f5ec4, 0x7f5ed0, 1, 0, 0x114, 0}};
+static const uint64_t cloth_call = 0x7b6358, cloth_update = 0x82c224;
+#endif
+static uint32_t stp_x29(unsigned rt, unsigned rt2, int off) { return 0x2d000000u | ((uint32_t)(off / 4) & 0x7f) << 15 | rt2 << 10 | 29u << 5 | rt; }
+static uint32_t str_sp(unsigned rt, unsigned off) { return 0xbd000000u | (off / 4) << 10 | 31u << 5 | rt; }
+static uint64_t cloth_put(Module *m, uint64_t at, const uint32_t *code, unsigned n) {
+    if (!CODE_PATCHED_AT_BUILD) for (unsigned i = 0; i < 4 * n; i++) if (m->base[at + i]) runtime_fail("cloth veneer padding not empty");
+    for (unsigned i = 0; i < n; i++) put_word(m, at + 4 * i, code[i], "cloth/hair clock veneer");
+    return at + 4 * n;
+}
+static void cloth_site(Module *m, uint64_t site, uint32_t original, uint32_t replacement) {
+    if (!CODE_PATCHED_AT_BUILD) {
+        uint32_t w; memcpy(&w, m->base + site, 4);
+        if (w != original) {
+            fprintf(stderr, "[totk] cloth/hair clock main+%#llx: found %08x expected %08x\n", (unsigned long long)site, w, original);
+            runtime_fail("cloth/hair clock: original instruction mismatch");
+        }
+    }
+    put_word(m, site, replacement, "cloth/hair clock");
+}
+static void patch_cloth_clock(Module *m, uint64_t data_off) {
+    const char *e = getenv("TOTK_CLOTH_REALTIME");
+    if (!CODE_PATCHED_AT_BUILD && e && !strcmp(e, "0")) return;
+    const uint64_t base = ((m->text_end + 15) & ~15ULL) + 160, end = (m->text_end + 0xfff) & ~0xfffULL;
+    const uintptr_t mb = (uintptr_t)m->base;
+    uint64_t at = base;
+    for (unsigned k = 0; k < 3; k++) {
+        const ClothInline *c = &cloth_inline[k];
+        const unsigned r = c->r, f = c->f;
+        /* seconds: s<r> = measured seconds * s<f> */
+        const uint32_t sec[6] = {0xf81f0fe9,                            /* str x9, [sp, #-16]! */
+                                 adrp_reg(9, mb + at + 4, mb + data_off),
+                                 0xbd400520u | r,                       /* ldr s<r>, [x9, #4] */
+                                 0x1e200800u | r << 16 | f << 5 | r,    /* fmul s<r>, s<f>, s<r> */
+                                 0xf84107e9,                            /* ldr x9, [sp], #16 */
+                                 branch_to(at + 20, c->fmul + 4)};
+        cloth_site(m, c->fmul, 0x1e200800u | r << 16 | f << 5 | r, branch_to(c->fmul, at));
+        at = cloth_put(m, at, sec, 6);
+        /* ratio: measured 30 Hz ratio * s<f> into the slot (s31 and x9 saved; sp moves by 32 for sp-relative slots) */
+        const uint32_t original = c->pair ? stp_x29(r, f, c->off) : str_sp(f, (unsigned)c->off);
+        const uint32_t store = c->pair ? stp_x29(r, 31, c->off) : str_sp(31, (unsigned)c->off + 32);
+        const uint32_t rat[11] = {0xd10083ff,                           /* sub sp, sp, #32 */
+                                  0xf90003e9,                           /* str x9, [sp] */
+                                  0x3d8007ff,                           /* str q31, [sp, #16] */
+                                  adrp_reg(9, mb + at + 12, mb + data_off),
+                                  0xbd40013f,                           /* ldr s31, [x9] */
+                                  0x1e3f0800u | f << 5 | 31u,           /* fmul s31, s<f>, s31 */
+                                  store,
+                                  0x3dc007ff,                           /* ldr q31, [sp, #16] */
+                                  0xf94003e9,                           /* ldr x9, [sp] */
+                                  0x910083ff,                           /* add sp, sp, #32 */
+                                  branch_to(at + 40, c->store + 4)};
+        cloth_site(m, c->store, original, branch_to(c->store, at));
+        at = cloth_put(m, at, rat, 11);
+    }
+    /* the call: s2 = factor / 30, s3 = factor; x8 and s4 are caller-saved and not arguments of the update */
+    const uint32_t call[5] = {adrp_reg(8, mb + at, mb + data_off), 0xbd400104 /* ldr s4, [x8] */,
+                              0x1e240842 /* fmul s2, s2, s4 */, 0x1e240863 /* fmul s3, s3, s4 */, branch_to(at + 16, cloth_update)};
+    cloth_site(m, cloth_call, branch_to(cloth_call, cloth_update) | 0x80000000u, branch_to(cloth_call, at) | 0x80000000u);
+    at = cloth_put(m, at, call, 5);
+    if (at > end) runtime_fail("cloth/hair clock veneers reach read-only data");
+    fprintf(stderr, "[totk] %s cloth/hair clock: real-time seconds and ratio at 3 inline places and 1 call, veneers +%#llx..+%#llx\n",
+            TOTK_GAME_VERSION, (unsigned long long)base, (unsigned long long)at);
+}
+
 static void patch_realtime(Module *m) {
     /* The loader reserved a writable page immediately after main's image.
        No game allocation or rewritten-code veneer can overlap this page. */
@@ -154,6 +241,7 @@ static void patch_realtime(Module *m) {
         put_word(m, sites[i].off, repl[i], "real-time frame step");
     frame_step_data = (_Atomic uint64_t *)(void *)(m->base + data_off);
     atomic_store(frame_step_data, frame_step_bits(1.0f / 60.0f));
+    patch_cloth_clock(m, data_off);
     fprintf(stderr,"[totk] real-time frame step: %zu verified instructions; initial 16.67 ms, sampled at each present\n",
             sizeof sites / sizeof *sites);
 }
