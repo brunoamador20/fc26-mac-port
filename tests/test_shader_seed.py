@@ -304,6 +304,27 @@ int main(int argc, const char **argv) { @autoreleasepool {
             self.assertGreater(self.run_probe(source, cache)['imported_files'], 0)
             self.assertEqual((cache/'unrelated.txt').read_text(), 'keep')
 
+    def test_an_empty_cache_gets_the_seed_as_one_folder_clone(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source, cache, key, variant = self.fixture(Path(folder))
+            (source/'pso_title.tsv').write_text('not in the manifest\n')   # the seed folder holds more than the manifest names
+            r = self.run_probe(source, cache)
+            self.assertTrue(r['cloned_folder'])
+            names = set(json.loads((source/'seed-manifest.json').read_text())['files'])
+            self.assertEqual({p.name for p in cache.iterdir()}, names | {'seed-installed.json'})
+            for name in names:
+                self.assertEqual((cache/name).read_bytes(), (source/name).read_bytes())
+            (cache/'written-later.txt').write_text('the cache stays writable')
+            self.assertEqual(self.run_probe(source, cache)['imported_files'], 0)
+
+    def test_a_cache_with_files_is_merged_file_by_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source, cache, key, variant = self.fixture(Path(folder))
+            (cache/'unrelated.txt').write_text('keep')
+            r = self.run_probe(source, cache)
+            self.assertFalse(r.get('cloned_folder', False))
+            self.assertEqual((cache/'unrelated.txt').read_text(), 'keep')
+
     def test_reprepared_seed_with_the_same_files_is_not_checked_again(self):
         # Packaging again writes a new preparation time and script hash into the manifest; the files stay the same.
         with tempfile.TemporaryDirectory() as folder:

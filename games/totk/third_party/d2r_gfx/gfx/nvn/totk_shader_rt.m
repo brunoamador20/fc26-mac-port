@@ -83,8 +83,10 @@ NSString *totk_rt_dir(void) {
             }
             if ([seed[@"available"] boolValue]) {
                 unsigned long long imported=[seed[@"imported_files"] unsignedLongLongValue];
-                LOG("[shader-seed] 发现随 App 准备的着色器 %llu 个，导入 %llu 个文件；首次启动即可预热",
-                    [seed[@"shaders"] unsignedLongLongValue], imported);
+                LOG("[shader-seed] 发现随 App 准备的着色器 %llu 个，导入 %llu 个文件%s%s；首次启动即可预热",
+                    [seed[@"shaders"] unsignedLongLongValue], imported,
+                    [seed[@"cloned_folder"] boolValue] ? "（整个文件夹一次克隆）" : "",
+                    [seed[@"sealed"] boolValue] ? "（App 包已签名，不再逐个校验）" : "");
                 if (runtime_boot_status) runtime_boot_status(TOTK_UI("着色器缓存已就绪","Shader cache ready"),imported
                     ? [NSString stringWithFormat:@(TOTK_UI("已导入 %llu 个预置文件，开始预热","Imported %llu prepared files; starting warm-up")),imported].UTF8String
                     : TOTK_UI("本机缓存已存在，无需重新导入；开始预热","Local cache already present, nothing to import; starting warm-up"));
