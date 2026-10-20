@@ -230,6 +230,8 @@ See [docs/how-it-works.md](docs/how-it-works.md).
 
 Recorded performance experiments, remaining work and comparison methods: [Mac performance follow-ups](docs/performance-followups.md).
 
+Player mods are RomFS-only. See [installing player mods](docs/mods.md) for the folder layout, `manifest.tsv`, and the checks the loader performs.
+
 ## Acknowledgements
 
 - **[d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)** (MIT) developed this way of running Switch games natively (for Diablo II: Resurrected): the NSO rewriter, the Horizon host and the NVN-on-Metal layer here started as its generic parts.
@@ -475,6 +477,8 @@ west = y
 见 [docs/how-it-works.md](docs/how-it-works.md)。
 
 已做的性能实验、待办与对比方法见 [Mac 性能待做](docs/performance-followups.md)。
+
+玩家 mod 只支持 RomFS。目录结构、`manifest.tsv` 的生成与加载校验见[玩家 mod 安装说明](docs/mods.md)。
 
 ## 致谢
 
