@@ -35,7 +35,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--output-dir', type=Path, default=root / 'extracted/v0/romfs-patches')
 parser.add_argument('--capture-frame', type=float, default=0.0)
 parser.add_argument('--version', choices=('v0','v112','v121','v143'), default='v0')
-parser.add_argument('--aspect', type=str.lower, help='<width>x<height> of a canvas wider than 16:9: also lay the UI out for it (scripts/ultrawide_layout.py); default output romfs-patches-<width>x<height> (-center with --hud center)')
+parser.add_argument('--aspect', type=str.lower, help='<width>x<height> of a canvas wider (scripts/ultrawide_layout.py) or taller (scripts/tall_layout.py, 16:10) than 16:9: also lay the UI out for it; default output romfs-patches-<width>x<height> (-center with --hud center)')
 parser.add_argument('--hud', choices=('corner', 'center'), default='corner', help='with --aspect: the HUD in the screen corners or in the middle 16:9')
 args = parser.parse_args()
 version = args.version
@@ -112,9 +112,10 @@ for member, panes in MEMBERS.items():
 layout = []
 if args.aspect:
     import importlib.util
-    spec = importlib.util.spec_from_file_location('ultrawide_layout', Path(__file__).resolve().parent / 'ultrawide_layout.py')
-    ultrawide = importlib.util.module_from_spec(spec); spec.loader.exec_module(ultrawide)
     width, height = (int(v) for v in args.aspect.lower().split('x'))
+    script = 'ultrawide_layout.py' if width * 9 > height * 16 else 'tall_layout.py'   # wider than 16:9, or taller
+    spec = importlib.util.spec_from_file_location(script[:-3], Path(__file__).resolve().parent / script)
+    ultrawide = importlib.util.module_from_spec(spec); spec.loader.exec_module(ultrawide)
     layout = ultrawide.apply(blarc, members, width, height, hud_corner=args.hud == 'corner')
 check = zstd.decompress(zstd.compress(bytes(blarc), level=19, zstd_dict=dictionary), zstd_dict=dictionary)
 assert check == bytes(blarc)
