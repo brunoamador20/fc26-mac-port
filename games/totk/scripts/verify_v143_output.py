@@ -103,7 +103,8 @@ def main():
         'build/v143-output-fixture', 'rewritten/v143/main.patched.bin', str(target),
         str(layout['TEXT_END']),
     ], capture_output=True, text=True, check=True,
-        env=clean_env() | {'TOTK_REALTIME': '1', 'TOTK_FPS60': '1', 'TOTK_OUTPUT_RES': '2560x1440'})
+        env=clean_env() | {'TOTK_REALTIME': '1', 'TOTK_FPS60': '1', 'TOTK_OUTPUT_RES': '2560x1440',
+                           'TOTK_CLOTH_REALTIME': '0', 'TOTK_HIGHFPS_FIX': '0'})   # their words: verify_v143_timing.py
     (out / 'output-fixture.log').write_text(run.stdout + run.stderr)
     patched = target.read_bytes()
     data = (len(raw) + 0x3fff) & ~0x3fff
@@ -120,7 +121,8 @@ def main():
         0xbdb578, 0xbdb584, 0x3dcb28,
         0x2db204, 0x2db208, 0x2db22c, 0x2db360, 0x2db36c, 0x2db340, 0x2db34c,
         0x3e5658, 0x2daa54, 0x2daa58, 0x2daa6c, 0x2daa70, 0x2daa74, 0x2daa78,
-    } | {frame_step + 4 * i for i in range(4)} | {stub + 4 * i for i in range(7)}
+    } | {frame_step + 4 * i for i in range(4)} | {stub + 4 * i for i in range(7)} \
+      | {0x628c74, 0xb43460, 0x1ff04f4, 0x253fbb0} | {frame_step + 48 + 4 * i for i in range(32)}   # ultrawide (aspect_patch.h, always installed)
     assert changes == want, [hex(p) for p in sorted(changes ^ want)]
 
     def execute(w, h, scale, apply):
