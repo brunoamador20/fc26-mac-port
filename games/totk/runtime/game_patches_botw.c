@@ -444,6 +444,7 @@ int botw_jq_hook(void *context) {   /* SIGTRAP from loader.c crash(): 1 = it was
 #undef U32
 #undef U64
 int runtime_output_res(unsigned *w, unsigned *h) { (void)w; (void)h; return 0; }
+uint64_t runtime_output_size_current(void) { return 1920ull | (1080ull << 32); }   /* the canvas this game draws (frontend.m's shortcut text); no output-size patch yet */
 uint64_t runtime_output_res_extra_bytes(void) { return 0; }
 int runtime_output_res_toggle(void) { return 0; }
 /* Key 3 (runtime/input.c): MetalFX 2K on / off. On: MetalFX replaces the game's own upscale of the 1600x900 picture into

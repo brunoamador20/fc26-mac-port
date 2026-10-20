@@ -24,7 +24,7 @@
 #define INVALID 0xe402u
 #define AOC_MAX 2
 #define AOC_NH 1024
-#define AOC_HANDLE_BASE 0x200000000ULL
+#define AOC_HANDLE_BASE 0x400000000ULL   /* its own range: fs_host.c uses 0x200000000 (files) and 0x300000000 (directories), romfs.c 0x100000000 */
 typedef struct { uint64_t offset, size; uint32_t name, len; } Entry;
 typedef struct {
     int index; uint64_t image_size; const char *image_sha, *index_sha;
