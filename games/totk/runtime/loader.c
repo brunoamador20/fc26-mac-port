@@ -357,6 +357,9 @@ static void crash(int num,siginfo_t *info,void *context) {
  if(num==SIGTRAP){extern int botw_jq_hook(void *);if(botw_jq_hook(context))return;}   /* TOTK_JQ_CHECK diagnostics (game_patches_botw.c) */
 #endif
 #ifndef GAME_BOTW
+#if defined(TOTK_GAME_V143) && !TARGET_OS_IPHONE
+ if(num==SIGTRAP){extern int runtime_diag_watch_trap(void *);if(runtime_diag_watch_trap(context))return;}   /* #61 frmwatch (diagnostic) */
+#endif
  if(stale_target_reference(num,info,u))return;
  /* During save load, this optional game object can contain a tagged invalid
     reference. Treat it as absent, as the following cbz path expects (TOTK). */

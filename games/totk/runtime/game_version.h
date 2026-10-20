@@ -73,6 +73,7 @@
 #define GAME_ADDR_0x2aa4fa0 0x2b16100
 #define GAME_ADDR_0x453f648 0x46129e0
 #define GAME_ADDR_0x8f6cbc 0x8f6740
+#define GAME_ADDR_0xce3fec 0xbbb4c0   /* trampoline slow-motion check (game_patches.c patch_slowmo_bounce) */
 #define GAME_OUTPUT_CALL_WORD 0x94000083u
 #elif defined(TOTK_GAME_V121)
 /* Found from 1.1.2 by scripts/map_version_sites.py --from v112 --to v121 (every original word unchanged). */
@@ -113,6 +114,7 @@
 #define GAME_ADDR_0x2aa4fa0 0x2b18000
 #define GAME_ADDR_0x453f648 0x4615d78
 #define GAME_ADDR_0x8f6cbc 0x8f2798
+#define GAME_ADDR_0xce3fec 0xbda798
 #define GAME_OUTPUT_CALL_WORD 0x94000083u
 #else
 #define TOTK_GAME_VERSION "1.0.0"
@@ -152,6 +154,7 @@
 #define GAME_ADDR_0x2aa4fa0 0x2aa4fa0
 #define GAME_ADDR_0x453f648 0x453f648
 #define GAME_ADDR_0x8f6cbc 0x8f6cbc
+#define GAME_ADDR_0xce3fec 0xce3fec
 #define GAME_OUTPUT_CALL_WORD 0x94000082u
 #endif
 #ifndef GAME_NAME
