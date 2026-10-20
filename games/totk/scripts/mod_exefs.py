@@ -14,7 +14,8 @@ What is merged (v1): the code patches for **main** only, read from `<mod>/exefs/
                     names no module or build by itself, so it is read as a main patch only when it is named main, or
                     main's build id the way Atmosphere and the mod managers name patches (exefs/<build id>.ips); a
                     patch for another module, or named after another build of main, is left out with a note.
-  *.pchtxt          the community text form, read as the runtime's own TOTK_PCHTXT experiment reads it:
+  *.pchtxt          the community text form, read as the runtime's own TOTK_PCHTXT experiment reads it (plus the two
+                    switches it does not read yet - see the next line); the format is:
                     "@nsobid-<build id>" must name this version's main, then "<main address> <hex bytes>" lines
                     between "@enabled" and "@stop", with "@disabled" switching a section back off (a mod author who
                     keeps an edit around without applying it) and "@flag offset_shift 0x100" accepted - any other

@@ -637,7 +637,7 @@ def say_mod_copy_steps(mod, tree, version, out):
     folder = mod_folder.mods_folder(version)
     say(f'4/4 app: {mod.name}/romfs was not installed: {folder} is your folder, and a build only replaces it when you '
         f'pass --install-mod-romfs (which empties it first). To do it by hand:')
-    say(f'   rsync -a "{mod}/romfs/" "{folder}/"')
+    say(f'   rsync -a --exclude=\'.DS_Store\' --exclude=\'manifest.tsv\' "{mod}/romfs/" "{folder}/"')
     say(f'   "{sys.executable}" "{tree}/scripts/make_mod_manifest.py" "{folder}" --app "{out}" --version {version}')
 
 

@@ -64,7 +64,7 @@ by hand; the steps below are the manual route either way.
 3. Generate the manifest with the app you built. Run this from the repository root:
 
    ```bash
-   python3 games/totk/scripts/make_mod_manifest.py "$MODDIR" \
+   python3.14 games/totk/scripts/make_mod_manifest.py "$MODDIR" \
      --app "/path/to/Tears of the Kingdom.app" --version v121
    ```
 
@@ -93,7 +93,7 @@ A mod that changes the game's code ships `exefs/` files: an IPS or IPS32 patch, 
 (`.pchtxt`). Those can be merged into the app while it is built:
 
 ```bash
-python3 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys" --mod "/path/to/Mod"
+python3.14 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys" --mod "/path/to/Mod"
 ```
 
 Why the build and not the game: the app has no module loader. At start it maps the three code modules it
@@ -113,7 +113,8 @@ stops the build instead of shipping silently.
 The folder you pass holds the mod's files in the usual layout - `exefs/` for code, `romfs/` for data - and
 either half is enough: without `exefs/` there is no code to merge, and without `romfs/` the version folder is
 never touched. An `exefs/` that holds nothing to merge into main (`subsdk9`, a `main.npdm`) is a note, not a
-failure: the build carries on and only the mod's data half applies. With `--update` the patch is merged into
+failure: the build carries on, its code half is in the app, and its data half takes effect once the folder is
+installed (`--install-mod-romfs`, or by hand). With `--update` the patch is merged into
 the updated module, which is the one the app runs.
 
 <a id="data"></a>
@@ -123,7 +124,7 @@ The version folder is yours - another mod, or files you copied by hand, may be i
 there by itself. Add the flag when you want the build to fill it:
 
 ```bash
-python3 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys" \
+python3.14 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys" \
   --mod "/path/to/Mod" --install-mod-romfs
 ```
 
@@ -131,10 +132,12 @@ Then, at the very end, the build:
 
 - **empties** `~/Library/Application Support/MacNativeGames/TOTK/mods/<version>` and copies the mod's
   `romfs/` into it, so after the build the folder holds exactly this mod's RomFS and nothing else - a file
-  another mod put there, or one you copied yourself, is gone;
+  another mod put there, or one you copied yourself, is gone (a mod whose files the game would all take from
+  the app instead replaces nothing, and then the folder is left alone: see below);
 - writes `manifest.tsv` with `scripts/make_mod_manifest.py` against the app just built, so a path the app
   replaces itself is left out (the heap table included: the 2K overlay carries the mod's heap sizes), and a
-  misspelt path stops the build with the reason instead of stopping the game later.
+  misspelt path stops the build at its last step - the app is already written by then - with the reason instead of
+  stopping the game later.
 
 Your folder is not emptied for something untried: the build copies the mod's `romfs/` into a folder next to
 it, writes the manifest there, and moves the new copy into place only when it is complete (the old copy is
@@ -150,7 +153,7 @@ you meant) and again right before the copy:
 The Second Quest 1.4.3/romfs (and its manifest.tsv) when the build ends: anything you put in that folder yourself
 is deleted. Without the flag the build leaves the folder alone.
 ...
-4/4 app: .../mods/v143: emptied, then filled with The Second Quest 1.4.3/romfs and its manifest.tsv (--install-mod-romfs)
+.../mods/v143: emptied, then filled with The Second Quest 1.4.3/romfs and its manifest.tsv (--install-mod-romfs)
 4/4 app: .../mods/v143 holds 5250 files from The Second Quest 1.4.3/romfs now (3 entries it held before are gone)
    left out (the app replaces it, and the 2K overlay already carries these heap sizes): System/HeapSize/Product.Nin_NX_NVN.HeapDef.byml.zs
    .../mods/v143/manifest.tsv: 5229 files (4200 replaced, 1029 added)
@@ -161,7 +164,7 @@ nothing about your mods changes unless you ask for it.
 
 The game still loads this folder at start, exactly as before: nothing changed at run time, the build only does
 the copying and the manifest for you. The iPhone / iPad build has no player mod folder yet, so there `--mod`
-merges the code patches only (and `--install-mod-romfs` does nothing).
+merges the code patches only (and `--install-mod-romfs` is refused there: there is no folder to fill).
 
 What the build does, in order:
 
@@ -170,7 +173,8 @@ What the build does, in order:
 2. Applies the mod's patches. Offsets are **main addresses** - the address space the game's code lives
    in, the same numbers the app's own patch tables use:
 
-   - `.pchtxt`: the community format, read as the runtime reads it. The first line must be
+   - `.pchtxt`: the community format, read as the runtime's own `TOTK_PCHTXT` reader does - plus the section
+     switches this build honours (`@disabled`, `@flag`, see below; the runtime's reader skips both for now). The first line must be
      `@nsobid-<build id>`: the 16 bytes the rewriter's tables use (32 hex digits) or the 20 bytes the
      runtime compares (40 hex digits; the runtime's own `TOTK_PCHTXT` experiment takes only that longer
      form). Patch lines `<hex main address> <hex bytes>` follow, and only lines after `@enabled` count:
@@ -209,7 +213,7 @@ What else a mod's `exefs/` may hold:
 | `main.npdm` | ignored with a note: the native loader never reads a module's metadata |
 | `subsdk9` and other extra code modules | **not loaded**, with a note in the build output and in the report: the app loads the three modules it was built from (main, sdk, subsdk0), so the module's own code never runs |
 | a whole replacement `main` | refused: ship a patch instead, so the build can check it against this version |
-| nothing for main (`subsdk9` alone, a `main.npdm` alone, even an empty `exefs/`) | noted, not refused: nothing is merged into main and the build carries on with the mod's data half |
+| nothing for main (`subsdk9` alone, a `main.npdm` alone, even an empty `exefs/`) | noted, not refused: nothing is merged into main and the build carries on - its code is not in the app, and its data applies once the folder is installed |
 
 An extra module is how a mod built with a hooking framework (exlaunch and the like) changes code while
 the game runs: its trampolines never install here. Such a mod - The Second Quest is one - keeps its main
@@ -285,7 +289,7 @@ never checks and Metal refuses to build; the app caps the chain at what the dime
 
 - **RomFS 内容**在游戏运行时加载，是否生效完全由 `manifest.tsv` 决定，App 不会扫描文件夹找 mod。
 - **主模块的代码补丁**（`exefs/main.pchtxt`、`exefs/*.ips`、`exefs/*.ips32`）在**构建时**用 `--mod`
-  合并进 App，见下面的「代码补丁（构建时合并）」。
+  合并进 App，见下面的[代码补丁](#code-zh)。
 
 `exefs/` 里的文件在运行时一律不加载：App 跑的是构建时改写好的三个代码模块，按 SHA-256 绑定。代码只能
 在构建这一环节改变。
@@ -320,8 +324,8 @@ never checks and Metal refuses to build; the app caps the chain at what the dime
 ### 安装步骤
 
 构建可以替你完成第 2、3 步，但只在你明确要求时：`--mod <mod 目录> --install-mod-romfs`。这个参数会把版本
-目录整个替换掉（先清空，见下文[数据部分](#data)），所以不带它时构建不会碰这个目录。不带参数时，构建会在结束
-处打印手动执行的两条命令；下面就是手动流程，也是构建内部所做的同一件事。
+目录整个替换掉（先清空，见下文[数据部分](#data-zh)），所以不带它时构建不会碰这个目录。不带参数时，构建会在结束
+处打印手动执行的两条命令；下面是手动流程（构建做的是同一件事，只是先在旁边的目录里做好再整体换进来）。
 
 1. 先完全退出游戏。
 2. 把 mod 的 RomFS 路径**直接**放进版本目录。如果 mod 带一层 `romfs/` 文件夹，复制的是它里面的
@@ -335,7 +339,7 @@ never checks and Metal refuses to build; the app caps the chain at what the dime
 3. 用你构建好的 App 生成清单。在仓库根目录执行：
 
    ```bash
-   python3 games/totk/scripts/make_mod_manifest.py "$MODDIR" \
+   python3.14 games/totk/scripts/make_mod_manifest.py "$MODDIR" \
      --app "/path/to/Tears of the Kingdom.app" --version v121
    ```
 
@@ -357,13 +361,14 @@ never checks and Metal refuses to build; the app caps the chain at what the dime
 文件，先把旧的版本目录整个移走（或备份后删除）再复制，否则被删掉的文件会继续生效。每次改动后
 都要重新生成清单。
 
+<a id="code-zh"></a>
 ### 代码补丁（构建时合并）
 
 改了游戏代码的 mod 会带 `exefs/` 文件：IPS、IPS32 补丁，或者新的文本格式 `.pchtxt`。这些可以在
 构建 App 时合并进去：
 
 ```bash
-python3 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys" --mod "/path/to/Mod"
+python3.14 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys" --mod "/path/to/Mod"
 ```
 
 为什么只能在构建时、而不是运行时：App 没有模块加载器。启动时它映射的是构建时的那三个代码模块（main、
@@ -374,7 +379,7 @@ sdk、subsdk0），已经改写为 Apple 芯片版本并按 SHA-256 绑定，里
 
 有多个 mod 时，让模组管理器去做合并这件事：TKMM 的合并输出就是一个文件夹，里面一套 `exefs/`、一套
 `romfs/`（管理器也可能把几个 mod 的记录合进同一个 `.ips`），`--mod <那个文件夹>` 会把它们一起收进来，
-它的 `romfs/` 照常安装。两个补丁文件改到同一批字节时构建会拒绝并报出两个文件名，所以「合并时被另一个 mod
+再加上 `--install-mod-romfs`，它的 `romfs/` 才会替换对应版本的目录。两个补丁文件改到同一批字节时构建会拒绝并报出两个文件名，所以「合并时被另一个 mod
 覆盖」这种情况会停在构建阶段，不会不声不响地打进去。
 
 传入的文件夹按 mod 的常见结构放文件——代码在 `exefs/`、数据在 `romfs/`；只有一半也可以：没有 `exefs/`
@@ -382,14 +387,14 @@ sdk、subsdk0），已经改写为 Apple 芯片版本并按 SHA-256 绑定，里
 `subsdk9`、只有 `main.npdm`，甚至空的 `exefs/`）只算提示、不算失败：构建照常往下走，只是这个 mod 只生效数据
 那一半。带 `--update` 时补丁合并进更新后的模块，也就是 App 实际运行的那个。
 
-<a id="data"></a>
+<a id="data-zh"></a>
 ### 数据部分：`--install-mod-romfs`
 
 版本目录是你的：里面可能有另一个 mod 的文件，也可能是你手动复制进去的。所以构建默认不会往那里写。想要构建
 替你装好，加上这个参数：
 
 ```bash
-python3 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys" \
+python3.14 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys" \
   --mod "/path/to/Mod" --install-mod-romfs
 ```
 
@@ -397,7 +402,7 @@ python3 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys"
 
 - **清空** `~/Library/Application Support/MacNativeGames/TOTK/mods/<version>`，再把 mod 的 `romfs/` 复制进去，
   所以构建结束后这个目录里就是这一个 mod 的 RomFS，没有别的——另一个 mod 放在那里的文件、你自己复制进去的
-  文件都会被删掉；
+  文件都会被删掉（如果这个 mod 的文件最终一个都不会被游戏加载，那就什么都没替换，目录保持不动，见下文）；
 - 用 `scripts/make_mod_manifest.py` 对着刚构建好的 App 生成 `manifest.tsv`，所以 App 自己替换的路径会被排除
   （包括堆表：2K 覆盖文件已经带着 mod 的堆大小）；路径大小写写错的会当场终止构建并给出原因，而不是等到启动时
   才停止。
@@ -412,7 +417,7 @@ python3 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys"
 The Second Quest 1.4.3/romfs (and its manifest.tsv) when the build ends: anything you put in that folder yourself
 is deleted. Without the flag the build leaves the folder alone.
 ...
-4/4 app: .../mods/v143: emptied, then filled with The Second Quest 1.4.3/romfs and its manifest.tsv (--install-mod-romfs)
+.../mods/v143: emptied, then filled with The Second Quest 1.4.3/romfs and its manifest.tsv (--install-mod-romfs)
 4/4 app: .../mods/v143 holds 5250 files from The Second Quest 1.4.3/romfs now (3 entries it held before are gone)
    left out (the app replaces it, and the 2K overlay already carries these heap sizes): System/HeapSize/Product.Nin_NX_NVN.HeapDef.byml.zs
    .../mods/v143/manifest.tsv: 5229 files (4200 replaced, 1029 added)
@@ -421,7 +426,7 @@ is deleted. Without the flag the build leaves the folder alone.
 不带这个参数时，构建完全不碰这个目录，只打印手动执行的两条命令：你的 mod 环境不会因为你构建了一次就变化。
 
 运行时没有任何变化，游戏仍然在启动时加载这个目录；只是复制和写清单这一步由构建替你做了。iPhone / iPad 构建
-目前没有玩家 mod 目录，所以那里 `--mod` 只合并代码补丁（`--install-mod-romfs` 不起作用）。
+目前没有玩家 mod 目录，所以那里 `--mod` 只合并代码补丁（`--install-mod-romfs` 会被直接拒绝：没有可填的目录）。
 
 构建做的事，按顺序：
 
@@ -461,7 +466,7 @@ mod 的 `exefs/` 里可能还有这些文件，构建这样处理：
 | `main.npdm` | 忽略并提示：原生加载器不读模块元数据 |
 | `subsdk9` 等额外代码模块 | **不加载**：构建输出和报告里都会注明；App 只加载构建时的三个模块（main、sdk、subsdk0），模块自己的代码不会运行 |
 | 整个替换的 `main` | 拒绝：请改成补丁，构建才能按版本核对 |
-| 没有可合并进 main 的东西（只有 `subsdk9`、只有 `main.npdm`，甚至空的 `exefs/`） | 只提示、不拒绝：main 不做任何合并，构建带着这个 mod 的数据部分继续 |
+| 没有可合并进 main 的东西（只有 `subsdk9`、只有 `main.npdm`，甚至空的 `exefs/`） | 只提示、不拒绝：main 不做任何合并，构建继续；这个 mod 的代码不进 App，数据部分要装进版本目录才生效 |
 
 用 exlaunch 这类 hook 框架做的 mod，运行时改代码的部分就在这种额外模块里：它的 trampoline 在本 App
 里不会安装。像 The Second Quest 这样的 mod，主模块补丁和整个 RomFS 都会生效，但依赖那个模块的那部分
