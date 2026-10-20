@@ -21,6 +21,7 @@
 #include <dirent.h>
 #include <stdatomic.h>
 #include "totk_shader_seed.h"
+#include "totk_shader_observed.h"
 #include "totk_shader_contrib.h"
 extern void runtime_boot_status(const char *,const char *) __attribute__((weak_import));
 extern void runtime_boot_count(const char *,uint64_t,uint64_t) __attribute__((weak_import));
@@ -50,6 +51,10 @@ static NSString *root_dir(void) {   // native-port/ (the executable lives in nat
     g_root = [[[@(path) stringByResolvingSymlinksInPath] stringByDeletingLastPathComponent] stringByDeletingLastPathComponent];
     return g_root;
 }
+static NSString *seed_dir(void) {   // the prepared startup shaders that come with the app (build_app.py)
+    const char *seedPath = getenv("TOTK_SHADER_SEED_DIR");
+    return seedPath ? @(seedPath) : [root_dir() stringByAppendingPathComponent:@"build/shader-seed"];
+}
 NSString *totk_rt_dir(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -64,8 +69,7 @@ NSString *totk_rt_dir(void) {
         if (!(seedMode && !strcmp(seedMode, "off"))) {
             NSError *error = nil;
             if (runtime_boot_status) runtime_boot_status(TOTK_UI("检查着色器缓存","Checking the shader cache"),TOTK_UI("校验 App 附带的着色器，并按需导入本机缓存","Verifying the shaders bundled with the app and importing them into the local cache if needed"));
-            const char *seedPath = getenv("TOTK_SHADER_SEED_DIR");
-            NSString *source = seedPath ? @(seedPath) : [root_dir() stringByAppendingPathComponent:@"build/shader-seed"];
+            NSString *source = seed_dir();
             totk_seed_progress = seed_progress;
             NSDictionary *seed = totk_seed_import(source, g_dir, &error);
             totk_seed_progress = NULL;
@@ -95,6 +99,39 @@ NSString *totk_rt_dir(void) {
 #endif
     });
     return g_dir;
+}
+
+/* PR #84 (part A): the seed's shader-keys.json names every shader of this game version; the background warm-up only
+   warms cache entries of those shaders (and of shaders this Mac has seen the game use), not other versions' leftovers in
+   the same cache. Read once from the seed folder, checked against seed-manifest.json; not in use on iOS (its warm-up and
+   memory were not measured with it). nil = no valid scope: warm everything, as before. */
+static NSDictionary *shader_scope(void) {
+#if TARGET_OS_IPHONE
+    return nil;
+#else
+    static NSDictionary *scope; static dispatch_once_t once;
+    dispatch_once(&once, ^{ scope = totk_shader_scope_metadata(seed_dir(), @DMSH_CHAIN); });
+    return scope;
+#endif
+}
+static NSMutableDictionary *observed_keys_state(void) {
+    static NSMutableDictionary *state; static dispatch_once_t once;
+    // Finish cache/seed initialization before entering this once token. Keeping
+    // this outside totk_rt_dir's token prevents recursive initialization.
+    NSString *cache = totk_rt_dir();
+    dispatch_once(&once, ^{ state = totk_shader_observed_open(shader_scope(), cache, @DMSH_CHAIN); });
+    return state;
+}
+
+NSSet<NSString *> *totk_rt_observed_shader_keys(void) {
+    return totk_shader_observed_keys(observed_keys_state());
+}
+
+NSSet<NSString *> *totk_rt_shader_scope(void) {
+    const char *all = getenv("TOTK_WARM_ALL");
+    NSDictionary *scope = shader_scope();
+    if (!scope || (all && atoi(all))) return nil;
+    return [[NSSet setWithArray:scope[@"keys"]] setByAddingObjectsFromSet:totk_rt_observed_shader_keys()];
 }
 
 static void service_start(void) {
@@ -180,6 +217,9 @@ static int no_translator(void) {
 NSString *totk_rt_variant(NSString *shader, int stage, const uint8_t *control, const uint8_t *code, NSDictionary *answers, NSArray *local) {
     uint64_t started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     pthread_mutex_lock(&g_rt_lock);
+    // Called for the game's actual shader bytes, including when a prepared
+    // variant already exists. Old cache files alone never become observed keys.
+    totk_shader_observed_note(observed_keys_state(), shader);
     NSMutableArray *vs = variants_of(shader);
     for (NSUInteger i = 0; i < vs.count; i++) {
         NSDictionary *v = vs[i];

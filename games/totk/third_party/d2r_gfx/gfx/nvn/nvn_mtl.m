@@ -39,6 +39,7 @@ static uint64_t g_gen_shown;            // interpolated frames handed to the scr
 #include "nvn_texture_plan.h"
 #include "fps_overlay.h"
 #include "nvn_cover.h"
+#include "totk_shader_scope.h"   // totk_shader_scope_contains: the warm-up scope (PR #84)
 #include "dmsh_chain.h"   // DMSH_CHAIN：本源码树期望的 B 着色器库翻译链版本 | DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree
 #include "nvn_hmap.h"
 #include "totk_lifelog.h"
@@ -6226,8 +6227,10 @@ static NSString *warm_key(const char *s, size_t n) {
     return [[NSString alloc] initWithBytes:s length:z encoding:NSUTF8StringEncoding];
 }
 static _Atomic uint64_t g_warm_missing;   // shaders named in the warm lists that are not in the translation cache (yet)
+static NSSet<NSString *> *g_warm_scope;   // totk_rt_shader_scope(): this game version's shaders; nil = warm everything
 static int warm_available(NSString *key) {
     if (!key.length) return 1;
+    if (!totk_shader_scope_contains(g_warm_scope, key)) return 0;
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *rt = totk_rt_dir();
     int have = [fm fileExistsAtPath:[rt stringByAppendingFormat:@"/%@.metal", key]] ||
@@ -6469,15 +6472,17 @@ static void warm_worker(NSArray<NSString *> *paths, NSArray<NSString *> *files,
             if (path_index++ == 0) atomic_store(&g_warm_priority_done, 1);
         }
         atomic_store(&g_warm_priority_done, 1);
-        // The native port translates variants as they are discovered. Warm every variant already
-        // present in this translation-chain cache before the first playable scene is released.
+        // Every variant of this game's shaders already in the cache, including those translated while the manifests
+        // were warming. Other versions' shaders stay on disk for use on demand (g_warm_scope).
         NSString *rt = totk_rt_dir();
         // Preserve variants translated while the manifest was warming. They
         // extend the measured total rather than being silently omitted.
         NSMutableArray<NSString *> *cache_files = [files mutableCopy];
         NSMutableSet<NSString *> *known_files = [NSMutableSet setWithArray:files];
+        NSSet<NSString *> *late_scope = g_warm_scope ? [g_warm_scope setByAddingObjectsFromSet:totk_rt_observed_shader_keys()] : nil;
         NSArray<NSString *> *latest = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:rt error:nil] sortedArrayUsingSelector:@selector(compare:)];
         for (NSString *file in latest) if ([file hasSuffix:@"_b.metal"] && ![known_files containsObject:file]) {
+            if (!totk_shader_scope_contains(late_scope, [file stringByDeletingPathExtension])) continue;
             // The native service publishes reflection last. A newly written
             // MSL with no reflection yet is still in flight, not a failed shader.
             NSString *json = [[file stringByDeletingPathExtension] stringByAppendingPathExtension:@"json"];
@@ -6521,6 +6526,7 @@ static void warm_worker(NSArray<NSString *> *paths, NSArray<NSString *> *files,
         MLOG("预热分段：着色器库 %llu 次 / %.1f ms（各线程用时相加），Metal 管线 %llu 次 / %.1f ms",
              (unsigned long long)atomic_load(&g_warm_library_count),atomic_load(&g_warm_library_ns)/1e6,
              (unsigned long long)atomic_load(&g_warm_pipeline_count),atomic_load(&g_warm_pipeline_ns)/1e6);
+        MLOG("预热库来源：预编译 %llu 次，源码编译 %llu 次", (unsigned long long)atomic_load(&g_rt_prebuilt), (unsigned long long)atomic_load(&g_rt_compiled));
     }
     atomic_store(&g_warm_running, 0);
     if (runtime_warm_done) runtime_warm_done();
@@ -6648,10 +6654,18 @@ static void warm_start(void) {
         NSMutableString *desc = [NSMutableString string];
         for (NSString *p in paths) { NSString *t = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
             [desc appendFormat:@"%@%@ %lu 行", desc.length ? @"，" : @"", p.lastPathComponent, (unsigned long)[t componentsSeparatedByString:@"\n"].count - 1]; }
-        MLOG("预热清单（自动着色器收集）：%s；另加翻译缓存里的全部着色器", desc.UTF8String);
+        MLOG("预热清单（自动着色器收集）：%s；另加翻译缓存里本版本游戏的着色器", desc.UTF8String);
     }
     if (!g_warm_items) g_warm_items = [NSMutableArray array];
-    NSArray<NSString *> *files = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:totk_rt_dir() error:nil] sortedArrayUsingSelector:@selector(compare:)] ?: @[];
+    g_warm_scope = totk_rt_shader_scope();
+    NSArray<NSString *> *cached = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:totk_rt_dir() error:nil] sortedArrayUsingSelector:@selector(compare:)] ?: @[];
+    NSMutableArray<NSString *> *files = [NSMutableArray array];
+    NSUInteger skipped = 0;
+    for (NSString *file in cached) {
+        if ([file hasSuffix:@"_b.metal"] && !totk_shader_scope_contains(g_warm_scope, [file stringByDeletingPathExtension])) { skipped++; continue; }
+        [files addObject:file];
+    }
+    MLOG("预热范围：%s，跳过其他版本的着色器 %lu 个（需要时照常使用）", g_warm_scope ? "本版本游戏" : "整个缓存", (unsigned long)skipped);
     uint64_t total = 0, shader_total = 0, pipeline_total = 0;
     NSMutableSet<NSString *> *planned_keys = [NSMutableSet set];
     NSMutableSet<NSString *> *eligible = [NSMutableSet set];
