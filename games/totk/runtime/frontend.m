@@ -173,9 +173,9 @@ static void front_menubar_fps_add(NSMenu *bar){   // from front_install_menu
  about.enabled=NO;[fpsMenu addItem:about];fpsMenu.autoenablesItems=NO;
  fpsMenuItem=[[NSMenuItem alloc] initWithTitle:@"FPS --" action:nil keyEquivalent:@""];fpsMenuItem.submenu=fpsMenu;[bar addItem:fpsMenuItem];
 }
-/* The window title also ends in the frame rate ("Tears of the Kingdom  Mac — Ver. 1.4.3 — 60 FPS"), kept after
-   whatever title the game set; TOTK_TITLE_FPS=0 leaves the title alone. */
-static int title_fps_enabled(void){const char *e=getenv("TOTK_TITLE_FPS");return !(e&&!strcmp(e,"0"));}
+/* TOTK_TITLE_FPS=1: the window title also ends in the frame rate ("Tears of the Kingdom  Mac — Ver. 1.4.3 — 60 FPS"),
+   kept after whatever title the game set. Off by default: the menu bar already shows it. */
+static int title_fps_enabled(void){const char *e=getenv("TOTK_TITLE_FPS");return e&&!strcmp(e,"1");}
 static NSString *titleBase,*titleShown;
 static void front_title_fps(NSString *fps){
  if(!title_fps_enabled()||!window)return;
