@@ -50,6 +50,9 @@ typedef struct Mixer {
     pthread_t capture_thread;pthread_mutex_t capture_lock;pthread_cond_t capture_cond;
     int capture_started,capture_done,capture_closing,capture_worker;
 } Mixer;
+/* The unit that owns the phone's output, so an interruption can bring it back without touching the
+   renderer: the app's audio session is reactivated from main.m, the AudioUnit from here. */
+static Mixer *g_output_mixer;
 
 static _Atomic float device_volume = 1.0f;
 static unsigned audio_revision(const AudioRenderer *r) { unsigned byte=r->revision>>24;return byte>='0'?byte-'0':0; }
@@ -155,7 +158,7 @@ static void output_open(Mixer *m, int rate) {
         AudioUnitInitialize(m->unit) || AudioOutputUnitStart(m->unit)) {
         fprintf(stderr, "[totk-audio] 【红】CoreAudio output setup failed: mixing without sound\n"); AudioComponentInstanceDispose(m->unit); return;
     }
-    m->unit_ok = 1; fprintf(stderr, "[totk-audio] CoreAudio output %d Hz stereo\n", rate);
+    m->unit_ok = 1; g_output_mixer = m; fprintf(stderr, "[totk-audio] CoreAudio output %d Hz stereo\n", rate);
 }
 static void output_push(Mixer *m, const float *lr, int frames) {
     uint64_t wr = atomic_load(&m->wr), rd = atomic_load_explicit(&m->rd, memory_order_acquire);
@@ -203,6 +206,19 @@ void audio_mixer_set_running(AudioRenderer *r,int running){
     Mixer *m=r->mixer;if(!m)return;
     if(!running){atomic_store_explicit(&m->flush_until,atomic_load_explicit(&m->wr,memory_order_acquire),memory_order_release);atomic_fetch_add_explicit(&m->stop_epoch,1,memory_order_release);}
     atomic_store_explicit(&m->playing,running,memory_order_release);
+}
+/* An alarm or call stops the output unit; reactivating the session alone leaves it stopped, which is why
+   the game stayed silent until relaunch. Drop the backlog, then re-arm the unit from scratch. */
+void audio_mixer_resume(void) {
+    Mixer *m = g_output_mixer;
+    if (!m || !m->unit_ok) { fprintf(stderr, "[totk-audio] output resume: no device\n"); return; }
+    AudioOutputUnitStop(m->unit);
+    AudioUnitUninitialize(m->unit);
+    OSStatus init = AudioUnitInitialize(m->unit);
+    if (!init) atomic_store_explicit(&m->rd, atomic_load_explicit(&m->wr, memory_order_acquire), memory_order_release);
+    OSStatus start = init ? init : AudioOutputUnitStart(m->unit);
+    m->ready = 0;
+    fprintf(stderr, "[totk-audio] output resumed after interruption: init=%d start=%d\n", (int)init, (int)start);
 }
 void audio_mixer_close(AudioRenderer *r) {
     Mixer *m = r->mixer; if (!m) return;

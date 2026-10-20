@@ -12,6 +12,7 @@
 
 int totk_host_main(int argc, char **argv);
 void runtime_ios_attach_layer(CAMetalLayer *layer, UIView *host);
+extern void audio_mixer_resume(void);   /* runtime/audio_mixer.c: restart the OutputUnit after an interruption */
 static char *host_argv[3];
 static void *run_host(void *unused) { (void)unused; return (void *)(intptr_t)totk_host_main(3, host_argv); }
 /* The desktop keyboard-overlay shortcut has no counterpart on iOS. */
@@ -36,6 +37,41 @@ void runtime_shortcut_help_toggle(void) {}
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     static BOOL started; if (started) return; started = YES;
+    /* Playback survives the ringer switch and routes to the speaker; without an active session the
+       game's CoreAudio output stays on a null sink ("no device sink in use"). Activating it in
+       didFinishLaunching blocked the main thread before the log file was even opened. */
+    AVAudioSession *audio = AVAudioSession.sharedInstance;
+    NSError *catErr = nil, *actErr = nil;
+    [audio setCategory:AVAudioSessionCategoryPlayback mode:AVAudioSessionModeDefault options:0 error:&catErr];
+    BOOL activated = [audio setActive:YES error:&actErr];
+    fprintf(stderr, "[totk-ios] audio category=%s active=%d volume=%.2f route=%s err=%s%s\n",
+            audio.category.UTF8String ?: "?", (int)activated, audio.outputVolume,
+            audio.currentRoute.outputs.firstObject.portType.UTF8String ?: "?",
+            catErr ? catErr.localizedDescription.UTF8String : "none",
+            actErr ? actErr.localizedDescription.UTF8String : "");
+    /* The session carries the volume across an interruption; only the output unit needs re-arming.
+       Logged so the device log proves whether an interruption moved the media volume. */
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        fprintf(stderr, "[totk-ios] volume after 2s: %.2f\n", AVAudioSession.sharedInstance.outputVolume);
+    });
+    /* An alarm or phone call deactivates the session and stops the AudioUnit; nothing restarted either,
+       so the game stayed silent until relaunch. */
+    [[NSNotificationCenter defaultCenter] addObserverForName:AVAudioSessionInterruptionNotification
+                                                      object:nil
+                                                       queue:NSOperationQueue.mainQueue
+                                                  usingBlock:^(NSNotification *note) {
+        NSUInteger type = [note.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
+        if (type == AVAudioSessionInterruptionTypeEnded) {
+            NSError *err = nil;
+            BOOL back = [AVAudioSession.sharedInstance setActive:YES error:&err];
+            fprintf(stderr, "[totk-ios] audio interruption ended, reactivated=%d err=%s volume=%.2f\n",
+                    (int)back, err ? err.localizedDescription.UTF8String : "none",
+                    AVAudioSession.sharedInstance.outputVolume);
+            audio_mixer_resume();
+        } else {
+            fprintf(stderr, "[totk-ios] audio interrupted\n");
+        }
+    }];
     pthread_attr_t attr; pthread_attr_init(&attr); pthread_attr_setstacksize(&attr, 64u << 20);
     pthread_t thread; pthread_create(&thread, &attr, run_host, NULL);
     pthread_detach(thread); pthread_attr_destroy(&attr);
@@ -68,6 +104,10 @@ void runtime_shortcut_help_toggle(void) {}
     (void)options;
     // Controller input does not reset the idle timer; auto-lock would suspend the game mid-play or mid shader import.
     application.idleTimerDisabled = YES;
+    /* The Mac launcher passes the preferred language as TOTK_LOCALE; on iOS nothing did, so the game
+       fell back to CFLocale and stayed English. "zh-Hans-CN" is mapped to zh-Hans by services.c. */
+    NSString *preferred = NSLocale.preferredLanguages.firstObject;
+    if (preferred.length) setenv("TOTK_LOCALE", preferred.UTF8String, 1);
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject;
     NSString *res = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"GameData"];
