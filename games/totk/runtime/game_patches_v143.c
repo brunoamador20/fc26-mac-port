@@ -173,8 +173,10 @@ static void patch_realtime(Module *m){
    30 Hz, independent of the frame rate. TOTK_HIGHFPS_FIX=0 keeps the original check. */
 static void patch_slowmo_bounce(Module *m){
     const char *e=getenv("TOTK_HIGHFPS_FIX");if(e&&!strcmp(e,"0"))return;
-    uint64_t stub=((m->text_end+15)&~15ULL)+176;   /* after the ultrawide veneers (+48, 4 x 32 bytes) */
-    if(stub+20>((m->text_end+15)&~15ULL)+256)runtime_fail("1.4.3 bounce veneer layout");
+    /* after the ultrawide veneers (+48, 4 x 32 bytes) and the cloth/hair clock (+176, 19 words); read-only data starts
+       at the next 4 KiB page */
+    uint64_t stub=((m->text_end+15)&~15ULL)+256;
+    if(stub+20>((m->text_end+0xfff)&~0xfffULL))runtime_fail("1.4.3 bounce veneer layout");
     uint32_t veneer[]={0xbd402920,   /* ldr s0, [x9, #0x28]: X+0x28 */
         0xbd403921,                  /* ldr s1, [x9, #0x38]: the 30 Hz ratio (s1 is set again by the next original instruction) */
         0x1e210800,                  /* fmul s0, s0, s1 */
