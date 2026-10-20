@@ -13,7 +13,10 @@
 #include <string.h>
 
 #define TOTK_CONTRIB_STEP 500
-#define TOTK_CONTRIB_ISSUE_URL "https://github.com/ly05010419/MacNativeGames/issues/new?template=shader-list.yml"
+#ifndef GAME_CONTRIB_TEMPLATE   /* the issue form of this game's list (runtime/game_version.h sets Breath of the Wild's) */
+#define GAME_CONTRIB_TEMPLATE "shader-list.yml"
+#endif
+#define TOTK_CONTRIB_ISSUE_URL "https://github.com/ly05010419/MacNativeGames/issues/new?template=" GAME_CONTRIB_TEMPLATE
 
 static inline NSString *totk_contrib_path(void) {
     const char *e = getenv("TOTK_SHADER_CONTRIB");

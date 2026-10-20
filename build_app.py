@@ -6,8 +6,8 @@
 Supported: TOTK base 1.0.0 (0100F2C0115B6000), XCI or NSP; optional --update with a supported cumulative update.
 Also Breath of the Wild 1.6.0 (01007EF00011E000) as one card image holding the base game, the update and the add-on
 content (games/botw): it needs --shared-fonts (the six .bfttf files a Tears of the Kingdom build extracted into its work
-folder, extracted/firmware/shared-fonts) and takes an optional --shader-cache (a translation cache the game was played
-with) as its startup shader seed. The game is recognised by the title IDs in the file, never by the file name.
+folder, extracted/firmware/shared-fonts); its startup shaders come from its game data and its own shared shader list
+(games/botw/assets/shader_list.tsv). The game is recognised by the title IDs in the file, never by the file name.
 NSPs need common tickets (unless rights-free) and a separate shared-font source. iOS builds are unsigned IPAs for sideloading and require Xcode 26+, xcodegen, CMake, and network access to build device libraries.
 Nothing from the game is in this repository; everything is made from your files on your Mac. Key values are never printed.
 
@@ -49,6 +49,7 @@ UPDATES = ('v112', 'v121', 'v143')
 # update and the add-on content. The game is chosen by the title IDs of the NCAs in the game file, never by its name.
 BOTW = REPO / 'games/botw'
 BOTW160 = json.loads((BOTW / 'assets/expected-v1.6.0.json').read_text())
+BOTW_LIST = BOTW / 'assets/shader_list.tsv'   # the game's shared shader list (docs/shader-list.md)
 VERSIONS['botw160'] = BOTW160
 TITLES = {'0100F2C0115B6000': 'totk', '01007EF00011E000': 'botw'}
 # Per game: app name, bundle identifier, executable name (= the player's data folder under
@@ -776,8 +777,7 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
     clone(tree / ('build/totk-native' if version == 'v0' else f'build/totk-native-{version}'), res/'build/totk-native')
     files = ['build/spirv-cross/spirv-cross', f'rewritten/{version}/main.patched.bin', f'rewritten/{version}/sdk.patched.bin',
              f'rewritten/{version}/subsdk0.patched.bin', f'extracted/{version}/romfs/romfs.bin', f'extracted/{version}/romfs/runtime-index.bin']
-    if game == 'totk':
-        files += ['build/pso_manifest.tsv', 'build/pso_title.tsv']   # exported from the shared shader list (games/totk/Makefile)
+    files += ['build/pso_manifest.tsv', 'build/pso_title.tsv']   # exported from the game's shared shader list (games/totk/Makefile)
     for index in expected.get('aoc', {}):   # Breath of the Wild: the add-on content volumes (runtime/aoc_romfs.c)
         files += [f'extracted/{version}/aoc/{index}/romfs.bin', f'extracted/{version}/aoc/{index}/runtime-index.bin']
     for rel in files:
@@ -788,14 +788,12 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
             copy_tree(tree / rel, res / rel)
     seed = tree/f'build/shader-seed/{version}'
     if not (seed/'seed-manifest.json').is_file():
-        if game != 'botw':
-            raise BuildError('startup shader seed was not prepared; refusing an app without first-launch warm-up data')
-        say('4/4 app: no startup shader seed (give --shader-cache a played translation cache); the game translates its shaders as it meets them')
+        raise BuildError('startup shader seed was not prepared; refusing an app without first-launch warm-up data')
     else:
         try:
             report = json.loads((seed/'seed-manifest.json').read_text())
             if (report['version'] != version or report['chain'] != 'totk-native-v4-unverified' or
-                    report['shaders'] < (8000 if game == 'totk' else 1) or not report['files'] or any(
+                    report['shaders'] < (8000 if game == 'totk' else 2000) or not report['files'] or any(
                         Path(name).name != name or sha256(seed/name) != digest for name, digest in report['files'].items())):
                 raise ValueError('version, translation chain or file hash differs')
         except (ValueError, KeyError, OSError, TypeError) as error:
@@ -1039,10 +1037,9 @@ def step_data_botw(tree, botw, game, keys, logs, *, shared_fonts=None):
         validate_fonts(fonts)
 
 
-def step_shaders_botw(tree, botw, logs, *, shader_cache=None):
-    """SPIRV-Cross and the translator as for Tears of the Kingdom. The startup seed: the shader discovery reads Tears of the
-    Kingdom's archives, so for this game the seed is a played translation cache (--shader-cache,
-    games/botw/scripts/prepare_shader_seed_from_cache.py); without one the app translates as it plays."""
+def step_shaders_botw(tree, botw, logs):
+    """SPIRV-Cross and the translator as for Tears of the Kingdom; the startup seed from this game's archives and its
+    shared shader list (games/botw/scripts/prepare_shader_seed.py, games/botw/assets/shader_list.tsv)."""
     version = 'botw160'
     if not (tree / 'build/spirv-cross/spirv-cross').exists():
         say('3/4 shaders: building SPIRV-Cross with clang')
@@ -1053,15 +1050,11 @@ def step_shaders_botw(tree, botw, logs, *, shader_cache=None):
         raise BuildError(f'{translator}: not the shader translator this repository ships (its SHA-256 differs from '
                          f'totk_xlate.sha256); check it out again, or rebuild it with games/totk/tools/totk_xlate/publish_native.sh')
     seed = tree / f'build/shader-seed/{version}'
-    if not shader_cache:
-        if seed.exists():
-            shutil.rmtree(seed)   # an older seed must not outlive the cache it came from
-        say('3/4 shaders: no --shader-cache, so the app gets no startup shader seed')
-        return
-    say('3/4 shaders: preparing the startup seed from the played translation cache')
-    run([tree / '.venv/bin/python', botw / 'scripts/prepare_shader_seed_from_cache.py', '--cache', shader_cache, '--output', seed,
-         '--romfs', tree / f'extracted/{version}/romfs', '--translator', translator, '--spirv-cross', tree / 'build/spirv-cross/spirv-cross',
-         '--version', version], logs / 'prepare-shader-seed-botw.log', cwd=tree)
+    say('3/4 shaders: preparing the startup shaders from the game data and the shared shader list (a few minutes)')
+    run([tree / '.venv/bin/python', botw / 'scripts/prepare_shader_seed.py', '--romfs', tree / f'extracted/{version}/romfs',
+         '--output', seed, '--translator', translator, '--spirv-cross', tree / 'build/spirv-cross/spirv-cross',
+         '--version', version, '--modules', tree / f'rewritten/{version}', '--shader-list', BOTW_LIST],
+        logs / 'prepare-shader-seed-botw.log', cwd=tree)
 
 
 def parse_args(argv):
@@ -1073,7 +1066,7 @@ def parse_args(argv):
     ap.add_argument('-k', '--keys', type=Path, required=True, help='your prod.keys')
     ap.add_argument('-o', '--out', type=Path, help=f'the app or IPA to write (default depends on --platform; next to the game file)')
     ap.add_argument('--work', type=Path, help='work folder (default: TOTK_build next to the game file)')
-    ap.add_argument('--shader-cache', type=Path, help='Breath of the Wild: a translation cache the game was played with (shader-cache/rt-<chain> of its data folder); its shaders become the startup seed of the app')
+    ap.add_argument('--shader-cache', type=Path, help=argparse.SUPPRESS)   # removed: the seed comes from the game data and the shared list
     ap.add_argument('--no-shader-reminder', action='store_true', help='iOS: do not install the Mac agent that asks, while an iPhone / iPad with the game is connected, to send the shaders the shared list lacks')
     fonts = ap.add_mutually_exclusive_group()
     fonts.add_argument('--firmware', type=Path, help='unpacked firmware NCA directory providing the six expected shared fonts (needed for NSP unless --shared-fonts or valid cached fonts are available)')
@@ -1154,17 +1147,15 @@ def main(argv):
         if shutil.disk_usage(existing_volume_path(work.parent if work.parent.exists() else game.parent)).free / 2**30 < 22 and \
                 not (work / 'totk/extracted/botw160/romfs/romfs.bin').exists():
             raise BuildError('needs about 22 GB free for the work folder (the app itself is an APFS clone of it when on the same volume)')
-        shader_cache = args.shader_cache.expanduser().resolve() if args.shader_cache else None
-        if shader_cache and not shader_cache.is_dir():
-            raise BuildError(f'no such translation cache: {shader_cache}')
+        if args.shader_cache:
+            say('--shader-cache is no longer needed: the startup shaders come from the game data and the shared shader list (games/botw/assets/shader_list.tsv)')
         botw = work / 'botw'
         say(f'Breath of the Wild {BOTW160["display_version"]} (by the title IDs in the game file); work folder {work}')
         step_code_botw(tree, botw, game, keys, env, logs)
         step_data_botw(tree, botw, game, keys, logs, shared_fonts=shared_fonts)
-        step_shaders_botw(tree, botw, logs, shader_cache=shader_cache)
-        if (tree / 'build/shader-seed/botw160/seed-manifest.json').is_file():
-            step_shader_libs(tree, logs, version='botw160')
-        step_binary(tree, game, keys, env, logs, version='botw160', title='01007ef00011e000')
+        step_shaders_botw(tree, botw, logs)
+        step_shader_libs(tree, logs, version='botw160')
+        step_binary(tree, game, keys, {**env, 'SHADER_LIST': str(BOTW_LIST)}, logs, version='botw160', title='01007ef00011e000')
         say(f'4/4 app: assembling {out}')
         step_app(tree, out, logs, version='botw160', game='botw')
         run([LSREGISTER, '-f', out], logs / 'register-app.log')
@@ -1173,10 +1164,7 @@ def main(argv):
         r = subprocess.run([out / f'Contents/MacOS/{APPS["botw"][2]}', '--check'], capture_output=True, text=True, timeout=1800)
         if r.returncode: raise BuildError(f'the app does not start: {(r.stdout + r.stderr).strip()}')
         say(f'   checked in {time.time() - t1:.0f} s')
-        if (out / 'Contents/Resources/totk/build/shader-seed').is_dir():
-            step_warm_metal(tree, out, logs)
-        else:
-            say('4/4 app: no startup shader seed in the app (no --shader-cache), so nothing is compiled ahead')
+        step_warm_metal(tree, out, logs)
         say(f'done in {(time.time() - t0) / 60:.0f} min: {out}')
         say('Open it from Finder. The first start verifies the game data (15 GB + 1.4 GB of add-on content) and keeps a record; '
             'saves, the shader cache and the log go to ~/Library/Application Support/MacNativeGames/BotW and ~/Library/Logs/MacNativeGames/botw.log.')
