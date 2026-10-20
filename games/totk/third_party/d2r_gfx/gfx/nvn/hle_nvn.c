@@ -2332,10 +2332,15 @@ static int g_paced_hz;   // the display-following rate, used instead of UNCAPPED
 #include "totk_mfx_mode.h"   /* totk_mfx.m: frame interpolation mode of this game frame (TOTK_MFX, key 2) */
 /* TOTK: frame interpolation at 30 fps or at half the refresh rate paces the game itself, so it suspends the uncapped mode;
    the uncapped interpolation mode keeps it. Key 2 cycles the modes at run time (2026-10-16 night). */
-static int uncapped_now(void) { int m = mfx_enabled(); return g_uncapped && (m == MFX_OFF || m == MFX_MAX); }
+/* A frame rate the game itself needs at the moment (runtime/game_patches_botw.c: 30 while Breath of the Wild plays a
+   pre-rendered movie, which advances one movie frame per game frame). The game is then paced exactly as in the 30+30
+   mode, without the interpolation. Weak: Tears of the Kingdom has none. */
+__attribute__((weak)) int runtime_game_fps_limit(void) { return 0; }
+static int game_holds_30(void) { return runtime_game_fps_limit() == 30; }
+static int uncapped_now(void) { int m = mfx_enabled(); return g_uncapped && !game_holds_30() && (m == MFX_OFF || m == MFX_MAX); }
 /* 30+30 on a display whose rate is not a multiple of 30 (the user's 100 Hz): the game is paced by our own clock at exactly
    30 fps instead of by the display link (3 refreshes would be 33 fps); the display link still shows each picture at a refresh. */
-static int mfx_own_clock(void) { return mfx_enabled() == MFX_30 && (g_paced_hz <= 0 || g_paced_hz % 30); }
+static int mfx_own_clock(void) { return (mfx_enabled() == MFX_30 || game_holds_30()) && (g_paced_hz <= 0 || g_paced_hz % 30); }
 /* Opt-in until live scene/clock validation (Breath of the Wild: on by default, UNCAPPED_INTERVAL_FROM_ENV in nvn_obj.h).
    Only applies to the existing Mac real-time uncapped path; original timing, MetalFX and deterministic tests
    retain the guest interval. GPU/texture lifetime waits are unchanged. */
@@ -2705,8 +2710,8 @@ static unsigned present_ticks(const win_t *o) {   /* display ticks per game fram
        mfx_own_clock). Held here and not only by the game's controller, because the code carries the 60 FPS patch (the
        controller may choose 1); the real-time frame step keeps game speed right. Uncapped interpolation paces as uncapped. */
     int m = mfx_enabled();
-    if (m == MFX_HALF) return 2;
-    if (m == MFX_30) { int hz = g_paced_hz > 0 ? g_paced_hz : 60; return (unsigned)(hz >= 45 ? (hz + 15) / 30 : 1); }
+    if (m == MFX_HALF && !game_holds_30()) return 2;
+    if (m == MFX_30 || game_holds_30()) { int hz = g_paced_hz > 0 ? g_paced_hz : 60; return (unsigned)(hz >= 45 ? (hz + 15) / 30 : 1); }
     return g_display_mode || (uncapped_now() && !dm_detclock_enabled() && uncapped_interval_on()) || o->interval <= 0 ? 1u : (unsigned)o->interval;
 }
 static uint64_t present_period(const win_t *o) {
@@ -2716,7 +2721,7 @@ static uint64_t present_period(const win_t *o) {
                                     m == MFX_HALF ? "补帧 刷新率一半：跟随显示器、每两次刷新一帧" :
                                     m == MFX_MAX ? (g_uncapped ? "补帧 不限帧：不限帧率，每帧补一帧" : "补帧 不限帧：按游戏的出图间隔，每帧补一帧") :
                                     g_uncapped ? "补帧关：不限帧率" : "补帧关：按游戏的出图间隔"); was = m; }
-    if (m == MFX_30) return 1000000000ull / 30;   /* exactly 30 fps, by display ticks or by our own clock */
+    if (m == MFX_30 || game_holds_30()) return 1000000000ull / 30;   /* exactly 30 fps, by display ticks or by our own clock */
     return hz > 0 ? (uint64_t)itv * 1000000000ull / (uint64_t)hz : 0;
 }
 /* Exercise production policy, including the shrine's interval=2 and the
