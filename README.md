@@ -34,7 +34,11 @@ Update history:
 
 | Date | Platform | Update |
 |---|---|---|
-| Oct 20 | All | Shader translation update: vertex outputs a shader does not write start as (0, 0, 0, 1), which brings back missing markers and effects (#91). The first launch after updating translates shaders again, because the old cache is from the previous translation (on iPhone and iPad the old cache is removed) |
+| Oct 20 | iPhone, iPad | Sound plays with the silent switch on and comes back after a call, Siri or an alarm; the game follows the system language; a fresh install reaches the title screen (#97) |
+| Oct 20 | iPhone, iPad | First launch after installing shows the game in about 7 seconds instead of about 4½ minutes: the shaders that come with the app are read where they are, without checking or copying them again (iPhone 14) |
+| Oct 20 | Mac | Breath of the Wild above 30 fps: menus and the HUD at normal speed, physics steady, movies at their own speed; docked play renders at native 1080p (`TOTK_RENDER_RES=900` keeps 1600x900) (#103) |
+| Oct 20 | Mac | Faster app builds: files are cloned in one call and the 16 GB of game data is signed once (#100) |
+| Oct 20 | All | Shader translation update: vertex outputs a shader does not write start as (0, 0, 0, 1), which brings back missing markers and effects (#91), and shadow compares and depth reads match the Switch, which removes dark patches on the ground and walls and the dark halo behind Link (#89, #104). The first launch after updating translates shaders again, because the old cache is from the previous translation (on iPhone and iPad the old cache is removed) |
 | Oct 20 | Mac | High frame rates (all four versions): trampolines bounce above 100 FPS (#61), and hair and cloth sway at the right speed above 30 FPS (#79) |
 | Oct 20 | Mac | Key 5 smooths the stair-stepped edges of the 3D scene with MetalFX temporal anti-aliasing (1.4.3); `TOTK_ANISO=16` sharpens ground and wall textures seen at a grazing angle |
 | Oct 20 | Mac | The live FPS in the menu bar; key 1 gains an FPS-only state |
@@ -291,7 +295,11 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 
 | 日期 | 平台 | 更新 |
 |---|---|---|
-| 10 月 20 日 | 全部 | 着色器翻译更新：着色器没写的顶点输出从 (0, 0, 0, 1) 开始，找回了缺失的标记和特效（#91）。更新后第一次启动会重新翻译着色器，因为旧缓存是上一版翻译的（iPhone、iPad 上旧缓存会被删掉） |
+| 10 月 20 日 | iPhone、iPad | 打开静音键也有声音，来电、Siri、闹钟之后声音会恢复；游戏跟随系统语言；全新安装能进标题画面（#97） |
+| 10 月 20 日 | iPhone、iPad | 安装后第一次启动约 7 秒出画面，原来要约 4 分半：随 App 的着色器直接原地读取，不再校验和复制（iPhone 14） |
+| 10 月 20 日 | Mac | 旷野之息 30 帧以上：菜单和 HUD 速度正常、物理稳定、过场动画按原速播放；底座模式按原生 1080p 渲染（`TOTK_RENDER_RES=900` 保持 1600x900）（#103） |
+| 10 月 20 日 | Mac | 打包更快：文件一次克隆，16 GB 游戏数据只签名一次（#100） |
+| 10 月 20 日 | 全部 | 着色器翻译更新：着色器没写的顶点输出从 (0, 0, 0, 1) 开始，找回了缺失的标记和特效（#91）；阴影比较和深度读取改成和 Switch 一样，去掉了地面、墙面的暗斑和林克身后的暗边（#89、#104）。更新后第一次启动会重新翻译着色器，因为旧缓存是上一版翻译的（iPhone、iPad 上旧缓存会被删掉） |
 | 10 月 20 日 | Mac | 高帧率（四个版本）：100 FPS 以上蹦床能弹起来（#61），30 FPS 以上头发和衣服摆动速度正常（#79） |
 | 10 月 20 日 | Mac | 按 5 用 MetalFX 时间性抗锯齿让 3D 画面边缘的锯齿变平滑（1.4.3）；`TOTK_ANISO=16` 让斜着看的地面、墙面纹理更清楚 |
 | 10 月 20 日 | Mac | 菜单栏显示实时帧率；1 键多了“只显示 FPS”一档 |
