@@ -12,8 +12,8 @@ NSPs need common tickets (unless rights-free) and a separate shared-font source.
 Nothing from the game is in this repository; everything is made from your files on your Mac. Key values are never printed.
 
 Steps (each one checked against games/totk/assets/expected-v<version>.json, so a damaged dump or another version stops the
-build at the first wrong file; a different genuine dump of the same version is accepted — main.npdm by Nintendo's ACID
-signature, shared fonts by valid BFTTF structure):
+build at the first wrong file; a different dump of the same version is accepted — main.npdm by Nintendo's ACID
+signature, or signed again by a dump tool once all four code modules match, shared fonts by valid BFTTF structure):
   1. code: ExeFS out of the XCI or NSP, the three code modules rewritten for Apple silicon (games/totk/third_party/d2r)
   2. data: RomFS (17 GB), the system shared fonts (from XCI firmware or an explicit font source), the RomFS overlays
   3. shaders: SPIRV-Cross (fetched at a pinned commit, compiled with clang) and the shader translator, which ships
@@ -174,13 +174,34 @@ def npdm_signed(path):
     return _pss_sha256_valid(data[acid:acid + 0x100], NINTENDO_ACID_MODULUS, data[acid + 0x100:acid + 0x100 + size])
 
 
-def exefs_matches(exefs, expected):
-    """True when the extracted ExeFS holds the expected modules; a signed main.npdm of another dump is accepted."""
+def npdm_program_id(path):
+    """The program ID in a well-formed npdm's ACI0 block (16 upper-case hex digits), else None."""
+    data = path.read_bytes()
+    if len(data) < 0x80 or data[:4] != b'META':
+        return None
+    aci, aci_size = struct.unpack_from('<II', data, 0x70)
+    if aci_size < 0x20 or aci + aci_size > len(data) or data[aci:aci + 4] != b'ACI0':
+        return None
+    return f'{struct.unpack_from("<Q", data, aci + 0x10)[0]:016X}'
+
+
+def npdm_kind(path, title):
+    """How a main.npdm that is not the reference dump's file is accepted: 'signed' (Nintendo's ACID signature: another
+    genuine dump), 'resigned' (a well-formed npdm of this title whose ACID a dump tool signed again, as tools that change
+    an NCA's key generation do), else None. The game never reads main.npdm here, and the code modules are checked by
+    hash, so a re-signed one is accepted only alongside matching code (exefs_matches, step_code)."""
+    if npdm_signed(path):
+        return 'signed'
+    return 'resigned' if npdm_program_id(path) == title.upper() else None
+
+
+def exefs_matches(exefs, expected, title):
+    """True when the extracted ExeFS holds the expected code modules and a main.npdm of this version (npdm_kind)."""
     for name, digest in expected.items():
-        path = exefs / name
-        if not path.is_file() or (sha256(path) != digest and not (name == 'main.npdm' and npdm_signed(path))):
+        if name != 'main.npdm' and (not (exefs / name).is_file() or sha256(exefs / name) != digest):
             return False
-    return True
+    npdm = exefs / 'main.npdm'
+    return 'main.npdm' not in expected or (npdm.is_file() and (sha256(npdm) == expected['main.npdm'] or npdm_kind(npdm, title) is not None))
 
 
 def _bfttf_valid(path):
@@ -334,14 +355,14 @@ def identify_update(tree, game, keys, logs):
     for version in UPDATES:
         exefs = tree / f'extracted/{version}/exefs'
         if source_matches(exefs.parent / 'extraction-manifest.json', source) and exefs_matches(
-                exefs, VERSIONS[version]['exefs_sha256']):
+                exefs, VERSIONS[version]['exefs_sha256'], VERSIONS[version]['title_id']):
             return version, source
     staging = tree / 'extracted/update-detection'
     if staging.exists(): shutil.rmtree(staging)
     run([tree / '.venv/bin/python', 'scripts/extract_exefs.py', source, '--keys', keys,
          '--update', '--output', staging / 'exefs'], logs / 'identify-update.log', cwd=tree)
     version = next((version for version in UPDATES
-                    if exefs_matches(staging / 'exefs', VERSIONS[version]['exefs_sha256'])), None)
+                    if exefs_matches(staging / 'exefs', VERSIONS[version]['exefs_sha256'], VERSIONS[version]['title_id'])), None)
     if version is None:
         raise BuildError('unsupported update module hashes; expected 1.1.2, 1.2.1 or 1.4.3 (the file name is not used to choose a version)')
     target = tree / f'extracted/{version}'
@@ -403,7 +424,7 @@ def step_code(tree, game, keys, env, logs, *, version="v0"):
     exefs = tree / f'extracted/{version}/exefs'
     want = expected['exefs_sha256']
     manifest = exefs.parent / 'extraction-manifest.json'
-    if not source_matches(manifest, game) or not exefs_matches(exefs, want):
+    if not source_matches(manifest, game) or not exefs_matches(exefs, want, expected['title_id']):
         say('1/4 code: extracting the ExeFS from the game file')
         if exefs.exists():
             shutil.rmtree(exefs)
@@ -415,8 +436,13 @@ def step_code(tree, game, keys, env, logs, *, version="v0"):
         got = sha256(exefs / n)
         if got == h:
             continue
-        if n == 'main.npdm' and npdm_signed(exefs / n):
+        kind = npdm_kind(exefs / n, expected['title_id']) if n == 'main.npdm' else None
+        if kind == 'signed':
             say(f"1/4 code: main.npdm is a Nintendo-signed {expected['display_version']} file from another dump; using it")
+            continue
+        if kind == 'resigned':   # the code modules are checked in this same loop: any mismatch there still stops the build
+            say(f"1/4 code: main.npdm of this dump was signed again by a dump tool (not Nintendo's signature, e.g. a changed "
+                f"key generation); the game does not use it and the code must match {expected['display_version']}; using it")
             continue
         check(f'ExeFS {n}', got, h)
     if not (tree / f'extracted/{version}/elf/main-inventory.json').exists():
