@@ -1160,8 +1160,10 @@ def main(argv):
     tree = prepare_work(work, py, logs)
     which = identify_game(tree, game, keys, logs)
     if which == 'botw':
-        if update or args.platform == 'ios':
-            raise BuildError('Breath of the Wild: the card image already holds its update and add-on content (no --update), and only the Mac is supported so far')
+        if args.platform == 'ios':
+            raise BuildError('Breath of the Wild has no iPhone / iPad build yet: build the Mac app (leave out --platform ios)')
+        if update:
+            raise BuildError('Breath of the Wild: the card image already holds its update and add-on content, so leave out --update')
         if not args.work:   # BotW_build next to the game file, not TOTK_build
             if fresh_work:
                 shutil.rmtree(work)
