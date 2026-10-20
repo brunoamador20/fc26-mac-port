@@ -808,7 +808,9 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
     files = ['build/spirv-cross/spirv-cross', f'rewritten/{version}/main.patched.bin', f'rewritten/{version}/sdk.patched.bin',
              f'rewritten/{version}/subsdk0.patched.bin', f'extracted/{version}/romfs/romfs.bin', f'extracted/{version}/romfs/runtime-index.bin']
     files += ['build/pso_manifest.tsv', 'build/pso_title.tsv']   # exported from the game's shared shader list (games/totk/Makefile)
-    for index in expected.get('aoc', {}):   # Breath of the Wild: the add-on content volumes (runtime/aoc_romfs.c)
+    for index in expected.get('aoc', {}):   # Only installed, verified expansion pass volumes.
+        if not (tree / f'extracted/{version}/aoc/{index}/index.json').is_file():
+            continue
         files += [f'extracted/{version}/aoc/{index}/romfs.bin', f'extracted/{version}/aoc/{index}/runtime-index.bin']
     for rel in files:
         clone(tree / rel, res / rel)
@@ -1005,7 +1007,7 @@ def step_code_botw(tree, botw, game, keys, env, logs):
     report_path.write_text(json.dumps(report, indent=2) + '\n')
 
 
-def step_data_botw(tree, botw, game, keys, logs, *, shared_fonts=None):
+def step_data_botw(tree, botw, game, keys, logs, *, shared_fonts=None, update=None):
     """The base + 1.6.0 RomFS merged from the card image (games/botw/scripts/extract_romfs.py, hactool BKTR), the two
     add-on content volumes (extract_aoc_romfs.py), and the shared fonts: this card's system update partition is empty, so
     they come from --shared-fonts or from a previous build in the work folder."""
@@ -1027,28 +1029,35 @@ def step_data_botw(tree, botw, game, keys, logs, *, shared_fonts=None):
         if folder.exists():
             shutil.rmtree(folder)
         say('2/4 data: merging the base RomFS with the 1.6.0 update and verifying all IVFC levels (15 GB, about 5 minutes)')
-        run([py, botw / 'scripts/extract_romfs.py', game, '--keys', keys, '--hactool', hactool, '--output', folder], logs / 'botw-romfs.log', cwd=tree)
+        run([py, botw / 'scripts/extract_romfs.py', game, *(['--update', update] if update else []), '--keys', keys, '--hactool', hactool, '--output', folder], logs / 'botw-romfs.log', cwd=tree)
         report = json.loads(index.read_text())
         check('1.6.0 RomFS', report['romfs_sha256'], expected['romfs']['sha256'])
         check('1.6.0 RomFS size', report['romfs_size'], expected['romfs']['size'])
     aoc = tree / f'extracted/{version}/aoc'
-    aoc_valid = True
-    for i, want in expected['aoc'].items():
-        try:
-            report = json.loads((aoc / i / 'index.json').read_text())
-            aoc_valid = aoc_valid and report.get('status') == 'pass' and report['romfs_sha256'] == want['sha256'] and \
-                (aoc / i / 'romfs.bin').stat().st_size == want['size']
-        except (OSError, ValueError, KeyError):
-            aoc_valid = False
-    if not aoc_valid:
-        hactool = hactool or build_hactool(tree, logs)
+    if update:
+        # A separate base/update install has no expansion pass. Drop cached card DLC
+        # and its generated configuration before rebuilding in a reused work folder.
         if aoc.exists():
             shutil.rmtree(aoc)
-        say('2/4 data: extracting the add-on content (the expansion pass, 1.4 GB)')
-        run([py, botw / 'scripts/extract_aoc_romfs.py', game, '--keys', keys, '--hactool', hactool, '--output', aoc], logs / 'botw-aoc.log', cwd=tree)
+        (tree / f'build/{version}/aoc_config.h').unlink(missing_ok=True)
+    else:
+        aoc_valid = True
         for i, want in expected['aoc'].items():
-            report = json.loads((aoc / i / 'index.json').read_text())
-            check(f'add-on content {i}', report['romfs_sha256'], want['sha256'])
+            try:
+                report = json.loads((aoc / i / 'index.json').read_text())
+                aoc_valid = aoc_valid and report.get('status') == 'pass' and report['romfs_sha256'] == want['sha256'] and \
+                    (aoc / i / 'romfs.bin').stat().st_size == want['size']
+            except (OSError, ValueError, KeyError):
+                aoc_valid = False
+        if not aoc_valid:
+            hactool = hactool or build_hactool(tree, logs)
+            if aoc.exists():
+                shutil.rmtree(aoc)
+            say('2/4 data: extracting the add-on content (the expansion pass, 1.4 GB)')
+            run([py, botw / 'scripts/extract_aoc_romfs.py', game, '--keys', keys, '--hactool', hactool, '--output', aoc], logs / 'botw-aoc.log', cwd=tree)
+            for i, want in expected['aoc'].items():
+                report = json.loads((aoc / i / 'index.json').read_text())
+                check(f'add-on content {i}', report['romfs_sha256'], want['sha256'])
     fonts = tree / 'extracted/firmware/shared-fonts'
     if not fonts_valid(fonts):
         if not shared_fonts:
@@ -1088,7 +1097,7 @@ def step_shaders_botw(tree, botw, logs):
 
 
 def parse_args(argv):
-    ap = argparse.ArgumentParser(description='Build a native Mac app or unsigned iPhone/iPad IPA from TOTK base 1.0.0 (XCI/NSP), optionally with the separate 1.1.2, 1.2.1 or 1.4.3 update; or a Mac app from a Breath of the Wild 1.6.0 card image (base + update + add-on content).',
+    ap = argparse.ArgumentParser(description='Build a native Mac app or unsigned iPhone/iPad IPA from TOTK base 1.0.0 (XCI/NSP), optionally with the separate 1.1.2, 1.2.1 or 1.4.3 update; or a Mac app from Breath of the Wild base + separate 1.6.0 update, or a combined card image.',
                                  epilog='example: python3 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys')
     ap.add_argument('game', type=Path, help='the game file (.xci or .nsp), base game 1.0.0')
     ap.add_argument('--update', type=Path, help='separate supported cumulative update NSP/NSZ; outputs the same single app')
@@ -1148,8 +1157,6 @@ def main(argv):
             shutil.rmtree(work)
         if args.platform == 'ios':
             raise BuildError('Breath of the Wild has no iPhone / iPad build yet: build the Mac app (leave out --platform ios)')
-        if update:
-            raise BuildError('Breath of the Wild: the card image already holds its update and add-on content, so leave out --update')
         if not args.work:
             work = game.parent / 'BotW_build'
             logs = work / 'logs'
@@ -1163,8 +1170,10 @@ def main(argv):
             say('--shader-cache is no longer needed: the startup shaders come from the game data and the shared shader list (games/botw/assets/shader_list.tsv)')
         botw = work / 'botw'
         say(f'Breath of the Wild {BOTW160["display_version"]} (by the title IDs in the game file); work folder {work}')
-        step_code_botw(tree, botw, game, keys, env, logs)
-        step_data_botw(tree, botw, game, keys, logs, shared_fonts=shared_fonts)
+        if update:
+            update = prepare_update_container(tree, update, keys, logs)
+        step_code_botw(tree, botw, update or game, keys, env, logs)
+        step_data_botw(tree, botw, game, keys, logs, shared_fonts=shared_fonts, update=update)
         step_shaders_botw(tree, botw, logs)
         step_shader_libs(tree, logs, version='botw160')
         step_binary(tree, game, keys, {**env, 'SHADER_LIST': str(BOTW_LIST)}, logs, version='botw160', title='01007ef00011e000')
@@ -1178,7 +1187,7 @@ def main(argv):
         say(f'   checked in {time.time() - t1:.0f} s')
         step_warm_metal(tree, out, logs)
         say(f'done in {(time.time() - t0) / 60:.0f} min: {out}')
-        say('Open it from Finder. The first start verifies the game data (15 GB + 1.4 GB of add-on content) and keeps a record; '
+        say('Open it from Finder. The first start verifies the game data and any installed add-on content and keeps a record; '
             'saves, the shader cache and the log go to ~/Library/Application Support/MacNativeGames/BotW and ~/Library/Logs/MacNativeGames/botw.log.')
         return
     work_volume=existing_volume_path(work.parent if work.parent.exists() else game.parent)
