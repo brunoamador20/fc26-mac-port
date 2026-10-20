@@ -773,14 +773,36 @@ def step_binary(tree, game, keys, env, logs, *, version="v0", title='0100f2c0115
             say(f'   no app icon, the app gets the default one ({str(e).splitlines()[0]})')
 
 
+_libc = None
+
+
+def clonefile(src, dst):
+    """macOS clonefile(2): an APFS clone of a file or a whole folder (no extra space) in one call, without starting a
+    program for it (an app holds about 50,000 shader files per version: one cp each took minutes, 2026-10-19). False
+    when it cannot: another volume or file system, or dst exists."""
+    global _libc
+    if _libc is None:
+        import ctypes
+        _libc = ctypes.CDLL(None, use_errno=True)
+        _libc.clonefile.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32]
+    return _libc.clonefile(os.fsencode(src), os.fsencode(dst), 0) == 0
+
+
 def clone(src, dst):
-    """APFS clone when on the same volume (no extra space), else a copy."""
+    """APFS clone when on the same volume (no extra space), else a copy; an existing dst is replaced."""
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if subprocess.run(['cp', '-c', src, dst], capture_output=True).returncode:
+    if dst.exists() or dst.is_symlink():
+        dst.unlink()
+    if not clonefile(src, dst):
         shutil.copy2(src, dst)
 
 
 def copy_tree(src, dst):
+    """The files of src in dst: one clone of the whole folder when dst does not exist yet, else file by file."""
+    if not dst.exists():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if clonefile(src, dst):
+            return
     for p in sorted(src.rglob('*')):
         if p.is_file():
             clone(p, dst / p.relative_to(src))
@@ -825,8 +847,8 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
         except (ValueError, KeyError, OSError, TypeError) as error:
             raise BuildError(f'invalid prepared startup shader seed: {error}') from None
         copy_tree(seed, res/'build/shader-seed')
-        for src in sorted(seed.glob('*.metal')):
-            lib = tree/f'build/shader-libs/{sha256(src)}.metallib'
+        for src in sorted(seed.glob('*.metal')):   # each named in the manifest, its hash just checked
+            lib = tree/f'build/shader-libs/{report["files"][src.name]}.metallib'
             if lib.is_file():
                 clone(lib, res/'build/shader-libs'/lib.name)
     clone(tree / 'build/app-launcher', tmp / f'Contents/MacOS/{executable}')
