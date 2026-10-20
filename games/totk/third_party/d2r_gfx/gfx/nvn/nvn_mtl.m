@@ -9715,7 +9715,7 @@ frz_plain:;
     if (!g_uw_ui && uw_on_canvas() && pr && pr->sh[0] && mfx_ui_vs(pr->sh[0]->key)) g_uw_ui = 1;   // key 4: the UI begins
     id<MTLRenderCommandEncoder> en = rp_begin_ex(mode);
     g_fd_dw = NULL; g_fd_di = NULL;
-    if (!en) { g_draw_skip[8]++; return; }
+    if (!en) { g_draw_skip[8]++; PD("S %llu no-encoder has_rt=%d n=%d", g_stat_pass, R.has_rt, R.rt.n); return; }
     if (g_pass.mfx || g_mfx.role) {   // TOTK_MFX: every draw into the canvas after the scene copy goes to the UI layer too
         int r = 0;
         if (g_pass.mfx) {
@@ -9808,7 +9808,9 @@ frz_plain:;
         if (ux != 1) { sx0 = lround(cx + (sx0 - cx) / ux); sx1 = lround(cx + (sx1 - cx) / ux); }
         long x0 = sx0 < 0 ? 0 : sx0, y0 = R.sc.y <= 0 ? 0 : R.sc.y + so, x1 = sx1, y1 = vs != 1 ? (long)th : (long)R.sc.y + R.sc.h + so;
         if (x1 > (long)tw) x1 = tw; if (y1 > (long)th) y1 = th;
-        if (x1 <= x0 || y1 <= y0) { g_draw_skip[10]++; return; }
+        if (x1 <= x0 || y1 <= y0) { g_draw_skip[10]++;
+            PD("S %llu scissor-empty sc=%d,%d,%d,%d tgt=%lux%lu ux=%g vs=%g so=%ld", g_stat_pass, R.sc.x, R.sc.y, R.sc.w, R.sc.h, (unsigned long)tw, (unsigned long)th, (double)ux, (double)vs, (long)so);
+            return; }
         sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
     }
     enc_r_scissor(en, sc);
@@ -12150,9 +12152,20 @@ static void *link_main(void *arg) {   // 显示节拍线程：切到节拍模式
     g_link_started = 0;
     return NULL;
 }
+/* DM_PRESENT_LINK_FALLBACK=1 (Bayonetta 3's launcher; default off, TOTK unchanged): when the display link goes silent while
+   the app is active (macOS pauses CAMetalDisplayLink for a window it believes covered, e.g. full screen on another
+   monitor while another app has focus), present in classic mode instead of dropping frames, so the picture keeps moving;
+   the link is tried again once the window has been reported visible for 10 s. */
+static _Atomic int g_link_fallback; static _Atomic uint64_t g_link_fallback_at;
+static int link_fallback_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_PRESENT_LINK_FALLBACK"); on = e && !strcmp(e, "1"); } return on; }
 static void link_sync(void) {   // 游戏出图线程每帧调：把节拍对象的状态对齐到 g_dm_present_link 与省电模式（运行中可改） | Called every frame by the game's present thread: aligns the display link object's state to g_dm_present_link and the power-saving mode (can change at run time)
     static int applied; int want = g_dm_present_link;
     if (want < 0 || want > 2) { g_dm_present_link = applied == 3 ? 1 : applied; return; }
+    if (want && atomic_load(&g_link_fallback)) {
+        int visible = runtime_front_window_visible() != 0;   // unknown (-1) counts as visible
+        if (visible && now_ns() - atomic_load(&g_link_fallback_at) > 10000000000ull) { atomic_store(&g_link_fallback, 0); MLOG("[present] display link tried again (window visible)"); }
+        else want = 0;
+    }
     if (want && mtl_fps_target() == 30) want = 3;   // 省电模式：显示节拍 30 Hz | Power-saving mode: display link at 30 Hz
     if (want == applied) return;
     g_link_mode = want;
@@ -12345,6 +12358,9 @@ void mtl_present_wait(uint64_t tk) {
         if (!g_stall_t0) { g_stall_t0 = last ? last : now; g_stall_drop = 0; g_stall_red = 0; g_stall_logged = 0; g_stall_n++; }
         g_stall_drop += n;
         int active = dm_focus_now() == 1; uint64_t since = dm_focus_in_since(), from = g_stall_t0 > since ? g_stall_t0 : since;
+        if (active && link_fallback_on() && !atomic_load(&g_link_fallback)) {
+            atomic_store(&g_link_fallback, 1); atomic_store(&g_link_fallback_at, now);
+            MLOG("[present] display link silent while active: presenting in classic mode (DM_PRESENT_LINK_FALLBACK)"); }
         if (active && !g_stall_logged && now - from >= STALL_NS) { g_stall_logged = 1;
             MLOG("显示节拍 %.0f ms 没回调（激活中，%s）：丢掉排队未上屏的 %llu 帧，游戏继续（第 %llu 段；节拍回来自动照常）", (now - from) / 1e6, window_seen(), (unsigned long long)n, (unsigned long long)g_stall_n); }
         if (active && !g_stall_red && now - from >= STALL_RED_NS) { g_stall_red = 1; MLOG("【红】显示节拍激活中连续 %.1f 秒没回调，出图全靠兜底丢帧，画面不动（%s）", (now - from) / 1e9, window_seen()); }
