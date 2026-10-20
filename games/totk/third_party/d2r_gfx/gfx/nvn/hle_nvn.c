@@ -2626,7 +2626,11 @@ void set_time_constraint_comp_x(uint64_t period_ns, uint64_t comp_ns) {
     LOG("[nvn] 翻译线程时间约束策略（周期 %.3f ms、计算 %.3f ms）%s", period_ns / 1e6, comp_ns / 1e6, kr == KERN_SUCCESS ? "已设" : "设置失败");
 }
 static int rt_comp_fixed_ms(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_RT_COMP"); v = e && *e && strcmp(e, "auto") ? atoi(e) : -1; } return v; }   // −1 = auto
-static void set_time_constraint(uint64_t period_ns) { int f = rt_comp_fixed_ms(); set_time_constraint_comp(period_ns, f > 0 ? (uint64_t)f * 1000000ull : 2000000ull); }   // 首次：固定值，或 auto 的起始值 2 ms | first time: the fixed value, or auto's starting value of 2 ms
+/* The fixed value; in auto mode the computation declared so far, and auto's starting value of 2 ms only the first time.
+   TOTK (from nxnative 04ea8f8): resetting to 2 ms at each period change (the game's present interval 1 <-> 2, key 2's
+   modes) under-declared the thread until the next p90 window (120 frames); nxnative measured an iPhone then moving the
+   game to the efficiency cores (3.4 -> 1.5 GHz, 60 -> 23-30 fps), from which it did not come back. */
+static void set_time_constraint(uint64_t period_ns) { int f = rt_comp_fixed_ms(); set_time_constraint_comp(period_ns, f > 0 ? (uint64_t)f * 1000000ull : g_rt_comp_ms > 0 ? (uint64_t)(g_rt_comp_ms * 1e6) : 2000000ull); }
 // 每帧在取图处调：记本线程自上次以来的 CPU 时间；auto 模式下按 p90 重新声明
 // Called every frame at acquire: records this thread's CPU time since the last call; in auto mode re-declares based on p90
 static void rt_comp_tick(uint64_t period_ns) {
