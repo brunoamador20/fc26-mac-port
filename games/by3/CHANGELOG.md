@@ -367,3 +367,17 @@ Two real defects found; neither alone is shown to fix the picture yet:
 - `gpucapture <path>.gputrace` (input file; the game must start with `MTL_CAPTURE_ENABLED=1`): a Metal capture of one
   whole frame for Xcode's Metal debugger. Pixel History on a hole shows which draws reached it and which test
   rejected them. First capture: 3.7 GB, deck fight, camera turning.
+
+### 2026-10-19: the holes are depth-test failures, inside one frame (state when paused)
+
+Same scripted deck run (`DM_EXP_CLEAR_SER=41`, then holding W and turning the camera with the arrow keys):
+- `DM_EXP_NODEPTH_SER=41` (new, measurement only: no depth test / write for the draws into ser 41, every other pass
+  unchanged): **no magenta left**. Every pixel has a colour-pass draw; they fail `LEQUAL` against the pre-pass depth.
+  The pre-pass and the colour pass place the same surfaces at different depths, but only while the camera moves.
+- Still holes with each of these: `TOTK_UB_RENAME=0` (inline uniform updates as GPU copies),
+  `DM_EXP_SUBMIT_WAIT=1` (new: each submit returns only when the GPU finished it, so no CPU-ahead race), and
+  `TOTK_UBO_SNAPSHOT=0` together with the submit wait. Earlier: exact fences, invariant positions.
+- So the two passes see different data within one submission. Next step: dump the uniform / storage bytes that the
+  pre-pass and the colour-pass vertex shaders read for one object, and compare the matrices (the previous-frame camera
+  for motion vectors is the first suspect: a binding or offset mixed up between the two programs).
+- The cached MSL of `cd871b70` (stencil gathered as `texture2d<uint>`) is still the hand-edited one on this machine.

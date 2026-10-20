@@ -2089,6 +2089,10 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
         return;
     }
     submit_exec(n, (const uint64_t *)h, NULL);
+    /* Measurement only, DM_EXP_SUBMIT_WAIT=1: the submit returns once the GPU has finished it, so the game cannot write
+       memory this submission still reads (slow; tells a CPU-ahead race from a translation fault). */
+    { static int sw = -1; if (sw < 0) { const char *e = getenv("DM_EXP_SUBMIT_WAIT"); sw = e && atoi(e) > 0; if (sw) LOG("【实验】DM_EXP_SUBMIT_WAIT=1：每次提交等 GPU 做完"); }
+      if (sw) mtl_wait(mtl_last_fence(), 2000000000ull); }
     totk_tl(TL_SUB_OUT, 0, 0);
 }
 static void submit_exec(int n, const uint64_t *h, void *ucap) {

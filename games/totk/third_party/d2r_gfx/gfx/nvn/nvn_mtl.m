@@ -9809,6 +9809,12 @@ frz_plain:;
     /* TOTK diagnostic TOTK_GPU_NODEPTH_FROM=<frame>: from that frame on, no depth test / write for any draw. */
     { static long nodepth_from = -2; static id<MTLDepthStencilState> nodss; if (nodepth_from == -2) { const char *e = getenv("TOTK_GPU_NODEPTH_FROM"); nodepth_from = e ? atol(e) : -1; }
       if (nodepth_from >= 0 && (long)atomic_load(&g_cur_frame) >= nodepth_from) { if (!nodss) { MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new]; dd.depthCompareFunction = MTLCompareFunctionAlways; dd.depthWriteEnabled = NO; nodss = [g_dev newDepthStencilStateWithDescriptor:dd]; } cur_ds = nodss; } }
+    /* Measurement only, DM_EXP_NODEPTH_SER=<serial>: no depth test / write for the draws into that colour target (apart from
+       them, every pass keeps its tests: tells the colour pass failing the depth test from draws that never come). */
+    { static long nd_ser = -2; static id<MTLDepthStencilState> nd_dss; if (nd_ser == -2) { const char *e = getenv("DM_EXP_NODEPTH_SER"); nd_ser = e ? strtol(e, NULL, 0) : -1; }
+      if (nd_ser >= 0 && R.rt.n > 0 && R.rt.color[0] && (long)R.rt.color[0]->serial == nd_ser) {
+          if (!nd_dss) { MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new]; dd.depthCompareFunction = MTLCompareFunctionAlways; dd.depthWriteEnabled = NO; nd_dss = [g_dev newDepthStencilStateWithDescriptor:dd]; }
+          cur_ds = nd_dss; cur_ds_pass = 0; } }
     if (cur_ds != g_enc_dss) { enc_r_dss(en, cur_ds); g_enc_dss = cur_ds; }
     if (g_rt_ovr && g_pass.hs) enc_r_stencil_ref(en, g_rt_ovr == 3 ? 0x40 : 0, 0); else enc_r_stencil_ref(en, S.st_ref[0], S.st_ref[1]);
     // 视口 / 剪裁（夹到目标尺寸内）
