@@ -51,6 +51,7 @@ usage: mod_exefs.py apply --exefs <extracted/<version>/exefs> --mod <mod folder>
 import argparse
 import hashlib
 import json
+import re
 import struct
 import sys
 from pathlib import Path
@@ -66,6 +67,7 @@ MAX_SEGMENT = 256 * 1024 * 1024
 PATCH_SUFFIXES = ('.ips', '.ips32', '.pchtxt')
 IPS_HEADER = 0x100      # an IPS patch's offsets count the NSO header (the runtime's own note in game_patches.c)
 MODULES = ('main', 'sdk', 'subsdk0', 'subsdk1', 'subsdk2', 'rtld')     # the module names a patch file can carry
+MODULE_STEM = re.compile(r'subsdk\d*')     # ... and subsdk3..subsdk9, which mods ship as their hooking module
 
 
 class ModError(Exception):
@@ -343,7 +345,7 @@ def patch_files(exefs, build_id):
         if suffix in PATCH_SUFFIXES:
             if stem in main_names:
                 patches.append(path)
-            elif stem in MODULES:
+            elif stem in MODULES or MODULE_STEM.fullmatch(stem):
                 notes.append(f'{name}: not merged (a patch for {stem}, and the app loads only the modules it was built '
                              f'from - main, sdk and subsdk0 - so the code it changes never runs; the mod\'s main patch '
                              f'and its RomFS still apply)')
@@ -387,8 +389,21 @@ def apply(args):
         notes.append('romfs/: not merged (data mods are loaded while the game runs, from '
                      '~/Library/Application Support/MacNativeGames/TOTK/mods/<version>; see docs/mods.md)')
     if not patches:
-        raise ModError(f'{mod}/exefs: no code patch for main ({", ".join(PATCH_SUFFIXES)}); nothing to merge'
-                       + ''.join(f'\n  {note}' for note in notes))
+        # A patch for another build of main, or for sdk / subsdk9, was already refused or noted by patch_files(): an exefs/
+        # with nothing to merge into main is not a build failure - the mod's romfs/ half still goes in - so this says so
+        # and writes a report the build reads as "nothing merged".
+        report = dict(format=1, status='skipped', folder=str(mod), version=args.version, build_id=nso.build_id[:32],
+                      retail_main_sha256=retail_sha, patches=[], edit_bytes=0,
+                      notes=[f'{mod}/exefs: no code patch for main ({", ".join(PATCH_SUFFIXES)}), so nothing is merged '
+                             f'into it'] + notes)
+        report_path = (args.report.expanduser().resolve() if args.report else
+                       args.output.expanduser().resolve().with_name('mod-exefs.json'))
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2) + '\n')
+        for note in report['notes']:
+            print(f'mod: {note}')
+        print(f'mod: nothing merged into main; {args.version} is built from the retail module')
+        return report
 
     reserved = patch_sites.sites(args.version, nso.build_id)
     image, applied, taken = nso.image(), [], {}

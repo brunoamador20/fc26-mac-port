@@ -261,14 +261,17 @@ class Case(unittest.TestCase):
         self.retail()
         self.patch(ips([(0x100 + 0x40, b'\x11\x22')], magic=b'IPS32', offset_size=4, end=b'EEOF'),
                    name='11' * 16 + '.ips')
-        with self.assertRaisesRegex(mod_exefs.ModError, 'another version of main'):
-            self.apply()
+        report = self.apply()                       # a note, not a failure: the mod's romfs/ still goes in
+        self.assertEqual(report['status'], 'skipped')
+        self.assertIn('another version of main', ' '.join(report['notes']))
+        self.assertFalse(self.output.exists())
 
     def test_an_ips_without_a_module_name_is_not_merged(self):
         self.retail()
         self.patch(ips([(0x100 + 0x40, b'\x11\x22')], magic=b'IPS32', offset_size=4, end=b'EEOF'), name='patch.ips')
-        with self.assertRaisesRegex(mod_exefs.ModError, 'rename this one'):
-            self.apply()
+        report = self.apply()
+        self.assertEqual(report['status'], 'skipped')
+        self.assertIn('rename this one', ' '.join(report['notes']))
 
     def test_a_pchtxt_is_read_whatever_its_name(self):
         self.retail()
@@ -352,9 +355,32 @@ class Case(unittest.TestCase):
             mod_exefs.apply(argparse.Namespace(exefs=self.exefs, mod=empty, version='v121',
                                               output=self.output, report=self.report))
 
-    def test_an_exefs_without_patches_is_refused(self):
+    def test_an_exefs_without_a_main_patch_merges_nothing(self):
+        # A mod whose exefs/ holds only a module the app does not load (or a main.npdm) is not a build failure: its
+        # romfs/ half still goes in, and the report says nothing was merged.
         self.retail()
-        with self.assertRaisesRegex(mod_exefs.ModError, 'no code patch for main'):
+        report = self.apply()
+        self.assertEqual(report['status'], 'skipped')
+        self.assertFalse(self.output.exists())          # no merged module: the app is built from the retail main
+        self.assertIn('no code patch for main', ' '.join(report['notes']))
+        self.assertEqual(json.loads(self.report.read_text())['status'], 'skipped')
+
+    def test_an_exefs_with_only_unloaded_files_is_skipped_with_a_note_for_each(self):
+        self.retail()
+        self.patch(ips([(0x40, b'\xaa')]), name='subsdk9.ips')
+        (self.mod/'exefs'/'main.npdm').write_bytes(b'nx-deadbeef')
+        report = self.apply()
+        self.assertEqual(report['status'], 'skipped')
+        notes = ' '.join(report['notes'])
+        self.assertIn('subsdk9.ips: not merged (a patch for subsdk9', notes)
+        self.assertIn('main.npdm: not merged', notes)
+        self.assertIn('no code patch for main', notes)
+
+    def test_a_pchtxt_for_another_build_is_still_refused(self):
+        # the skip above is for "nothing to merge", never for a patch that was made for another main
+        self.retail()
+        self.patch(pchtxt([(0x40, b'\xaa')], build_id='00' * 16))
+        with self.assertRaisesRegex(mod_exefs.ModError, 'another build of main'):
             self.apply()
 
     def test_a_retail_main_with_a_broken_segment_digest_is_refused(self):

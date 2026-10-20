@@ -1,6 +1,9 @@
-"""build_app.py's mod helpers: the build merges a mod's main patches, chains its heap table into the 2K overlay, names a
-mod file the app replaces itself, and at the end copies the mod's RomFS files into the player's mod folder and writes
-its manifest (scripts/make_mod_manifest.py, run for real against a small fake RomFS)."""
+"""The build's mod helpers: it merges a mod's main patches, chains its heap table into the 2K overlay, names a mod file
+the app replaces itself, and - when the player asked for it with --install-mod-romfs - replaces the version's mod folder
+with the mod's RomFS files and writes its manifest (scripts/make_mod_manifest.py, run for real against a small fake
+RomFS)."""
+import hashlib
+import json
 import struct
 import sys
 import tempfile
@@ -9,7 +12,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT/'games/totk/scripts'))
 import build_app             # noqa: E402
+import mod_folder            # noqa: E402
 
 HEAPDEF = build_app.HEAPDEF
 
@@ -85,7 +90,8 @@ def fake_romfs(folder):
 
 
 class ModInstall(unittest.TestCase):
-    """The end of a build with --mod: the mod's RomFS files land in <mods>/<version> and its manifest is written."""
+    """--install-mod-romfs (scripts/mod_folder.py): the player's folder for the version is replaced whole by the mod's
+    RomFS files, and its manifest is written against the app the build just made."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -98,12 +104,11 @@ class ModInstall(unittest.TestCase):
         self.mod = self.root/'Mod'
         (self.mod/'exefs').mkdir(parents=True)                 # --mod's usual layout
         self.said = []
-        self.saved = (build_app.mods_folder, build_app.say)
-        build_app.mods_folder = lambda version: self.mods/version     # never touch the real player folder
-        build_app.say = self.said.append
+        self.saved = mod_folder.mods_folder
+        mod_folder.mods_folder = lambda version: self.mods/version     # never touch the real player folder
 
     def tearDown(self):
-        build_app.mods_folder, build_app.say = self.saved
+        mod_folder.mods_folder = self.saved
         self.tmp.cleanup()
 
     def add(self, relative, data=b'x'):
@@ -113,54 +118,72 @@ class ModInstall(unittest.TestCase):
         return file
 
     def install(self):
-        return build_app.install_mod_romfs(self.mod, ROOT/'games/totk', 'v143', self.app, sys.executable, self.logs)
+        return mod_folder.install(self.mod, 'v143', self.app, sys.executable, ROOT/'games/totk',
+                                     say=self.said.append)
 
     def manifest(self, folder):
         lines = (folder/'manifest.tsv').read_text().splitlines()
         return {line.split('\t')[0]: line.split('\t') for line in lines if not line.startswith('#')}
 
-    def test_the_mods_romfs_files_are_copied_and_its_manifest_written(self):
+    def test_the_mods_romfs_files_replace_the_folder_and_its_manifest_is_written(self):
         self.add('Pack/A.pack.zs', b'replaced a')
         self.add('New/C.dat', b'added c')
-        dest = self.install()
-        self.assertEqual(dest, self.mods/'v143')
-        self.assertEqual((dest/'Pack/A.pack.zs').read_bytes(), b'replaced a')
-        self.assertEqual((dest/'New/C.dat').read_bytes(), b'added c')
-        entries = self.manifest(dest)
+        installed = self.install()
+        self.assertEqual(installed.folder, self.mods/'v143')
+        self.assertEqual((installed.folder/'Pack/A.pack.zs').read_bytes(), b'replaced a')
+        self.assertEqual((installed.folder/'New/C.dat').read_bytes(), b'added c')
+        entries = self.manifest(installed.folder)
         self.assertEqual(sorted(entries), ['New/C.dat', 'Pack/A.pack.zs'])
         self.assertEqual(entries['New/C.dat'][3], '-')                 # a file the RomFS lacks
         self.assertNotEqual(entries['Pack/A.pack.zs'][3], '-')         # the original's hash is bound
-        self.assertTrue(any('files (1 replaced, 1 added)' in line for line in self.said), self.said)
+        self.assertIn('2 files (1 replaced, 1 added)', installed.manifest[-1])
 
-    def test_a_second_build_copies_only_what_changed(self):
-        self.add('Pack/A.pack.zs', b'replaced a')
-        self.install()
-        self.said.clear()
-        self.install()
-        self.assertTrue(any('0 copied, 1 already there' in line for line in self.said), self.said)
-
-    def test_what_the_mod_dropped_is_removed_and_hand_made_files_stay(self):
+    def test_what_the_folder_held_is_gone_since_the_flag_agreed_to_it(self):
         dest = self.mods/'v143'
         (dest/'Old').mkdir(parents=True)
         (dest/'Old/Gone.zs').write_bytes(b'old')
-        (dest/'notes.txt').write_bytes(b'mine')                        # not in the manifest: the player's own file
+        (dest/'notes.txt').write_bytes(b'mine')                        # the player's own file: gone with the rest
         (dest/'manifest.tsv').write_text('# path\tsize\tsha256\toriginal_sha256\nOld/Gone.zs\t3\t00\t01\n')
         self.add('Pack/A.pack.zs', b'replaced a')
-        self.install()
-        self.assertFalse((dest/'Old/Gone.zs').exists())
-        self.assertFalse((dest/'Old').exists())                        # the empty folder goes too
-        self.assertTrue((dest/'notes.txt').exists())
-        self.assertTrue(any('1 no longer in the mod removed' in line for line in self.said), self.said)
+        installed = self.install()
+        self.assertFalse((dest/'Old').exists())
+        self.assertFalse((dest/'notes.txt').exists())
+        self.assertEqual(installed.removed, 3)                         # Old/, Old/Gone.zs, notes.txt, manifest.tsv minus one
+        self.assertEqual(sorted(p.name for p in dest.iterdir()), ['Pack', 'manifest.tsv'])
 
-    def test_a_manifest_path_outside_the_mod_folder_is_not_followed(self):
+    def test_a_misspelt_path_stops_before_the_folder_is_touched(self):
+        dest = self.mods/'v143'
+        dest.mkdir(parents=True)
+        (dest/'notes.txt').write_bytes(b'mine')
+        self.add('pack/a.pack.zs', b'replaced a')                      # the RomFS has Pack/A.pack.zs
+        with self.assertRaises(mod_folder.InstallError) as raised:
+            self.install()
+        self.assertIn('not a file of this RomFS: pack/a.pack.zs', raised.exception.output)
+        self.assertTrue((dest/'notes.txt').exists())                   # checked before anything was deleted
+        self.assertFalse((dest/'Pack').exists())
+
+    def test_a_symlinked_folder_is_refused_not_followed(self):
+        real = self.root/'elsewhere'
+        real.mkdir()
+        (real/'keep.txt').write_bytes(b'x')
+        self.mods.mkdir(parents=True)
+        (self.mods/'v143').symlink_to(real, target_is_directory=True)
+        self.add('Pack/A.pack.zs', b'replaced a')
+        with self.assertRaises(mod_folder.InstallError) as raised:
+            self.install()
+        self.assertIn('is a symlink', str(raised.exception))
+        self.assertTrue((real/'keep.txt').exists())
+
+    def test_a_symlink_inside_the_folder_is_removed_not_its_target(self):
         dest = self.mods/'v143'
         dest.mkdir(parents=True)
         outside = self.root/'outside.txt'
         outside.write_bytes(b'x')
-        (dest/'manifest.tsv').write_text('# path\nsize\tsha256\toriginal_sha256\n../outside.txt\t1\t00\t01\n')
+        (dest/'link.txt').symlink_to(outside)
         self.add('Pack/A.pack.zs', b'replaced a')
         self.install()
         self.assertTrue(outside.exists())
+        self.assertFalse((dest/'link.txt').exists())
 
     def test_a_mod_file_the_app_replaces_is_copied_but_left_out_of_the_manifest(self):
         overlays = self.app/'Contents/Resources/totk/extracted/v143/romfs-patches'
@@ -168,21 +191,70 @@ class ModInstall(unittest.TestCase):
         (overlays/'manifest.tsv').write_text('# path\tsize\tsha256\toriginal_sha256\nUI/C.bfres\t1\t00\t01\n')
         self.add('UI/C.bfres', b'the mod version')
         self.add('Pack/A.pack.zs', b'replaced a')
-        dest = self.install()
-        self.assertTrue((dest/'UI/C.bfres').is_file())                 # copied with the rest
-        self.assertNotIn('UI/C.bfres', self.manifest(dest))             # but the app's own version is the one loaded
-        self.assertTrue(any('left out (the app replaces it too' in line for line in self.said), self.said)
+        installed = self.install()
+        self.assertTrue((installed.folder/'UI/C.bfres').is_file())      # copied with the rest
+        self.assertNotIn('UI/C.bfres', self.manifest(installed.folder))  # the app's own version is the one loaded
+        self.assertTrue(any('left out (the app replaces it too' in line for line in installed.manifest),
+                        installed.manifest)
 
-    def test_a_mod_without_romfs_leaves_the_mod_folder_alone(self):
+    def test_a_mod_without_romfs_or_with_an_empty_one_leaves_the_folder_alone(self):
         self.assertIsNone(self.install())
         self.assertFalse((self.mods/'v143').exists())
         self.assertIn('has no romfs/', self.said[0])
+        (self.mod/'romfs').mkdir()
+        self.assertIsNone(self.install())
+        self.assertIn('holds no files', self.said[1])
+        self.assertFalse((self.mods/'v143').exists())
 
-    def test_a_misspelt_path_stops_with_the_app_itself_built(self):
-        self.add('pack/a.pack.zs', b'replaced a')                      # the RomFS has Pack/A.pack.zs
-        with self.assertRaises(build_app.BuildError) as raised:
-            self.install()
-        self.assertIn('would stop the game', str(raised.exception))
+
+class TheOutputOverlayRecord(unittest.TestCase):
+    """The 2K output overlay says what it was built from, so a --mod build's heap sizes do not stay in a later build that
+    passes no --mod (scripts/make_output_res_overlay.py writes overlay.json, build_app.py reads it)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.tree = ROOT/'games/totk'
+        self.overlay = self.root/'extracted/v0/romfs-patches-out/2560x1440'
+        self.heapdef = self.root/'HeapDef.byml.zs'
+        self.heapdef.write_bytes(b'a mod heap table')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def build(self, **record):
+        self.overlay.mkdir(parents=True, exist_ok=True)
+        (self.overlay/'manifest.tsv').write_text(f'# path\tsize\tsha256\toriginal_sha256\n{HEAPDEF}\t1\t00\t01\n')
+        if record:
+            (self.overlay/'overlay.json').write_text(json.dumps(record))
+        return build_app.overlay_stale(self.overlay, None, self.tree)
+
+    def script(self):
+        return hashlib.sha256((self.tree/'scripts/make_output_res_overlay.py').read_bytes()).hexdigest()
+
+    def test_no_overlay_yet_is_built(self):
+        self.assertEqual(build_app.overlay_stale(self.overlay, None, self.tree), 'missing')
+
+    def test_an_overlay_without_a_record_is_built_again(self):
+        self.assertEqual(self.build(), 'no record of what it was built from')     # a build from before the record
+
+    def test_the_plain_overlay_is_current(self):
+        self.assertEqual(self.build(script_sha256=self.script(), heapdef_sha256=None), '')
+
+    def test_a_mod_builds_heap_table_does_not_stay_in_a_later_plain_build(self):
+        modded = hashlib.sha256(self.heapdef.read_bytes()).hexdigest()
+        self.assertEqual(self.build(script_sha256=self.script(), heapdef_sha256=modded), 'built from another heap table')
+
+    def test_the_same_mod_overlay_is_reused(self):
+        self.overlay.mkdir(parents=True)
+        (self.overlay/'manifest.tsv').write_text('# path\n')
+        (self.overlay/'overlay.json').write_text(json.dumps(dict(
+            script_sha256=self.script(), heapdef_sha256=hashlib.sha256(self.heapdef.read_bytes()).hexdigest())))
+        self.assertEqual(build_app.overlay_stale(self.overlay, self.heapdef, self.tree), '')
+
+    def test_another_script_version_builds_again(self):
+        self.assertEqual(self.build(script_sha256='0'*64, heapdef_sha256=None),
+                         'built by another version of scripts/make_output_res_overlay.py')
 
 
 if __name__ == '__main__':

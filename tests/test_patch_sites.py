@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT/'games/totk/scripts'))
 import patch_sites            # noqa: E402
 
 BUILD_ID_V0 = 'db0507f36b84200ac05f75d76ed5026f'      # the build ID patch_nso.py's tables are keyed on
+SIGNED_BUILD_ID = '277178b7dba1b6d4949a84778d4abc58'  # the one SIGNED_TABLES is keyed on
 OTHER = '00' * 16
 
 
@@ -48,6 +49,13 @@ class Extraction(unittest.TestCase):
             self.assertEqual(offsets(version, BUILD_ID_V0), offsets(version, BUILD_ID_V0 + '00000000'))
         self.assertIn(0x8524c4, offsets('v0', BUILD_ID_V0 + '00000000'))      # CUTS: the video-memory budget word
         self.assertIn(0x1d53e80, offsets('v0', BUILD_ID_V0 + '00000000'))     # CUTS: a 17-byte cut
+
+    def test_the_signed_jump_tables_are_reserved(self):
+        # patch_nso.py 1.6.0/1.0.0 signed-table dispatch: a mod patch on the dispatch instruction or on the table it
+        # reads moves a jump the rewriter relies on, and the rewriter's own assert would fire mid-rewrite.
+        found = {(site.offset, site.size) for site in patch_sites.sites('v0', SIGNED_BUILD_ID)}
+        self.assertIn((0x393bb0, 4), found)             # the dispatch instruction (its bytes are asserted)
+        self.assertIn((0x2d8626c, 24), found)           # the six signed offsets it jumps through
 
     def test_another_versions_block_is_not_reserved(self):
         # game_patches.c's ultrawide list is in the 1.2.1 branch only: a 1.0.0 / 1.1.2 mod patch there is unrelated

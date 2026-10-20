@@ -14,7 +14,8 @@ Where the list comes from (no offset is written down twice in this repository):
   games/totk/runtime/game_patches.c     the literal tables of the versions 1.0.0 / 1.1.2 / 1.2.1
                                         (cloth/hair clock, ultrawide stub sites), per #if block
   games/totk/runtime/game_patches_v143.c the literal Patch tables of 1.4.3
-  third_party/d2r/patch_nso.py          CUTS, OBS and PARAMS for the build ID being rewritten
+  third_party/d2r/patch_nso.py          CUTS, OBS, PARAMS and SIGNED_TABLES (the signed jump tables) for the
+                                        build ID being rewritten
 
 usage: patch_sites.py --version v121 [--build-id <32 or 40 hex digits>] [--json]
 """
@@ -220,6 +221,29 @@ def _section(body, build_id):
     return None
 
 
+SIGNED_ENTRY = re.compile(r'(0x[0-9a-fA-F]+)[ \t]*:[ \t]*\([ \t]*(0x[0-9a-fA-F]+)[ \t]*,[ \t]*(0x[0-9a-fA-F]+)'
+                           r'[ \t]*,[ \t]*\(([0-9,\s]*)\)')
+
+
+def signed_table_sites(build_id):
+    """The signed 32-bit jump tables patch_nso.py knows for a build ID (SIGNED_TABLES): the dispatch instruction whose
+    bytes it checks, and the table of offsets it reads. A mod patch on either moves a jump the rewriter relies on, so both
+    are reserved - the same reason CUTS and PARAMS are."""
+    if not build_id:
+        return []
+    body = _section(_table_body(REWRITER.read_text(), 'SIGNED_TABLES'), build_id)
+    if body is None:
+        return []
+    found = []
+    for match in SIGNED_ENTRY.finditer(body):      # 0xdispatch: (0xadrbase, 0xtable, (offsets...), 'dispatch word')
+        dispatch, _, table, offsets = match.groups()
+        found.append(Site('patch_nso.py SIGNED_TABLES', int(dispatch, 16), 4))
+        count = len([offset for offset in offsets.split(',') if offset.strip()])
+        if count:
+            found.append(Site('patch_nso.py SIGNED_TABLES', int(table, 16), 4*count))
+    return found
+
+
 def rewriter_sites(build_id):
     """The rewriter's registered cuts (CUTS), observation gates (OBS) and parameter sites (PARAMS) for a build ID."""
     if not build_id:
@@ -257,7 +281,7 @@ def sites(version, build_id=None):
         raise ValueError(f'unknown version {version}')
     if build_id:
         build_id = build_id.lower()[:32]
-    every = game_addr_sites(version) + patcher_sites(version) + rewriter_sites(build_id)
+    every = game_addr_sites(version) + patcher_sites(version) + rewriter_sites(build_id) + signed_table_sites(build_id)
     unique = {}
     for site in every:
         if not 0 < site.offset < MAX_IMAGE or not 0 < site.size < 0x1000:
