@@ -36,6 +36,7 @@ Update history:
 |---|---|---|
 | Oct 20 | Mac | Two memory leaks fixed for both games |
 | Oct 20 | Mac | **Breath of the Wild 1.6.0** (early): a card image holding the base game, the update and the add-on content builds its own app with the same command; title, saves, the Great Plateau and the DLC packs work, keys 2 (frame interpolation) and 3 (MetalFX 2K) work |
+| Oct 20 | iPhone, iPad | The launcher adopts the UIScene lifecycle, so an IPA built with Xcode 27 starts on iOS 27 (which ends apps that still make their window in the app delegate) |
 | Oct 19 | Mac | Key 4 switches to a true 21:9 ultrawide view and back (1.2.1, 1.4.3); the HUD keeps its shape in the middle 16:9 |
 | Oct 19 | iPhone, iPad | Tested with 1.4.3: a fresh install shows the game from the first launch, without a played cache |
 | Oct 19 | iPhone, iPad | Touch controls laid out like a Switch controller, with every button and both sticks |
@@ -281,6 +282,7 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 |---|---|---|
 | 10 月 20 日 | Mac | 修了两处两个游戏都有的内存泄漏|
 | 10 月 20 日 | Mac | **旷野之息 1.6.0**（早期）：本体 + 更新 + 追加内容合在一起的卡带镜像用同一条命令打成单独的 App；标题、存档、初始台地和 DLC 内容包都能用，2 键（补帧）和 3 键（MetalFX 2K）都能用 |
+| 10 月 20 日 | iPhone、iPad | 启动器改用 UIScene 生命周期：用 Xcode 27 构建的 IPA 能在 iOS 27 上启动（iOS 27 会结束仍在 app delegate 里创建窗口的 App） |
 | 10 月 19 日 | Mac | 按 4 切换真正的 21:9 超宽画面（1.2.1、1.4.3），HUD 保持原比例、在中间 16:9 区域 |
 | 10 月 19 日 | iPhone、iPad | 用 1.4.3 实测：全新安装、没有玩过的缓存，第一次启动就能看到游戏画面 |
 | 10 月 19 日 | iPhone、iPad | 触屏控件按 Switch 手柄排布，所有按键和两个摇杆都有 |
