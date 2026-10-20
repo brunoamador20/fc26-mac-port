@@ -116,12 +116,17 @@ static OSStatus pull(void *ctx, AudioUnitRenderActionFlags *flags, const AudioTi
     if(!atomic_load_explicit(&m->playing,memory_order_acquire)){
         memset(out,0,(size_t)frames*2*sizeof(float));m->ready=0;atomic_store_explicit(&m->rd,wr,memory_order_release);return noErr;
     }
+    uint64_t prefill=(uint64_t)m->frame*(uint64_t)prefill_blocks();if(prefill<frames)prefill=frames;if(prefill>RING_FRAMES)prefill=RING_FRAMES;
     if(!m->ready){
         /* prefill_blocks() 5-ms blocks (default four, 20 ms) of scheduling headroom for the producer.
            A real underrun still counts and requires a fresh prefill. */
-        uint64_t prefill=(uint64_t)m->frame*(uint64_t)prefill_blocks();if(prefill<frames)prefill=frames;if(prefill>RING_FRAMES)prefill=RING_FRAMES;
         if(have<prefill){memset(out,0,(size_t)frames*2*sizeof(float));return noErr;}
         m->ready=1;
+    }
+    uint64_t max_backlog = prefill + (uint64_t)m->frame * 6u;
+    if (m->unit_ok && have > max_backlog) {
+        rd = wr - prefill;
+        have = prefill;
     }
     UInt32 n = frames < have ? frames : (UInt32)have;
     uint64_t nonzero=0;
