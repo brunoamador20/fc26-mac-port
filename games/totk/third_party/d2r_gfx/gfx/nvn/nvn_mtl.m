@@ -3791,6 +3791,7 @@ void ts_after(void);
 // For the decision see mtl_sub_index / sdx_decide; only what can be proven within the same submission is accepted, and anything still undecided at the end of the submission is always written back.
 typedef struct { uint64_t ser, bytes; uint32_t lv, sl; int idx; uint8_t depth, state, ridx, drawn, why, load, wrote, wwhy; const char *wkey; int wslot; } sd_att;   // depth：0 颜色 1 深度 2 模板（深度模板合一的贴图两部分分开判）   // state 0 未定 1 需要 2 多余；idx：颜色附件序号，深度为 -1 | depth: 0 color 1 depth 2 stencil (the two parts of a combined depth-stencil texture are decided separately)   // state 0 undecided 1 needed 2 redundant; idx: color attachment index, -1 for depth
 static sd_att g_sd[9]; static int g_nsd;
+static unsigned g_sd_plain;   // TOTK: g_sd entries (bit i) written in this encoder by a draw that samples none of its attachments (att_unstored_read)
 static int g_udc_ab = -1, g_udc_ab_on;
 // 本通道没写的附件（只做深度 / 模板测试、颜色写掩码为 0 等）写回改 DontCare：内容本就在内存里，免一次整块写回。
 // 缺省开：Mac 同进程开 / 关截图与空对照同分布；A19 Pro 私有 Depth32F_S8 / RGBA8 DontCare 后读回 0 处不同。
@@ -4381,7 +4382,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
                    (unsigned long)stt.width, (unsigned long)stt.height, pd.stencilAttachment.loadAction == MTLLoadActionClear ? "clear" : "load");
     }
     if (natt && nload == natt) g_pass_full_rw++;
-    g_nsd = 0;
+    g_nsd = 0; g_sd_plain = 0;
     {
         for (int i = 0; i < R.rt.n && i < 8; i++) { MTLRenderPassColorAttachmentDescriptor *c = pd.colorAttachments[i]; if (!c.texture) continue;
             g_sd[g_nsd] = (sd_att){0}; g_sd[g_nsd].ser = R.rt.color[i]->serial; g_sd[g_nsd].bytes = att_bytes(c.texture, c.level); g_sd[g_nsd].lv = (uint32_t)c.level; g_sd[g_nsd].sl = (uint32_t)(c.texture.textureType == MTLTextureType3D ? c.depthPlane : c.slice); g_sd[g_nsd].idx = i; g_sd[g_nsd].load = c.loadAction == MTLLoadActionLoad; g_sd[g_nsd].wrote = R.clear_c[i] != 0; g_nsd++;
@@ -7775,6 +7776,40 @@ static int pass_ds_need(void) {
 // Equivalence conditions (hoist only if all hold, otherwise leave as-is): the scan range has only draws, state and these clears, no copies / dispatches / texture clears / sub-lists; the cleared subresources (texture + level + layer)
 // are disjoint from this render pass's attachments; the cleared textures are neither on any current texture / image slot nor bound within the scan range (conservative: regardless of whether the program samples them); the scissor at the time of the clear covers the whole block (same requirement as executing at the original position)
 static uint64_t h_ser(uint64_t h) { int tid = (int)(h & 0xfffff); return tid ? atomic_load_explicit(&g_tser[tid], memory_order_relaxed) : 0; }
+/* TOTK: a draw that samples an attachment of its own pass. The Switch renders straight to memory, so the sample sees what
+   the pass drew before it; an Apple GPU keeps the pass's pixels in tile memory until the pass ends, and the sample sees
+   what memory held when the pass began. TOTK's ground decals read the G-buffer albedo and normals they blend into: they read
+   the last frame's G-buffer instead, which turns into rings smeared around Link while the camera moves (still, the two
+   frames agree). att_unstored_read is true when such a draw would miss pixels still in tile memory; ending the pass there
+   stores them. A run of sampling draws shares one pass: the game records no barrier between its decals, so they are not
+   ordered against each other on the Switch either, and a split per decal would store and reload the G-buffer 56 times. */
+#define ATT_READS_MAX 8
+static int has_ser(const uint64_t *s, int n, uint64_t v) { for (int i = 0; i < n; i++) if (s[i] == v) return 1; return 0; }
+/* The serials of the textures the draw samples that are attachments: of the current targets or of the open encoder (which
+   can hold more, e.g. a merged pass). By serial, not slot: the encoder's attachment order need not be the targets' order. */
+static int draw_att_reads(NvProg *pr, uint64_t out[ATT_READS_MAX]) {
+    uint64_t cand[18]; int nc = 0, n = 0;
+    if (R.has_rt) { for (int k = 0; k < R.rt.n && k < 8; k++) if (R.rt.color[k]) cand[nc++] = R.rt.color[k]->serial;
+                    if (R.rt.depth) cand[nc++] = R.rt.depth->serial; }
+    if (g_enc) for (int i = 0; i < g_nsd; i++) cand[nc++] = g_sd[i].ser;
+    if (!pr || !nc) return 0;
+    for (int st = 0; st < 5; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh || sh->stage >= 6) continue;
+        for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; uint64_t h;
+            if (b->kind == NVN_RB_IMG) h = b->reg < 32 ? S.img[sh->stage][b->reg] : 0; else if (b->kind == NVN_RB_TEX) h = b->reg < 128 ? S.tex[sh->stage][b->reg] : 0; else continue;
+            uint64_t ser = h ? h_ser(h) : 0;
+            if (ser && has_ser(cand, nc, ser) && !has_ser(out, n, ser) && n < ATT_READS_MAX) out[n++] = ser; } }
+    return n;
+}
+static int att_unstored_read(const uint64_t *rs, int n) {
+    if (!n) return 0;
+    if (!g_enc) {   // no pass open: only a clear still pending lands after the sample
+        for (int k = 0; k < R.rt.n && k < 8; k++) if (R.clear_c[k] && R.rt.color[k] && has_ser(rs, n, R.rt.color[k]->serial)) return 1;
+        return (R.clear_d || R.clear_s) && R.rt.depth && has_ser(rs, n, R.rt.depth->serial);
+    }
+    for (int i = 0; i < g_nsd; i++)   // not loaded: cleared, or covered by its first draw
+        if (has_ser(rs, n, g_sd[i].ser) && (!g_sd[i].load || (g_sd_plain >> i & 1))) return 1;
+    return 0;
+}
 // ---------- 写回前瞻索引：提交开始按回放顺序线性扫一遍，按贴图记事件；通道结束时每个附件二分找「之后第一个有效事件」定论 ----------
 // 取代原「每个通道结束向后整段扫」（通道数 × 命令数，营地每帧 49 通道）。与原扫描逐附件对拍：画面闸门 17 页 + 营地局约 34 万次附件判定（多余约 4.6 万）0 不一致后删去原扫描。
 // 事件（seq = 回放序号）：READ 绘制 / 派发按程序反射读到该贴图；ATT 绘制时它是当前附件；CLEAR 作附件被整块清除；COPY / CLRTEX 作拷贝两端 / 被清贴图。
@@ -9625,6 +9660,12 @@ static void draw_inner(const p_draw *dw, const p_draw_idx *di) {
     if (g_rt_range_active && (!rt_range_pr_ro(pr) || !S.ds.dt || S.ds.dw || S.ds.st)) rp_end();   // 原encoder边界的外部写可见性不删 | The external write visibility at the original encoder boundary is not removed
     if (g_rt_merged && draw_samples_rt(pr)) { static int once; if (!once++) MLOG("同目标续用：续用通道内绘制要采样附件，在此切开（首例 通道 %llu）", g_stat_pass);
         PD("M %llu 续用通道内绘制要采样附件，在此切开", g_stat_pass); rp_end(); }
+    // TOTK: the draw samples an attachment whose pixels are still only in tile memory: store them first (att_unstored_read).
+    // Not in the second half of a fused pass: it reads the first half's pixels from tile memory by construction (fz_p2_draw).
+    uint64_t att_rs[ATT_READS_MAX]; int att_n = draw_att_reads(pr, att_rs);
+    if (!(g_fz.active && g_fz.phase == 2) && att_unstored_read(att_rs, att_n)) {
+        static int once; if (!once++) MLOG("[totk] a draw samples an attachment its pass drew: the pass is stored first (first: pass %llu)", g_stat_pass);
+        PD("M %llu 绘制采样本通道画过的附件，先写回再画", g_stat_pass); rp_flush(); }
     static id<MTLFunction> fz_fn;   // 合并通道后一个通道本次绘制的特化片元函数（nil = 用原版本） | Specialized fragment function for this draw of the later pass in a merged render pass (nil = use the original version)
     if (g_fz.active && g_enc && g_fz.phase == 2 && !fz_p2_draw(pr, dw, di, g_fz.lmap2, &fz_fn)) {   // 证不出：结束合并通道（前一个通道的结果照常写回），按后一个通道的原目标重开 | Cannot be proven: end the merged render pass (the earlier pass's result is stored as usual) and reopen with the later pass's original targets
         static int once3; if (!once3++) MLOG("可读 tile 通道合并：后一个通道的绘制证不出，退回分开（首例 通道 %llu）", g_stat_pass);
@@ -9877,6 +9918,7 @@ frz_plain:;
     rr_snap(dw,di);
 #endif
     udc_note_draw(pr);
+    if (!att_n) for (int i = 0; i < g_nsd; i++) if (g_sd[i].wrote) g_sd_plain |= 1u << i;   // att_unstored_read: draws of a sampling run do not count
     // 0 个图元的绘制（游戏会发 count=0）不画任何像素，跳过编码；Metal 规定计数必须非零，校验层否则当场中止（营地 / 野外 / 战斗页实测）
     // A draw with 0 primitives (the game does send count=0) draws no pixels, so skip encoding; Metal requires the count to be non-zero, otherwise the validation layer aborts on the spot (measured on the camp / wilderness / combat pages)
     if (dw && prim == 7) {   // 四边形：共享索引 0,1,2,0,2,3 | Quads: shared indices 0,1,2,0,2,3
