@@ -19,6 +19,7 @@ void *runtime_override(const char *name);
 void runtime_hle_stack_init(uint64_t tsd_offset);
 void runtime_gpu_path_probe(const char *which);
 void runtime_audio_probe(void);
+void runtime_audio_output_restart(int recreate);   /* audio_mixer.c: start the outputs again after an audio session interruption (iOS) */
 void *runtime_hle_wrap(void *fn);
 void runtime_hle_stack_set(uintptr_t top);
 void *runtime_font_override(const char *name);

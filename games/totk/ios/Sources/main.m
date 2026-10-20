@@ -58,6 +58,33 @@ void runtime_shortcut_help_toggle(void) {}
 }
 @end
 
+/* Game audio after interruptions (from nxnative b301431). A call, Siri or an alarm takes the audio session and the
+   system stops the game's output unit; a media services reset invalidates it. Nothing started it again, so the game
+   stayed silent. When an interruption ends the session is made active again and the output started
+   (runtime_audio_output_restart); a reset rebuilds the output. Becoming active does the same, for an interruption
+   whose "ended" never came. Becoming active also turns the idle timer off again. */
+static BOOL g_audio_interrupted;
+static void audio_resume(int recreate, const char *why) {
+    NSError *err = nil;
+    if (![AVAudioSession.sharedInstance setActive:YES error:&err]) fprintf(stderr,"[totk-audio] audio session not active again (%s): %s\n",why,err.localizedDescription.UTF8String);
+    g_audio_interrupted = NO; runtime_audio_output_restart(recreate);
+}
+static void audio_observe(void) {
+    NSNotificationCenter *nc = NSNotificationCenter.defaultCenter; NSOperationQueue *main = NSOperationQueue.mainQueue;
+    [nc addObserverForName:AVAudioSessionInterruptionNotification object:nil queue:main usingBlock:^(NSNotification *n) {
+        NSUInteger type = [n.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
+        fprintf(stderr,"[totk-audio] audio session interruption %s\n",type == AVAudioSessionInterruptionTypeBegan ? "began" : "ended");
+        if (type == AVAudioSessionInterruptionTypeBegan) g_audio_interrupted = YES; else audio_resume(0,"interruption ended");
+    }];
+    [nc addObserverForName:AVAudioSessionMediaServicesWereResetNotification object:nil queue:main usingBlock:^(NSNotification *n) {
+        (void)n; fprintf(stderr,"[totk-audio] media services were reset\n"); audio_resume(1,"media services reset");
+    }];
+    [nc addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:main usingBlock:^(NSNotification *n) {
+        (void)n; UIApplication.sharedApplication.idleTimerDisabled = YES;
+        if (g_audio_interrupted) audio_resume(0,"became active during an interruption");
+    }];
+}
+
 @interface TOTKApp : UIResponder <UIApplicationDelegate> @end
 @implementation TOTKApp
 - (UISceneConfiguration *)application:(UIApplication *)application configurationForConnectingSceneSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
@@ -69,6 +96,7 @@ void runtime_shortcut_help_toggle(void) {}
     (void)options;
     // Controller input does not reset the idle timer; auto-lock would suspend the game mid-play or mid shader import.
     application.idleTimerDisabled = YES;
+    audio_observe();
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject;
     NSString *res = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"GameData"];
