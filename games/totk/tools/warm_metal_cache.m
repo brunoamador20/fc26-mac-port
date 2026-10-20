@@ -21,6 +21,7 @@
 // build: xcrun clang -fobjc-arc -O2 tools/warm_metal_cache.m -framework Metal -framework Foundation -o build/warm-metal-cache
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import "../third_party/d2r_gfx/gfx/nvn/totk_msl_fixup.h"
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,6 +56,7 @@ static NSArray<NSString *> *shader_sources(NSString *dir) {
 static double compile_one(id<MTLDevice> dev, MTLCompileOptions *opts, NSString *path, NSString **why) {
     NSString *src = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
     if (!src) { if (why) *why = @"cannot read the file"; return -2; }
+    src = totk_msl_fixup(src);   // the same text the game compiles (totk_msl_fixup.h)
     if (skipped_source(src)) return -1;
     for (int attempt = 1;; attempt++) {
         NSError *e = nil; CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();

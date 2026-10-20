@@ -4823,7 +4823,9 @@ static MTLCompileOptions *totk_precise_opts(void) {
    memory pressure in the middle of a compile (iPad, 2026-10-18: "Compilation failed due to an interrupted connection:
    XPC_ERROR_CONNECTION_INTERRUPTED" while the shader warm-up was running); it restarts on the next request, so such a
    failure is retried instead of being taken as a broken shader. */
-static id<MTLLibrary> totk_msl_library(NSString *src, NSError **err) {
+#import "totk_msl_fixup.h"
+static id<MTLLibrary> totk_msl_library(NSString *src_in, NSError **err) {
+    NSString *src = totk_msl_fixup(src_in);   // TOTK: D16 shadow compare rounding, point-sampled depth reads (totk_msl_fixup.h)
     NSError *e = nil;
     for (int attempt = 1;; attempt++) {
         id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:totk_precise_opts() error:&e];
