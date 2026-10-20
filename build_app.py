@@ -786,6 +786,19 @@ def copy_tree(src, dst):
             clone(p, dst / p.relative_to(src))
 
 
+def remove_tree(path):
+    """Remove a bundle. Finder can put .DS_Store back while it is being deleted, which makes the last rmdir fail."""
+    for _ in range(5):
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError as error:
+            if error.errno != 66 or not path.exists():
+                raise
+            time.sleep(0.2)
+    shutil.rmtree(path)
+
+
 def sign_app(app, logs):
     # Seal the bundle, including Info.plist and game resources. Copied helper
     # executables keep their existing signatures and byte identity.
@@ -798,7 +811,7 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
     app_name, bundle_id, executable = APPS[game]
     tmp = out.with_name(out.name + '.partial')
     if tmp.exists():
-        shutil.rmtree(tmp)
+        remove_tree(tmp)
     res = tmp / 'Contents/Resources/totk'   # the launcher's game folder, for both games (app/launcher.m)
     clone(tree / ('build/totk-native' if version == 'v0' else f'build/totk-native-{version}'), res/'build/totk-native')
     files = ['build/spirv-cross/spirv-cross', f'rewritten/{version}/main.patched.bin', f'rewritten/{version}/sdk.patched.bin',
@@ -856,7 +869,7 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
             notified = time.monotonic()
         time.sleep(2)
     if out.exists():
-        shutil.rmtree(out)
+        remove_tree(out)
     tmp.rename(out)
 
 
