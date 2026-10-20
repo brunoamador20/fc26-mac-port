@@ -976,8 +976,31 @@ static uint64_t g_sub_serial;   // 第几次提交（并行预编「每次提交
 static void pt_apply_request(void);
 static int g_sub_chunks; static uint64_t g_chunk_mark, g_stat_draw; static void chunk_cfg(void);   // mid-submission commits, defined before mtl_sub_commit
 static int g_nupd, g_nshadow; static inline int upd_guard(uint64_t lo, uint64_t hi);   // renamed uniform updates, defined with mtl_sub_update
+/* Diagnostic: "gpucapture <path>.gputrace" in TOTK_INPUT_FILE writes a Metal capture of one whole frame (every submission
+   of it) for Xcode's Metal debugger: passes, draws, bound resources, and per-pixel history (which draws touched a pixel,
+   and whether they passed the depth / stencil tests). Metal writes capture files only if MTL_CAPTURE_ENABLED=1 was set
+   when the game started. */
+static _Atomic uint64_t g_cur_frame;   // tentative declaration, defined further down
+static char g_cap_path[1024]; static long g_cap_at = -1; static int g_cap_on;
+void dm_gfx_gpucapture_next(const char *path) {
+    snprintf(g_cap_path, sizeof g_cap_path, "%s", path); g_cap_at = (long)atomic_load(&g_cur_frame) + 2;
+    MLOG("[capture] Metal capture of frame %ld -> %s", g_cap_at, g_cap_path);
+}
+static void cap_step(void) {   // at the start of every submission
+    if (g_cap_at < 0) return;
+    long f = (long)atomic_load(&g_cur_frame);
+    MTLCaptureManager *m = [MTLCaptureManager sharedCaptureManager];
+    if (g_cap_on && f > g_cap_at) { [m stopCapture]; g_cap_on = 0; g_cap_at = -1; MLOG("[capture] written: %s", g_cap_path); return; }
+    if (!g_cap_on && f >= g_cap_at) {
+        if (![m supportsDestination:MTLCaptureDestinationGPUTraceDocument]) { MLOG("【红】[capture] capture files are off: start the game with MTL_CAPTURE_ENABLED=1"); g_cap_at = -1; return; }
+        MTLCaptureDescriptor *d = [MTLCaptureDescriptor new]; d.captureObject = g_dev; d.destination = MTLCaptureDestinationGPUTraceDocument;
+        d.outputURL = [NSURL fileURLWithPath:@(g_cap_path)];
+        NSError *e = nil; if ([m startCaptureWithDescriptor:d error:&e]) { g_cap_on = 1; g_cap_at = f; } else { MLOG("【红】[capture] could not start: %s", e.localizedDescription.UTF8String); g_cap_at = -1; }
+    }
+}
 void mtl_sub_begin(void) {
     g_fc_begin0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    cap_step();
     /* The submission's autorelease pool, drained in mtl_sub_commit, opens before anything else: the guest's submit
        thread has no pool of its own that drains (frontend.m's lasts the whole game), so what defer_drain, defer_reset,
        warm_claim and pt_apply_request autoreleased before it piled up every submission (nxnative found the same leak:
@@ -4307,6 +4330,8 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
         any = 1;
         pd.colorAttachments[i].loadAction = R.clear_c[i] ? MTLLoadActionClear : MTLLoadActionLoad;
         pd.colorAttachments[i].clearColor = R.cc[i];
+        { static long xs = -2; if (xs == -2) { const char *e = getenv("DM_EXP_CLEAR_SER"); xs = e ? strtol(e, NULL, 0) : -1; }   // measurement only: a loaded target of this serial starts magenta (pixels no draw covers show up)
+          if (xs >= 0 && (long)R.rt.color[i]->serial == xs && !R.clear_c[i]) { pd.colorAttachments[i].loadAction = MTLLoadActionClear; pd.colorAttachments[i].clearColor = MTLClearColorMake(1, 0, 1, 1); } }
         int cov = tbdr_on() && !R.clear_c[i] && (g_fd_dw || g_fd_di) && fz_load_covers(i, pd.colorAttachments[i].texture, pd.colorAttachments[i].level);
         if (!R.clear_c[i] && (g_fd_dw || g_fd_di) && !cov) PD("Q %llu c%d 读入不可省 why=%d", g_stat_pass + 1, i, g_fd_why);
         if (cov) {

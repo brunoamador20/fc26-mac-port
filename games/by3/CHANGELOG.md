@@ -355,3 +355,15 @@ Two real defects found; neither alone is shown to fix the picture yet:
   view. Under test: the cached MSL of that one shader, edited by hand to `texture2d<uint>` with
   `as_type<float4>(...gather(...))` (compiles). The real fix belongs in the variant answer (a stencil-mode view is
   not `_depth`) and in the translator's MSL rewrite.
+
+### 2026-10-19: the colour pass leaves holes while the camera moves; tools for it
+
+- `DM_EXP_CLEAR_SER=<serial>` (measurement only): a loaded colour target of that serial starts magenta, so pixels no
+  draw covers become visible. With ser 41 (the colour pass target) and the camera moving, whole regions of the deck,
+  the sky and buildings stay magenta. With the camera still, there are almost none. So the ghosts and trails are
+  pixels the colour pass never writes, which keep the previous frame.
+- Ruled out: command-buffer fences. Exact values set at submit (handle -> sync table) differed from the first guess
+  0 times in 4096, so the change was dropped.
+- `gpucapture <path>.gputrace` (input file; the game must start with `MTL_CAPTURE_ENABLED=1`): a Metal capture of one
+  whole frame for Xcode's Metal debugger. Pixel History on a hole shows which draws reached it and which test
+  rejected them. First capture: 3.7 GB, deck fight, camera turning.
