@@ -51,6 +51,17 @@ int mtl_probe_sampler_border(void) {
             mtl_sub_begin();op_hdr end={OP_END,8};mtl_exec((const uint8_t *)&end);state_op(OP_BIND_TEX,&tex);
             memset(g_pass.cfmt,0,sizeof g_pass.cfmt);g_pass.cfmt[0]=MTLPixelFormatRGBA32Float;g_pass.dfmt=0;g_pass.sfmt=0;g_pass.samples=1;g_pass.layered=0;g_pass.serial++;
             id<MTLRenderPipelineState> pipeline=pso_get(program,nil);if(!pipeline)MDIE("border probe PSO");
+            {   // the recipe the pipeline is recorded with (pso_adopt B row) reads back exactly and names the same variant (warm_border)
+                border_in b,r;NSString *key=border_key(sh[stage],stage,b.c,b.a,b.x,&b.n);
+                if(key){
+                    if(!border_parse(key,&r)||r.n!=b.n)MDIE("border probe recipe %s does not read back",key.UTF8String);
+                    for(int i=0;i<b.n;i++)if(r.a[i]!=b.a[i]||r.x[i]!=b.x[i]||memcmp(r.c[i],b.c[i],sizeof r.c[i]))MDIE("border probe recipe %s read back differently",key.UTF8String);
+                    id<MTLFunction> from_draw=stage?fs_fn_border(sh[1],0,NULL):vs_fn_for(sh[0],sh[1],0,1,NULL);
+                    id<MTLFunction> from_recipe=stage?fs_fn_border_with(sh[1],0,key,r,NULL):vs_fn_variant(sh[0],sh[1],0,key,r,NULL);
+                    if(!from_draw||from_draw!=from_recipe)MDIE("border probe recipe %s names another variant",key.UTF8String);
+                    checked+=2;
+                }
+            }
             if(c==0)first_gray=pipeline;
             if(c==2 && outside!=2){if(pipeline!=first_gray)MDIE("border probe lost grey PSO cache hit");checked++;}
             if(c==3)first_native=pipeline;

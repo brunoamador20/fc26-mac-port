@@ -14,8 +14,13 @@ It holds no game data, only identifiers; the build turns them into shaders from 
                                 the key, so bytes of another game version are never used.
   S <variant>_b <stage> <flags> a shader library the warm-up loads,
   C <variant>_b <flags>         a compute pipeline, and
-  R <pipeline key> <flags>      a render pipeline it builds; flags t: the title screen's (the first frame waits for these
-                                only), m: the rest of the warm-up. Warm rows keep the order they were recorded in.
+  R <pipeline key> <flags>      a render pipeline it builds;
+  B <pipeline key> <vertex> <fragment> <flags>
+                                the same pipeline with the border colours its samplers had (nvn_mtl.m border_parse): per
+                                stage "<argument id>:<axes>:<r>,<g>,<b>,<a>;" for each sampler, colours as C %a floats,
+                                or - for none; the warm-up builds the shader variants that emulate them and that pipeline.
+                                Flags t: the title screen's (the first frame waits for these only), m: the rest of the
+                                warm-up. Warm rows keep the order they were recorded in.
 
   shader_list.py merge [--title] <list> <source>...  add a translation cache folder (its *.variants: shaders only; a cache's
                                                      pso_collected.tsv holds every pipeline ever built, tens of thousands,
@@ -40,6 +45,8 @@ KEY = re.compile(r'^[0-9a-f]{64}$')
 VARIANT = re.compile(r'^[0-9a-f]{64}-[0-9a-f]{12}_b$')
 PIPELINE = re.compile(r'^(?:[0-9a-f]{2})+$')
 HEX = re.compile(r'^[0-9a-f]{1,10}$')
+_HEXFLOAT = r'-?0x[0-9a-f]+(?:\.[0-9a-f]*)?p[-+]\d+'
+BORDER = re.compile(rf'^(?:-|(?:\d+:[0-7]:{_HEXFLOAT},{_HEXFLOAT},{_HEXFLOAT},{_HEXFLOAT};){{1,8}})$')
 SOURCE = re.compile(r'^(?:module:[a-z0-9]+|[A-Za-z0-9_.()+-]+(?:/[A-Za-z0-9_.()+-]+)*)$')
 DEPS_FIELDS = {'tex', 'img', 'attr', 'fout'}
 
@@ -66,7 +73,8 @@ def locator(fields):
 
 
 def warm_row(fields):
-    """A warm row without flags ('S', variant, stage) / ('C', variant) / ('R', key), or None when it is not one."""
+    """A warm row without flags ('S', variant, stage) / ('C', variant) / ('R', key) / ('B', key, vertex, fragment), or None
+    when it is not one."""
     kind = fields[0] if fields else ''
     if kind == 'S' and len(fields) >= 3 and VARIANT.match(fields[1]) and fields[2] in ('0', '1', '5'):
         return tuple(fields[:3])
@@ -74,6 +82,9 @@ def warm_row(fields):
         return tuple(fields[:2])
     if kind == 'R' and len(fields) >= 2 and PIPELINE.match(fields[1]):
         return tuple(fields[:2])
+    if (kind == 'B' and len(fields) >= 4 and PIPELINE.match(fields[1]) and BORDER.match(fields[2]) and BORDER.match(fields[3])
+            and fields[2:4] != ['-', '-']):
+        return tuple(fields[:4])
     return None
 
 
@@ -182,11 +193,11 @@ class ShaderList:
         return EXPORT.format(source) + ''.join('\t'.join(row) + '\n' for row in out)
 
     def counts(self):
-        kinds = {k: sum(1 for row in self.warm if row[0] == k) for k in 'SCR'}
+        kinds = {k: sum(1 for row in self.warm if row[0] == k) for k in 'SCRB'}
         title = sum(1 for flags in self.warm.values() if 't' in flags)
         return (f'{len(self.variants)} variants over {len({k for k, _ in self.variants})} shaders, '
                 f'{len(self.locators)} located; warm rows: '
-                f'{kinds["S"]} S, {kinds["C"]} C, {kinds["R"]} R ({title} for the title screen)')
+                f'{kinds["S"]} S, {kinds["C"]} C, {kinds["R"]} R, {kinds["B"]} B ({title} for the title screen)')
 
 
 def main(argv):

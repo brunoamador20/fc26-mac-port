@@ -4785,7 +4785,10 @@ static int exp_skip_fs(NvProg *pr) {
 }
 // 预热项：后台建好、等提交线程领用。vs / fs 强引用（pso 里只是裸指针，后台字典随任务结束释放）
 // Warm-up entry: built in the background, waiting to be taken by the submit thread. vs / fs are strong references (in pso they are only raw pointers, and the background dictionary is released when the task ends)
-@interface WarmItem : NSObject { @public int kind; NSString *key, *vs_key, *fs_key; NvShader *shader, *vs, *fs; pso_key pso; id<MTLFunction> fsfn; id object; } @end
+// A border pipeline (B row) also brings its variant functions and their cache keys (vpatch / bpatch): warm_claim files them
+// with the shaders the game uses, whose own lookups then return these functions and so find the pipeline.
+@interface WarmItem : NSObject { @public int kind; NSString *key, *vs_key, *fs_key; NvShader *shader, *vs, *fs; pso_key pso; id<MTLFunction> fsfn; id object;
+    id<MTLFunction> vfn, bfn; NSString *vpatch_key, *bpatch_key; } @end
 @implementation WarmItem @end
 static NSMutableDictionary<NSString *, NvShader *> *g_shcache;
 
@@ -4995,8 +4998,10 @@ static id<MTLLibrary> totk_msl_library(NSString *src, NSError **err) {
    most of those draws cannot be deferred (occlusion counting and the like, 2026-10-22). On the Mac the source of each one
    compiled here is kept in the shader cache (variants/<SHA-256>.metal); the next packaging compiles them into the app's
    shader-libs with the startup shaders (build_app.py variant_sources), and from then on the library is loaded instead.
-   Counted for the long-frame log (mtl_variant_stats). */
-static _Atomic uint64_t g_stat_variant_n, g_stat_variant_ns, g_stat_variant_pre;
+   Counted for the long-frame log (mtl_variant_stats): compiled on the submit thread, loaded prebuilt, compiled in the
+   background (variant_defer), and draws drawn with the plain functions while a border variant was not ready (pso_get). */
+static _Atomic uint64_t g_stat_variant_n, g_stat_variant_ns, g_stat_variant_pre, g_stat_variant_bg, g_stat_variant_plain;
+static __thread int g_variant_bg;   // set on variant_defer's queue: its compiles are not the submit thread's
 #if !TARGET_OS_IPHONE
 static id<MTLLibrary> shader_lib_prebuilt(NSData *src);
 static void variant_record(NSData *raw) {
@@ -5015,15 +5020,19 @@ static id<MTLLibrary> variant_library(NSString *src, NSError **err) {
     if (pre) { atomic_fetch_add_explicit(&g_stat_variant_pre, 1, memory_order_relaxed); return pre; }
 #endif
     uint64_t t0 = bp_now(); id<MTLLibrary> lib = totk_msl_library(src, err);
-    atomic_fetch_add_explicit(&g_stat_variant_n, 1, memory_order_relaxed);
-    atomic_fetch_add_explicit(&g_stat_variant_ns, bp_now() - t0, memory_order_relaxed);
+    if (g_variant_bg) atomic_fetch_add_explicit(&g_stat_variant_bg, 1, memory_order_relaxed);
+    else {
+        atomic_fetch_add_explicit(&g_stat_variant_n, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_stat_variant_ns, bp_now() - t0, memory_order_relaxed);
+    }
 #if !TARGET_OS_IPHONE
     if (lib && raw) variant_record(raw);
 #endif
     return lib;
 }
-void mtl_variant_stats(uint64_t *n, uint64_t *ns, uint64_t *pre) {
+void mtl_variant_stats(uint64_t *n, uint64_t *ns, uint64_t *pre, uint64_t *bg, uint64_t *plain) {
     *n = atomic_load(&g_stat_variant_n); *ns = atomic_load(&g_stat_variant_ns); *pre = atomic_load(&g_stat_variant_pre);
+    *bg = atomic_load(&g_stat_variant_bg); *plain = atomic_load(&g_stat_variant_plain);
 }
 /* TOTK (2026-10-15): which words of the NVN driver constant segments c0 / c2 a translated shader reads, scanned from its MSL
    at load (spirv-cross names them <stage>p_c0 / <stage>p_c2: vp_, fp_, cp_). The translation-time scan
@@ -5931,6 +5940,13 @@ static int draw_state_may_skip(void) {
     return 0;
 }
 static int draw_may_skip(const NvProg *pr) { return !pr->keeps && draw_state_may_skip(); }
+/* Async shaders: a draw that cannot be skipped may use the plain functions while its border-colour variants are
+   prepared (pso_get). TOTK_BORDER_PLAIN=0 makes it wait for them on the submit thread as before. */
+static int border_plain_ok(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("TOTK_BORDER_PLAIN"); on = async_shaders() && !(e && !strcmp(e, "0")); }
+    return on;
+}
 /* TOTK_ASYNC_WHY=1 (diagnostic): why a new variant was translated on the spot instead of in the background, counted per
    reason and logged every 100: the program stores, an occlusion counter counts, no render target, no colour written, or
    colour only into cube / array / 3D targets. */
@@ -6181,8 +6197,9 @@ static NSString *border_src(NvShader *sh, NSString *src0, float colours[][4], co
    left with every shader prepared (2026-10-21). While pso_get probes a draw that may be skipped (g_vprobe), a missing
    variant is compiled on a background queue instead and the draw is deferred like one whose pipeline is compiling
    (g_pso_deferred). Its inputs (the bound samplers' borders, the varyings) are taken on the submit thread first, and
-   nothing is compiled under the caches' locks, so a lookup never waits for a background compile. */
-static int g_vprobe, g_vmissing;   // submit thread: pso_get is probing a draw that may be skipped / a variant was missing
+   nothing is compiled under the caches' locks, so a lookup never waits for a background compile. A draw that cannot be
+   skipped probes its border variants the same way and is drawn with the plain functions meanwhile (pso_get). */
+static __thread int g_vprobe, g_vmissing;   // pso_get (submit thread) is probing a draw / a variant was missing; per thread: the warm-up builds variants too
 static NSMutableSet<NSString *> *g_vbusy; static os_unfair_lock g_vbusy_lock = OS_UNFAIR_LOCK_INIT;
 static _Atomic uint64_t g_vqueued;
 static int variant_defer(NSString *job, void (^build)(void)) {
@@ -6198,22 +6215,46 @@ static int variant_defer(NSString *job, void (^build)(void)) {
     dispatch_once(&once, ^{ q = dispatch_queue_create("totk.shader-variant", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT, QOS_CLASS_USER_INITIATED, 0)); });
     uint64_t n = atomic_fetch_add(&g_vqueued, 1) + 1;
     if (n <= 8 || n % 100 == 0) MLOG("[async-shaders] patched shader variant compiled in the background (%llu so far): %s", (unsigned long long)n, job.UTF8String);
-    dispatch_async(q, ^{ @autoreleasepool { build(); }
+    dispatch_async(q, ^{ @autoreleasepool { g_variant_bg = 1; build(); g_variant_bg = 0; }
         os_unfair_lock_lock(&g_vbusy_lock); [g_vbusy removeObject:job]; os_unfair_lock_unlock(&g_vbusy_lock); });
     return 1;
 }
 #define VARIANT_NONE ((__bridge id)kCFNull)   // cached: the border rewrite found no sample call, so no patched function
 typedef struct { float c[8][4]; int a[8]; unsigned x[8]; int n; } border_in;
-/* The fragment function for the draw's samplers (border_key), nil when none needs the emulation. */
-static id<MTLFunction> fs_fn_border(NvShader *fs, int nodepth) {
+static os_unfair_lock g_bpatch_lock = OS_UNFAIR_LOCK_INIT, g_vpatch_lock = OS_UNFAIR_LOCK_INIT;   // NvShader bpatch / vpatch
+/* Border recipes: a stage's border_key text holds every input of its variant ("<argument id>:<axes>:<r>,<g>,<b>,<a>;" per
+   sampler, colours in %a), so it reads back exactly. pso_adopt records it with the pipeline (B rows) and the next start's
+   warm-up builds the border variant and its pipeline from it (warm_worker): the pipeline only ever drawn with those
+   samplers was otherwise rebuilt in every session, 25 ms each and two thirds of the pipelines made in play (2026-10-22). */
+static int border_parse(NSString *key, border_in *b) {
+    memset(b, 0, sizeof *b);
+    const char *s = key.UTF8String;
+    while (s && *s) {
+        if (b->n >= 8) return 0;
+        char *e; long aid = strtol(s, &e, 10); if (e == s || *e != ':') return 0; s = e + 1;
+        unsigned long ax = strtoul(s, &e, 10); if (e == s || *e != ':' || ax > 7) return 0; s = e + 1;
+        for (int c = 0; c < 4; c++) { float v = strtof(s, &e); if (e == s || *e != (c < 3 ? ',' : ';')) return 0; b->c[b->n][c] = v; s = e + 1; }
+        b->a[b->n] = (int)aid; b->x[b->n] = (unsigned)ax; b->n++;
+    }
+    return b->n > 0;
+}
+static id<MTLFunction> fs_fn_border_with(NvShader *fs, int nodepth, NSString *key, border_in b, NSString **cache_key);
+/* The fragment function for the draw's samplers (border_key), nil when none needs the emulation. recipe: its border_key. */
+static id<MTLFunction> fs_fn_border(NvShader *fs, int nodepth, NSString **recipe) {
     if (!fs || !sh_has_src(fs)) return nil;
     border_in b;
     NSString *key = border_key(fs, 1, b.c, b.a, b.x, &b.n);
     if (!key) return nil;
+    if (recipe) *recipe = key;
+    return fs_fn_border_with(fs, nodepth, key, b, NULL);
+}
+/* The fragment function for a border key and its inputs (a draw's samplers, or a recipe); cache_key: its bpatch key. */
+static id<MTLFunction> fs_fn_border_with(NvShader *fs, int nodepth, NSString *bkey, border_in b, NSString **cache_key) {
+    if (!fs || !sh_has_src(fs)) return nil;
     int nd = nodepth && fs->writes_depth;
-    if (nd) key = [@"nodepth;" stringByAppendingString:key];
-    static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
-    os_unfair_lock_lock(&lock); id fn = fs->bpatch[key]; os_unfair_lock_unlock(&lock);
+    NSString *key = nd ? [@"nodepth;" stringByAppendingString:bkey] : bkey;
+    if (cache_key) *cache_key = key;
+    os_unfair_lock_lock(&g_bpatch_lock); id fn = fs->bpatch[key]; os_unfair_lock_unlock(&g_bpatch_lock);
     if (fn) return fn == VARIANT_NONE ? nil : fn;
     id (^make)(void) = ^id {
         border_in v = b;
@@ -6224,31 +6265,41 @@ static id<MTLFunction> fs_fn_border(NvShader *fs, int nodepth) {
             f = lib ? [lib newFunctionWithName:fs->fn.name] : nil;
             if (!f) MDIE("fragment shader %s with emulated sampler border colour: %s", fs->key, err.localizedDescription.UTF8String);
         }
-        os_unfair_lock_lock(&lock);
+        os_unfair_lock_lock(&g_bpatch_lock);
         if (!fs->bpatch) fs->bpatch = [NSMutableDictionary dictionary];
         if (!fs->bpatch[key]) fs->bpatch[key] = f;
         f = fs->bpatch[key];
-        os_unfair_lock_unlock(&lock);
+        os_unfair_lock_unlock(&g_bpatch_lock);
         return f;
     };
     if (variant_defer([NSString stringWithFormat:@"fs %s %@", fs->key, key], ^{ make(); })) return nil;
     fn = make();
     return fn == VARIANT_NONE ? nil : fn;
 }
-static id<MTLFunction> vs_fn_for(NvShader *vs, NvShader *fs, int layered, int border) {
-    static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT;
-    if (layered && !vs_layerable(vs)) MDIE("vertex shader %s cannot write the render target array index", vs->key);
-    border_in b; b.n = 0;   // TOTK: vertex-stage samplers with a border colour Metal lacks (PSO_VBORDER)
+static id<MTLFunction> vs_fn_variant(NvShader *vs, NvShader *fs, int layered, NSString *bkey, border_in b, NSString **cache_key);
+/* The vertex function for the pass (layer index), the fragment shader's varyings and, with border, the draw's vertex-stage
+   samplers with a border colour Metal lacks (PSO_VBORDER). recipe: their border_key. */
+static id<MTLFunction> vs_fn_for(NvShader *vs, NvShader *fs, int layered, int border, NSString **recipe) {
+    border_in b; b.n = 0;
     NSString *bkey = border && sh_has_src(vs) ? border_key(vs, 0, b.c, b.a, b.x, &b.n) : nil;
+    if (recipe) *recipe = bkey;
+    return vs_fn_variant(vs, fs, layered, bkey, b, NULL);
+}
+/* The same for a border key and its inputs (a draw's samplers, or a recipe); cache_key: its vpatch key (nil: vs->fn). */
+static id<MTLFunction> vs_fn_variant(NvShader *vs, NvShader *fs, int layered, NSString *bkey, border_in b, NSString **cache_key) {
+    os_unfair_lock *lk = &g_vpatch_lock;
+    if (cache_key) *cache_key = nil;
+    if (layered && !vs_layerable(vs)) MDIE("vertex shader %s cannot write the render target array index", vs->key);
     if (!sh_has_src(vs) || (!layered && !bkey && (!fs || !sh_has_src(fs)))) return vs->fn;
-    os_unfair_lock_lock(&lk);
+    os_unfair_lock_lock(lk);
     NSDictionary *in = fs && sh_has_src(fs) ? msl_varyings(fs) : nil, *out = in ? msl_varyings(vs) : nil;
     NSMutableArray *miss = [NSMutableArray array];
     for (NSNumber *l in [in.allKeys sortedArrayUsingSelector:@selector(compare:)]) if (!out[l]) [miss addObject:l];
-    if (!miss.count && !layered && !bkey) { os_unfair_lock_unlock(&lk); return vs->fn; }
+    if (!miss.count && !layered && !bkey) { os_unfair_lock_unlock(lk); return vs->fn; }
     NSString *key = [NSString stringWithFormat:@"%@%@%@", layered ? @"layer;" : @"", bkey ? [NSString stringWithFormat:@"border:%@", bkey] : @"", [miss componentsJoinedByString:@","]];
+    if (cache_key) *cache_key = key;
     id<MTLFunction> f = vs->vpatch[key];
-    os_unfair_lock_unlock(&lk);
+    os_unfair_lock_unlock(lk);
     if (f) return f;
     id<MTLFunction> (^make)(void) = ^id<MTLFunction> {
         border_in v = b;
@@ -6277,7 +6328,7 @@ static id<MTLFunction> vs_fn_for(NvShader *vs, NvShader *fs, int layered, int bo
         NSError *e = nil; id<MTLLibrary> lib = variant_library(src, &e);
         id<MTLFunction> g = lib ? [lib newFunctionWithName:vs->fn.name] : nil;
         if (!g) MDIE("vertex shader %s (variant %s): %s", vs->key, key.UTF8String, e.localizedDescription.UTF8String);
-        os_unfair_lock_lock(&lk);
+        os_unfair_lock_lock(lk);
         if (!vs->vpatch) vs->vpatch = [NSMutableDictionary dictionary];
         if (!vs->vpatch[key]) {
             vs->vpatch[key] = g;
@@ -6286,7 +6337,7 @@ static id<MTLFunction> vs_fn_for(NvShader *vs, NvShader *fs, int layered, int bo
             if (layered && !lonce++) MLOG("[totk] layered pass: vertex shader %s writes the render target array index", vs->key);
         }
         g = vs->vpatch[key];
-        os_unfair_lock_unlock(&lk);
+        os_unfair_lock_unlock(lk);
         return g;
     };
     if (variant_defer([NSString stringWithFormat:@"vs %s %@", vs->key, key], ^{ make(); })) return nil;
@@ -6505,7 +6556,8 @@ static id<MTLComputePipelineState> cs_new(NvShader *cs, NSError **e) {
 }
 static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvShader *fs, id<MTLFunction> fsfn, int merged) {
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
-    d.vertexFunction = vs_fn_for(vs, fs, (k->a2c & PSO_LAYERED) != 0, (k->a2c & PSO_VBORDER) != 0); d.fragmentFunction = fsfn ? fsfn : fs ? (k->dfmt ? fs->fn : fs_fn_without_depth(fs)) : nil;
+    // A border pipeline's key carries its vertex function (pso_get, warm_worker): built off the submit thread too, it reads no sampler here.
+    d.vertexFunction = (k->a2c & PSO_VBORDER) ? (__bridge id<MTLFunction>)k->vs : vs_fn_for(vs, fs, (k->a2c & PSO_LAYERED) != 0, 0, NULL); d.fragmentFunction = fsfn ? fsfn : fs ? (k->dfmt ? fs->fn : fs_fn_without_depth(fs)) : nil;
     if (!fsfn && nan_trace_match(fs) && !fs->writes_depth) d.fragmentFunction = nan_trace_fn(fs);   // diagnostic TOTK_NAN_TRACE
     // 诊断 DM_NVN_HILITE=片元着色器键,…：这些绘制改用纯色片元（第 1–6 个键依次 品红 / 绿 / 青 / 黄 / 蓝 / 白），看几何落在哪里
     // Diagnostic DM_NVN_HILITE=fragment shader key,...: these draws use a solid-color fragment instead (keys 1–6 in order magenta / green / cyan / yellow / blue / white), to see where the geometry lands
@@ -6667,18 +6719,19 @@ static int pso_pend_state(const pso_key *k) {   // -1 not predicted, 0 compiling
     return state;
 }
 /* A new pipeline into the cache and the warm lists (submit thread). */
-static void pso_adopt(const pso_key *k, NvShader *vs, NvShader *fs, int border, int merged, id<MTLRenderPipelineState> ps, uint64_t bt, int bg) {
+static void pso_adopt(const pso_key *k, NvShader *vs, NvShader *fs, int border, int merged, id<MTLRenderPipelineState> ps, uint64_t bt, int bg, NSString *brec) {
     pso_key rk = *k; rk.a2c &= ~PSO_VBORDER; if (border) rk.fsfn = NULL;   // the warm-up list records the plain pipeline: a border variant is built from the draw's samplers
     pso_skey sk; char shex[sizeof sk * 2 + 1]; pso_skey_from(&rk, vs, fs, merged, merged ? &g_pso_fz : NULL, &sk); pso_skey_hex(&sk, shex);
     if (survey_shader_log()) MLOG("[survey-shader] frame %llu render pipeline %s in %.2f ms%s", (unsigned long long)atomic_load(&g_cur_frame), shex, (bp_now() - bt) / 1e6, bg ? " (background, from queued to adopted)" : "");
     pso_record("R\t%s\n", shex);
     pso_user_record("R\t%s\n", shex);
+    if (brec) pso_user_record("B\t%s\t%s\n", shex, brec.UTF8String);   // its border recipe (border_parse): the warm-up builds this one too
     hm_put_id(&g_pso, k, ps);
 }
 /* Async pipelines (async shaders): a draw that may be skipped (draw_may_skip) does not wait for a new pipeline. It is
    compiled on a background queue from the same descriptor and adopted by the submit thread (apso_claim); until then
    pso_get returns nil with g_pso_deferred set and the draw is skipped. Merged-pass pipelines are not deferred. */
-@interface ApsoItem : NSObject { @public pso_key k; NvShader *vs, *fs; int border; id<MTLRenderPipelineState> ps; NSError *e; uint64_t bt; } @end
+@interface ApsoItem : NSObject { @public pso_key k; NvShader *vs, *fs; int border; id<MTLRenderPipelineState> ps; NSError *e; uint64_t bt; NSString *brec; } @end
 @implementation ApsoItem @end
 static nvn_hmap g_apso_wait = {.klen = sizeof(pso_key)};   // submit thread: keys compiling (@YES) or failed (kCFNull)
 static NSMutableArray<ApsoItem *> *g_apso_done;
@@ -6690,17 +6743,17 @@ static void apso_claim(void) {
     if (!atomic_exchange(&g_apso_ready, 0)) return;
     os_unfair_lock_lock(&g_apso_lock); NSArray<ApsoItem *> *done = g_apso_done; g_apso_done = nil; os_unfair_lock_unlock(&g_apso_lock);
     for (ApsoItem *it in done) {
-        if (it->ps) { hm_del_id(&g_apso_wait, &it->k); pso_adopt(&it->k, it->vs, it->fs, it->border, 0, it->ps, it->bt, 1); continue; }
+        if (it->ps) { hm_del_id(&g_apso_wait, &it->k); pso_adopt(&it->k, it->vs, it->fs, it->border, 0, it->ps, it->bt, 1, it->brec); continue; }
         hm_put_id(&g_apso_wait, &it->k, (__bridge id)kCFNull);   // later draws build it synchronously and report the failure as before
         static int said; if (said++ < 12) MLOG("【红】后台建渲染管线失败：%s（vs %s ps %s）", it->e.localizedDescription.UTF8String, it->vs->key, it->fs ? it->fs->key : "-");
     }
 }
-static int apso_defer(const pso_key *k, NvShader *vs, NvShader *fs, id<MTLFunction> bfn) {
+static int apso_defer(const pso_key *k, NvShader *vs, NvShader *fs, id<MTLFunction> bfn, NSString *brec) {
     id waiting = hm_get_id(&g_apso_wait, k);
     if (waiting) return waiting != (__bridge id)kCFNull;
     int pend = pso_pend_state(k);   // predicted by pso_predict_rest: take it once compiled, never wait for it
     if (pend >= 0) return !pend;
-    ApsoItem *it = [ApsoItem new]; it->k = *k; it->vs = vs; it->fs = fs; it->border = bfn != nil; it->bt = bp_now();
+    ApsoItem *it = [ApsoItem new]; it->k = *k; it->vs = vs; it->fs = fs; it->border = bfn != nil; it->bt = bp_now(); it->brec = brec;
     MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, bfn, 0); NSString *key = pso_archive_key(k, vs, fs, 0);
     hm_put_id(&g_apso_wait, k, @YES);
     // A few serial queues: a new area can bring hundreds of pipelines at once, which should not take every core from the game.
@@ -6726,30 +6779,43 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get(NvProg *pr, MTLRen
     if (g_pso_lmap) { memcpy(k.lmap, g_pso_lmap, 8); k.fsfn = (__bridge void *)g_pso_fsfn; }
     // Async variants: for a draw that may be skipped, a patched function not compiled yet is compiled in the background
     // and the draw deferred. Checked before the cache lookup: a key without its border function would find another pipeline.
-    int probe = !g_pso_lmap && draw_may_skip(pr);
-    g_vprobe = probe; g_vmissing = 0;
-    __unsafe_unretained id<MTLFunction> bfn = !g_pso_lmap && !g_mfx.role ? fs_fn_border(fs, k.dfmt == 0) : nil;   // TOTK: sampler border colour emulation
+    // A draw that cannot be skipped (occlusion counting, stores, ...) probes its border variants too (plain): while they
+    // or their pipeline are prepared in the background it is drawn with the plain pipeline, whose samplers clamp to the
+    // edge (samp_by_id) instead of the emulated border colour, for the few frames that takes (user, 2026-10-22).
+    int probe = !g_pso_lmap && draw_may_skip(pr), plain = !probe && !g_pso_lmap && border_plain_ok();
+    g_vprobe = probe || plain; g_vmissing = 0;
+    NSString *vrec = nil, *frec = nil;   // the border recipes of this key (pso_adopt)
+    __unsafe_unretained id<MTLFunction> bfn = !g_pso_lmap && !g_mfx.role ? fs_fn_border(fs, k.dfmt == 0, &frec) : nil;   // TOTK: sampler border colour emulation
     if (bfn) k.fsfn = (__bridge void *)bfn;
     { float bc[8][4]; int ba[8], bn; unsigned axes[8]; if (border_key(vs, 0, bc, ba, axes, &bn)) {
         k.a2c |= PSO_VBORDER;
         // The same shader can bind different border constants. Cache the actual
         // vertex variant identity, not just the fact that one exists. Persisted
         // recipes clear this pointer in pso_skey_from, keeping the stable ABI.
-        k.vs = (__bridge void *)vs_fn_for(vs, fs, (k.a2c & PSO_LAYERED) != 0, 1);
+        k.vs = (__bridge void *)vs_fn_for(vs, fs, (k.a2c & PSO_LAYERED) != 0, 1, &vrec);
     } }
     g_vprobe = 0;
-    if (g_vmissing) { g_pso_deferred = 1; return nil; }
+    if (g_vmissing && !plain) { g_pso_deferred = 1; return nil; }
+    int bordered = bfn || (k.a2c & PSO_VBORDER);
+    if (g_vmissing) { bfn = nil; k.fsfn = NULL; k.a2c &= ~PSO_VBORDER; k.vs = (__bridge void *)vs; }
     __unsafe_unretained id<MTLRenderPipelineState> cached = (__bridge id<MTLRenderPipelineState>)hm_get_ptr(&g_pso, &k);
-    if (cached) return cached;
+    if (cached) { if (g_vmissing) atomic_fetch_add_explicit(&g_stat_variant_plain, 1, memory_order_relaxed); return cached; }
+    NSString *brec = !g_vmissing && bordered ? [NSString stringWithFormat:@"%@\t%@", (k.a2c & PSO_VBORDER) && vrec ? vrec : @"-", bfn && frec ? frec : @"-"] : nil;
+    if (plain && !g_vmissing && bordered && apso_defer(&k, vs, fs, bfn, brec)) {   // the border pipeline is compiling: the plain one meanwhile
+        bfn = nil; k.fsfn = NULL; k.a2c &= ~PSO_VBORDER; k.vs = (__bridge void *)vs; brec = nil;
+        atomic_fetch_add_explicit(&g_stat_variant_plain, 1, memory_order_relaxed);
+        cached = (__bridge id<MTLRenderPipelineState>)hm_get_ptr(&g_pso, &k);
+        if (cached) return cached;
+    } else if (g_vmissing) atomic_fetch_add_explicit(&g_stat_variant_plain, 1, memory_order_relaxed);
     if (probe) {   // the functions pso_desc takes for a new pipeline (apso_defer and the synchronous build call it here)
         g_vprobe = 1;
-        if (!(k.a2c & PSO_VBORDER)) vs_fn_for(vs, fs, (k.a2c & PSO_LAYERED) != 0, 0);
+        if (!(k.a2c & PSO_VBORDER)) vs_fn_for(vs, fs, (k.a2c & PSO_LAYERED) != 0, 0, NULL);
         if (fs && !bfn && !k.dfmt) fs_fn_without_depth(fs);
         if (fs && g_mfx.role) fs_fn_mfx(fs, g_mfx.role, k.dfmt == 0);
         g_vprobe = 0;
         if (g_vmissing) { g_pso_deferred = 1; return nil; }
     }
-    if (!g_pso_lmap && draw_may_skip(pr) && apso_defer(&k, vs, fs, bfn)) { g_pso_deferred = 1; return nil; }
+    if (!g_pso_lmap && draw_may_skip(pr) && apso_defer(&k, vs, fs, bfn, brec)) { g_pso_deferred = 1; return nil; }
     id<MTLRenderPipelineState> ps;
     NSError *e = nil; uint64_t bt = bp_now();
     ps = g_pso_lmap ? nil : pso_pend_take(&k);
@@ -6761,7 +6827,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get(NvProg *pr, MTLRen
     }
     g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
     if (!ps) { static int said; if (said++ < 12) MLOG("【红】建渲染管线失败：%s（vs %s ps %s dfmt %d sfmt %d cfmt0 %d samples %d）", e.localizedDescription.UTF8String, vs->key, fs ? fs->key : "-", (int)k.dfmt, (int)k.sfmt, (int)k.cfmt[0], (int)k.samples); else if (said == 12) MLOG("【红】建渲染管线失败：后续不再逐条打印"); return nil; }
-    pso_adopt(&k, vs, fs, bfn != nil, g_pso_lmap != NULL, ps, bt, 0);
+    pso_adopt(&k, vs, fs, bfn != nil, g_pso_lmap != NULL, ps, bt, 0, brec);
     return ps;
 }
 static NSString *warm_key(const char *s, size_t n) {
@@ -6922,7 +6988,7 @@ static void warm_plan(NSArray<NSString *> *paths, NSArray<NSString *> *files, NS
                 if (g_warm_pipelines_only || !warm_available(c[1])) continue;
                 [keys addObject:c[1]];
             }
-            else if ([c[0] isEqualToString:@"R"] && c.count >= 2) {
+            else if (([c[0] isEqualToString:@"R"] && c.count >= 2) || ([c[0] isEqualToString:@"B"] && c.count >= 4)) {
                 pso_skey sk; if (pso_skey_parse(c[1].UTF8String, &sk)) continue;
                 NSString *vs = warm_key(sk.vs, sizeof sk.vs), *fs = warm_key(sk.fs, sizeof sk.fs);
                 // Evaluate both so the missing-shader count remains deduplicated.
@@ -6951,6 +7017,29 @@ static void warm_task_done(uint64_t *done,uint64_t total,uint64_t shader_total,u
     if (runtime_warm_progress && (!(*done % 64) || *done == total))
         runtime_warm_progress(*done,total,dict.count,shader_total,g_warm_rps+g_warm_cps,pipeline_total);
 }
+/* A B row (pso_adopt): the pipeline with its border variants, built from the recipe instead of bound samplers. */
+static int warm_border(NSArray<NSString *> *c, NSMutableDictionary<NSString *, NvShader *> *dict) {
+    pso_skey sk; if (pso_skey_parse(c[1].UTF8String, &sk) || sk.merged || sk.fz) return 0;
+    NSString *vkey = warm_key(sk.vs, sizeof sk.vs), *fkey = warm_key(sk.fs, sizeof sk.fs);
+    NvShader *vs = vkey.length ? warm_shader(dict, vkey, sk.vs_stage) : nil, *fs = fkey.length ? warm_shader(dict, fkey, sk.fs_stage) : nil;
+    int hv = ![c[2] isEqualToString:@"-"], hf = ![c[3] isEqualToString:@"-"];
+    border_in bv, bf;
+    if (!vs || (!hv && !hf) || (hv && !border_parse(c[2], &bv)) || (hf && (!fs || !border_parse(c[3], &bf)))) return 0;
+    NSString *vk = nil, *fk = nil;
+    id<MTLFunction> vfn = hv ? vs_fn_variant(vs, fs, (sk.k.a2c & PSO_LAYERED) != 0, c[2], bv, &vk) : nil;
+    id<MTLFunction> bfn = hf ? fs_fn_border_with(fs, sk.k.dfmt == 0, c[3], bf, &fk) : nil;
+    if ((hv && (!vfn || !vk)) || (hf && !bfn)) return 0;
+    pso_key k = sk.k; k.vs = (__bridge void *)(hv ? vfn : (id)vs); k.fs = (__bridge void *)fs; k.fsfn = (__bridge void *)bfn;
+    if (hv) k.a2c |= PSO_VBORDER;
+    NSError *e = nil; uint64_t ps_started = bp_now();
+    id ps = pso_new(pso_desc(&k, vs, fs, bfn, 0), pso_archive_key(&k, vs, fs, 0), &e);
+    atomic_fetch_add(&g_warm_pipeline_ns, bp_now() - ps_started); atomic_fetch_add(&g_warm_pipeline_count, 1);
+    if (!ps) return 0;
+    WarmItem *item = [WarmItem new]; item->kind = 1; item->vs_key = vkey; item->fs_key = fkey; item->vs = vs; item->fs = fs; item->pso = k; item->object = ps;
+    item->vfn = vfn; item->bfn = bfn; item->vpatch_key = vk; item->bpatch_key = fk;
+    warm_enqueue(item); g_warm_rps++;
+    return 1;
+}
 static void warm_worker(NSArray<NSString *> *paths, NSArray<NSString *> *files,
                         NSSet<NSString *> *eligible,
                         NSMutableSet<NSString *> *planned_keys,uint64_t total,uint64_t shader_total,uint64_t pipeline_total) {
@@ -6959,6 +7048,7 @@ static void warm_worker(NSArray<NSString *> *paths, NSArray<NSString *> *files,
         NSMutableSet<NSString *> *seen = [NSMutableSet set];
         NSUInteger path_index = 0;
         MLOG("后台预热：着色器库用 %d 个线程编（TOTK_WARM_THREADS），进世界后最多 2 个", warm_threads());
+        g_variant_bg = 1;   // patched variants pso_desc and warm_border compile here are no stall (variant_library)
         uint64_t done = 0;
         for (NSString *path in paths) {
             NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
@@ -6998,6 +7088,8 @@ static void warm_worker(NSArray<NSString *> *paths, NSArray<NSString *> *files,
                         if (!ps) { MLOG("【红】后台建渲染管线失败：%s", e.localizedDescription.UTF8String); warm_task_done(&done,total,shader_total,pipeline_total,dict); continue; }
                         WarmItem *item = [WarmItem new]; item->kind = 1; item->vs_key = vkey; item->fs_key = fkey; item->vs = vs; item->fs = fs; item->fsfn = fsfn; item->pso = k; item->object = ps;
                         warm_enqueue(item); g_warm_rps++;
+                    } else if ([c[0] isEqualToString:@"B"] && c.count >= 4) {
+                        if (!warm_border(c, dict)) MLOG("【红】预热：边框色管线没建成（%s / %s）", c[2].UTF8String, c[3].UTF8String);
                     } else if ([c[0] isEqualToString:@"C"] && c.count >= 2) {
                         NSString *key = c[1]; if (!key.length) { warm_task_done(&done,total,shader_total,pipeline_total,dict); continue; }
                         NvShader *cs = warm_shader(dict, key, 5);
@@ -7069,6 +7161,7 @@ static void warm_worker(NSArray<NSString *> *paths, NSArray<NSString *> *files,
              (unsigned long long)atomic_load(&g_warm_pipeline_count),atomic_load(&g_warm_pipeline_ns)/1e6);
         MLOG("预热库来源：预编译 %llu 次，源码编译 %llu 次", (unsigned long long)atomic_load(&g_rt_prebuilt), (unsigned long long)atomic_load(&g_rt_compiled));
     }
+    g_variant_bg = 0;
     atomic_store(&g_warm_running, 0);
     if (runtime_warm_done) runtime_warm_done();
 }
@@ -10750,6 +10843,16 @@ static void warm_claim(void) {
             if (!vs) { vs = item->vs; g_shcache[item->vs_key] = vs; }
             if (item->fs_key.length && !fs) { fs = item->fs; g_shcache[item->fs_key] = fs; }
             item->pso.vs = (__bridge void *)vs; item->pso.fs = (__bridge void *)fs;
+            if (item->vfn || item->bfn) {   // a border pipeline: the game's shaders take its variants unless they have their own already
+                id<MTLFunction> vf = item->vfn, bf = item->bfn;
+                if (vf) { os_unfair_lock_lock(&g_vpatch_lock); if (!vs->vpatch) vs->vpatch = [NSMutableDictionary dictionary];
+                          if (vs->vpatch[item->vpatch_key]) vf = vs->vpatch[item->vpatch_key]; else vs->vpatch[item->vpatch_key] = vf; os_unfair_lock_unlock(&g_vpatch_lock); }
+                if (bf) { os_unfair_lock_lock(&g_bpatch_lock); if (!fs->bpatch) fs->bpatch = [NSMutableDictionary dictionary];
+                          id have = fs->bpatch[item->bpatch_key]; if (have) bf = have == VARIANT_NONE ? nil : have; else fs->bpatch[item->bpatch_key] = bf; os_unfair_lock_unlock(&g_bpatch_lock); }
+                if (item->bfn && !bf) continue;
+                if (vf) item->pso.vs = (__bridge void *)vf;
+                item->pso.fsfn = (__bridge void *)bf;
+            }
             if (!hm_get_id(&g_pso, &item->pso)) { hm_put_id(&g_pso, &item->pso, item->object); g_warm_claim_rps++; }
         } else {
             NvShader *cs = g_shcache[item->key];

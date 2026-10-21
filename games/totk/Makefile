@@ -435,4 +435,4 @@ test-opus-codec:
 
 .PHONY: probe-gpu-sampler-border
 probe-gpu-sampler-border: runtime-v143
-	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; TOTK_PROFILE_DIR="$$tmp/profile" TOTK_SHADER_CACHE="$$tmp/cache" DM_PSO_RECORD="$$tmp/pso.tsv" $(GAME_SLOT_RUN) build/totk-native-v143 rewritten/v143 probe-gpu-sampler-border
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; TOTK_BORDER_PLAIN=0 TOTK_PROFILE_DIR="$$tmp/profile" TOTK_SHADER_CACHE="$$tmp/cache" DM_PSO_RECORD="$$tmp/pso.tsv" $(GAME_SLOT_RUN) build/totk-native-v143 rewritten/v143 probe-gpu-sampler-border

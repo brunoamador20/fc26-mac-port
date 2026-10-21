@@ -26,6 +26,7 @@ The list holds identifiers only, never game data. Each build makes the shaders f
 | `S` | `<variant>_b`, stage, flags | A shader library the warm-up loads. |
 | `C` | `<variant>_b`, flags | A compute pipeline the warm-up builds. |
 | `R` | pipeline key, flags | A render pipeline the warm-up builds. |
+| `B` | pipeline key, vertex border, fragment border, flags | That render pipeline with the sampler border colours Metal lacks, emulated in its shaders (`-` for a stage without). The warm-up builds the patched shaders and the pipeline. |
 
 - **Shader key:** the SHA-256 of the shader's NVN control section and code, computed the same way as the runtime.
 - **Deps:** the translator's `deps` as compact, sorted JSON. They record the texture, image, attribute and fragment
@@ -148,7 +149,7 @@ The tool drops rows that are not shader identifiers. Merging the same source twi
 - **里面是什么**：
   - `V` 行：着色器键 + 绑定状态（deps）。
   - `L` 行：打包程序自己找不到的着色器在玩家游戏文件中的位置：文件路径、控制段和代码的偏移、代码长度。打包时从玩家自己的文件读出，核对哈希等于键才用。BNSH 文件、agl 的 `.sharcb` 包和游戏程序里的着色器，打包程序会自己找到。
-  - `S`、`C`、`R` 行：预热用的着色器库和管线。标记 `t` 是标题画面用的（第一帧只等这些），`m` 是其余预热。
+  - `S`、`C`、`R` 行：预热用的着色器库和管线。`B` 行：同一条管线带着它当时采样器的边框颜色（Metal 没有的颜色要在着色器里模拟），预热按它建好补丁着色器和这条管线。标记 `t` 是标题画面用的（第一帧只等这些），`m` 是其余预热。
   - 只有标识，不含游戏数据。
 - **玩家怎么贡献**：玩的时候什么都不用做。Mac 现场翻译的变体、iPhone / iPad 缺的变体，都说明清单里还没有，游戏会把它记进 `shader-list-contribution.txt`（Mac 在 `~/Library/Application Support/MacNativeGames/TOTK/`，iPhone / iPad 在“文件”App › 我的 iPhone（或 iPad）› Tears of the Kingdom）。Mac 上每攒够 500 条，启动器会在游戏开始前问一次要不要发送；iPhone / iPad 玩的时候从不提醒，设备连着打包它的那台 Mac 时，由 Mac 上的 `ios/tools/shader_contrib_watch.py`（打包 iOS 版时装的后台任务）把文件拷过来，每台设备每多 500 条在 Mac 上问一次。“下次提醒”等到下一个 500 条再问，“不要提醒了”以后就不再问（文件照样记）；点“发送”会打开 GitHub 的[提交着色器清单](https://github.com/ly05010419/MacNativeGames/issues/new?template=shader-list.yml)页面，把文件拖进去即可。下次在 1,000、1,500 条时再提醒，每次发整个文件也没关系，清单里已有的会跳过。游戏不会自己上传任何东西。
 - **维护者合并**：`python3 games/totk/scripts/collect_shader_issues.py` 先看每个 Issue 能加多少；`--apply --close` 写进清单、回复并关闭 Issue。附件里只取 `V` 行。
