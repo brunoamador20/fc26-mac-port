@@ -270,7 +270,8 @@ void runtime_game_patches(Module *m) {
     diag_main=m;   /* frmwatch / xpoke */
 #endif
     { static const uint64_t sites[] = {0x628c74, 0xb43460, 0x1ff04f4, 0x253fbb0};   /* camera update and setup, viewport x2 */
-      aspect_install(m, "1.4.3", sites, 4, ((m->text_end + 15) & ~15ULL) + 48,   /* after the two veneers above */
+      aspect_install(m, "1.4.3", sites, 4, 2, ((m->text_end + 15) & ~15ULL) + 48,   /* after the two veneers above */
+                     ((m->text_end + 15) & ~15ULL) + 320,   /* Vert+ stubs (2 x 304 bytes): after the bounce veneer at +256, before the rewriter's code at +1024 */
                      (m->file_size + 0x3fff) & ~0x3fffULL); }
     const char *enabled = getenv("TOTK_FPS60");
     if (enabled && !strcmp(enabled, "0")) {

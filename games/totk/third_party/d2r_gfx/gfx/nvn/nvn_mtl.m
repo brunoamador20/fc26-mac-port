@@ -4334,15 +4334,17 @@ static int mfx_ui_vs(const char *key) {
     for (size_t i = 0; i < sizeof ui / sizeof *ui; i++) if (!strncmp(key, ui[i], 8)) return 1;
     return 0;
 }
-/* Key 4 / TOTK_ASPECT (runtime/aspect_patch.h): the camera sees a wider view squeezed into the 16:9 canvas and the
-   present stretches the canvas over the window, so the UI drawn into the canvas would come out stretched as well. Its
-   draws are squeezed back about the canvas centre instead, so the HUD keeps its shape in the middle 16:9 of the window.
+/* Key 4 / TOTK_ASPECT (runtime/aspect_patch.h): the camera sees a view of another shape squeezed into the 16:9 canvas and
+   the present stretches the canvas over the window, so the UI drawn into the canvas would come out stretched as well.
+   Its draws are squeezed back about the canvas centre instead, so the HUD keeps its shape in the middle 16:9 of the
+   window: narrowed on a wider window (21:9), flattened on a taller one (16:10, bars above and below the HUD).
    A UI draw: into the canvas, from the first draw with a UI vertex shader on (as TOTK_MFX takes it), a quad of 6
    indices with one of the UI vertex shaders (uw_ui_vs). Everything else stays: the inventory composes its 3D scene
    (full-screen triangles, shader 0ac9a549 and its post passes) after UI draws, and its opaque quad 7d591779 belongs to
    that scene (squeezed, Link turns into a black silhouette). The canvas is learned as for TOTK_MFX (canvas_learn,
    uw_note_present); g_uw_ui: this frame's UI has begun. */
 extern float runtime_aspect_now(void) __attribute__((weak_import));
+#include "totk_ui_squeeze.h"
 static int g_uw_ui;
 _Atomic long g_uw_log;   // diagnostic "flag uw_log <frames>": log the canvas draws of that many frames
 _Atomic long g_draw_log;   // diagnostic "flag draw_log <frames>": log every draw and dispatch of that many frames (same [uw] lines)
@@ -4353,7 +4355,6 @@ static void uw_note_present(const tex_t *t) {
     g_mfx.swap_w = t->d.width; g_mfx.swap_h = t->d.height;
 }
 static int uw_on_canvas(void) { return g_mfx.canvas && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_mfx.canvas; }
-/* The horizontal squeeze for this draw: the wide ratio over the canvas's, or 1 (not UI, or 16:9). */
 /* The TOTK_MFX UI vertex shaders and four more that draw UI quads (inventory tab labels, map icons). */
 static int uw_ui_vs(const char *vs) {
     static const char *const more[] = {"1a40e5f5", "2117f58b", "8d4e36d0", "1469983f"};
@@ -4361,18 +4362,19 @@ static int uw_ui_vs(const char *vs) {
     for (size_t i = 0; i < sizeof more / sizeof *more; i++) if (!strncmp(vs, more[i], 8)) return 1;
     return 0;
 }
-static double uw_ui_squeeze(const char *vs, const p_draw *dw, const p_draw_idx *di, NSUInteger tw, NSUInteger th) {
+/* The squeeze for this draw (totk_ui_squeeze.h): *ux narrows it, *uy flattens it, both 1 when not UI or at 16:9. */
+static void uw_ui_squeeze(const char *vs, const p_draw *dw, const p_draw_idx *di, NSUInteger tw, NSUInteger th, double *ux, double *uy) {
+    *ux = *uy = 1;
     /* TOTK_UI_SQUEEZE=0: the UI layouts themselves are laid out for the wide canvas (scripts/ultrawide_layout.py, the
        launcher's ultrawide resolution), so nothing is squeezed here. */
     static int off = -1; if (off < 0) { const char *e = getenv("TOTK_UI_SQUEEZE"); off = e && !strcmp(e, "0"); }
-    if (off || !g_uw_ui || !vs || !uw_ui_vs(vs) || (dw ? dw->count : di ? di->count : 0) != 6 || !uw_on_canvas() || !tw || !th) return 1;
-    /* The game lays its UI out for 16:9 and maps it onto the canvas; the picture is shown at the wide ratio (key 4 on a
+    if (off || !g_uw_ui || !vs || !uw_ui_vs(vs) || (dw ? dw->count : di ? di->count : 0) != 6 || !uw_on_canvas() || !tw || !th) return;
+    /* The game lays its UI out for 16:9 and maps it onto the canvas; the picture is shown at the ratio of key 4 (on a
        16:9 canvas: the present stretches it there) or at the canvas's own shape (a canvas as wide as the screen,
-       TOTK_OUTPUT_RES=3440x1440, nothing stretched at the present). Either way the UI comes out wider by the shown
-       ratio over 16:9; the old ratio * th / tw only held for a 16:9 canvas. With key 4 off the picture is 16:9 again
-       (stretched over a wide canvas, UI and all): nothing to squeeze. */
-    double shown = uw_ratio(), f = shown * 9.0 / 16.0;
-    return f > 1.001 ? f : 1;
+       TOTK_OUTPUT_RES=3440x1440, nothing stretched at the present). Either way the UI comes out wider (or, below
+       16:9, taller) by the shown ratio over 16:9; a ratio * th / tw only held for a 16:9 canvas. With key 4 off the
+       picture is 16:9 again (stretched over a wide canvas, UI and all): nothing to squeeze. */
+    totk_ui_squeeze(uw_ratio(), ux, uy);
 }
 /* TOTK_MFX: the scene is complete: end the pass (the draw that follows opens it again, loading the canvas, with the UI
    attachment) and copy the canvas into this frame's scene texture. */
@@ -10132,12 +10134,14 @@ frz_plain:;
     if (g_ui_rect_fn && dw && dw->count == 4 && S.nattr == 2 && S.stream[0].stride == 20) { double uy = 0, uh = 1; g_ui_rect_fn(&uy, &uh);
         if (uh > 0 && uh < 1) { if (ui_cover_all(uh)) vs = 1 / uh; else if (uy > 0) { so = lround(uy * th); if (ui_mat_ok()) moff = 2 * uy; else { vo = so; static int n; if (n++ < 4) MLOG("界面下移：投影矩阵这次读不到，退回挪视口（通道 %llu）", g_stat_pass); } } } }
     if (moff != g_ui_moff) { g_ui_moff = moff; args_dirty_stage(0); }
-    double ux = uw_ui_squeeze(pr && pr->sh[0] ? pr->sh[0]->key : NULL, dw, di, tw, th), cx = tw / 2.0;   // key 4: UI squeezed by 1 / ux about the canvas centre
-    double vx = S.has_vp ? S.vp[0][0] : 0, vw = S.has_vp ? S.vp[0][2] : tw;
+    double ux, uy, cx = tw / 2.0, cy = th / 2.0;   // key 4: UI squeezed by 1 / ux across, 1 / uy down, about the canvas centre
+    uw_ui_squeeze(pr && pr->sh[0] ? pr->sh[0]->key : NULL, dw, di, tw, th, &ux, &uy);
+    double vx = S.has_vp ? S.vp[0][0] : 0, vw = S.has_vp ? S.vp[0][2] : tw, vy = S.has_vp ? S.vp[0][1] + vo : vo, vh = S.has_vp ? S.vp[0][3] * vs : th * vs;
     if (ux != 1) { vx = cx + (vx - cx) / ux; vw /= ux; }
+    if (uy != 1) { vy = cy + (vy - cy) / uy; vh /= uy; }
     if ((atomic_load(&g_uw_log) > 0 && uw_on_canvas()) || atomic_load(&g_draw_log) > 0)
-        MLOG("[uw] F%llu pass %llu ui %d squeeze %.3f vs %.8s fs %.8s count %u inst %d vp %s%g,%g,%g,%g sc %s%d,%d,%d,%d blend %#x tex %ux%u fmt %#x ser %llu bl %u,%u,%u/%u,%u,%u cm %#x prim %d",
-             (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, g_uw_ui, ux, pr && pr->sh[0] ? pr->sh[0]->key : "-", pr && pr->sh[1] ? pr->sh[1]->key : "-",
+        MLOG("[uw] F%llu pass %llu ui %d squeeze %.3f/%.3f vs %.8s fs %.8s count %u inst %d vp %s%g,%g,%g,%g sc %s%d,%d,%d,%d blend %#x tex %ux%u fmt %#x ser %llu bl %u,%u,%u/%u,%u,%u cm %#x prim %d",
+             (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, g_uw_ui, ux, uy, pr && pr->sh[0] ? pr->sh[0]->key : "-", pr && pr->sh[1] ? pr->sh[1]->key : "-",
              dw ? dw->count : di ? di->count : 0, dw ? dw->instances : di ? di->instances : 0, S.has_vp ? "" : "none ", S.has_vp ? S.vp[0][0] : 0, S.has_vp ? S.vp[0][1] : 0, S.has_vp ? S.vp[0][2] : 0, S.has_vp ? S.vp[0][3] : 0,
              R.has_sc ? "" : "none ", R.sc.x, R.sc.y, R.sc.w, R.sc.h, S.color.blend_en, (unsigned)tw, (unsigned)th,
              R.rt.n > 0 && R.rt.color[0] ? R.rt.color[0]->d.format : 0, (unsigned long long)(R.rt.n > 0 && R.rt.color[0] ? R.rt.color[0]->serial : 0),
@@ -10174,15 +10178,16 @@ frz_plain:;
        a sub-pixel, a small sphere covers a few more or fewer samples each frame (338 / 345 for an egg lamp), and the game
        scales the light by that count, so lamps and what they light pulsed while standing still. */
     double jx = 0, jy = 0; unsigned nv = di ? di->count : dw ? dw->count : 0;
-    if (taa_jittered() && nv > 6 && vo == 0 && vs == 1 && ux == 1 && !g_vis_counting && !att_n && !(!att_store_on() && draw_att_reads(pr, att_rs)))
+    if (taa_jittered() && nv > 6 && vo == 0 && vs == 1 && ux == 1 && uy == 1 && !g_vis_counting && !att_n && !(!att_store_on() && draw_att_reads(pr, att_rs)))
         taa_jitter(&jx, &jy);
-    if (S.has_vp) enc_r_viewport(en, (MTLViewport){vx + jx, S.vp[0][1] + vo + jy, vw, S.vp[0][3] * vs, S.dr[0], S.dr[1]});
-    else enc_r_viewport(en, (MTLViewport){vx + jx, vo + jy, vw, th * vs, 0, 1});
+    if (S.has_vp) enc_r_viewport(en, (MTLViewport){vx + jx, vy + jy, vw, vh, S.dr[0], S.dr[1]});
+    else enc_r_viewport(en, (MTLViewport){vx + jx, vy + jy, vw, vh, 0, 1});
     MTLScissorRect sc = {0, 0, tw, th};
     if (R.has_sc) {
         long sx0 = R.sc.x, sx1 = (long)R.sc.x + R.sc.w;
         if (ux != 1) { sx0 = lround(cx + (sx0 - cx) / ux); sx1 = lround(cx + (sx1 - cx) / ux); }
         long x0 = sx0 < 0 ? 0 : sx0, y0 = R.sc.y <= 0 ? 0 : R.sc.y + so, x1 = sx1, y1 = vs != 1 ? (long)th : (long)R.sc.y + R.sc.h + so;
+        if (uy != 1) { y0 = lround(cy + (R.sc.y - cy) / uy); y1 = lround(cy + ((long)R.sc.y + R.sc.h - cy) / uy); if (y0 < 0) y0 = 0; }   // the Mac only: so = 0, vs = 1
         if (x1 > (long)tw) x1 = tw; if (y1 > (long)th) y1 = th;
         if (x1 <= x0 || y1 <= y0) { g_draw_skip[10]++; return; }
         sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};

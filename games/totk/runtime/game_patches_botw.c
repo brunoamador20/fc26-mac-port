@@ -519,3 +519,5 @@ int runtime_output_mode_cycle(void) {
 }
 float runtime_aspect_now(void) { return 0; }
 int runtime_aspect_toggle(void) { return 0; }
+void runtime_aspect_view(double w, double h) { (void)w; (void)h; }
+int runtime_aspect_step(void) { return -1; }

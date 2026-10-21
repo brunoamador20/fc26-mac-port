@@ -158,7 +158,11 @@ static NSString *shortcut_text(void){
  else if(w==2560&&h==1440)picture=@(TOTK_UI("原生 2K","native 2K"));
  else if(w!=1920||h!=1080)picture=[NSString stringWithFormat:@(TOTK_UI("原生 %u×%u","native %u×%u")),w,h];
  else picture=@(TOTK_UI("关闭","off"));
- return [NSString stringWithFormat:@(TOTK_UI("快捷键说明\n1  提示：全部 → 只显示 FPS → 隐藏\n2  补帧：当前 %@（按键切换）\n3  画质：当前 %@（按键切换）\n4  21:9 宽屏：开 / 关\n5  边缘平滑（MetalFX 时间性）：%@","Shortcuts\n1  Overlays: all → FPS only → off\n2  Interpolation: %@ (current; press to cycle)\n3  Picture: %@ (current; press to cycle)\n4  Ultrawide 21:9: on / off\n5  Edge smoothing (MetalFX Temporal): %@")),[NSString stringWithUTF8String:interp],picture,
+ /* key 4 (runtime/aspect_patch.h): 16:9 -> fit to the window -> 21:9 (or TOTK_ASPECT's ratio) */
+ int step=runtime_aspect_step();float ar=runtime_aspect_now();
+ NSString *ratio=!ar?@"16:9":fabsf(ar*9-21)<0.05f?@"21:9":[NSString stringWithFormat:@"%.2f:1",ar];
+ NSString *shape=step==1?[NSString stringWithFormat:@(TOTK_UI("适配窗口 %@","fit to window %@")),ratio]:step==2?ratio:@"16:9";
+ return [NSString stringWithFormat:@(TOTK_UI("快捷键说明\n1  提示：全部 → 只显示 FPS → 隐藏\n2  补帧：当前 %@（按键切换）\n3  画质：当前 %@（按键切换）\n4  画面比例：当前 %@（按键切换）\n5  边缘平滑（MetalFX 时间性）：%@","Shortcuts\n1  Overlays: all → FPS only → off\n2  Interpolation: %@ (current; press to cycle)\n3  Picture: %@ (current; press to cycle)\n4  Aspect ratio: %@ (current; press to cycle)\n5  Edge smoothing (MetalFX Temporal): %@")),[NSString stringWithUTF8String:interp],picture,shape,
   taa_enabled()?@(TOTK_UI("开","on")):@(TOTK_UI("关","off"))];
 }
 -(instancetype)initWithFrame:(NSRect)frame{if((self=[super initWithFrame:frame])){int compact=hud_compact();self.wantsLayer=YES;self.layer.backgroundColor=[NSColor colorWithCalibratedWhite:0.04 alpha:compact?0.72:0.86].CGColor;self.layer.cornerRadius=compact?7:14;self.layer.borderWidth=1;self.layer.borderColor=[NSColor colorWithCalibratedWhite:1 alpha:compact?0.14:0.2].CGColor;
@@ -235,7 +239,7 @@ static void front_sync_drawable(void){
  NSView *v=window.contentView;if(!v||!metalLayer)return;
  CGFloat s=window.backingScaleFactor>0?window.backingScaleFactor:1,ts=drawable_scale();CGSize px=CGSizeMake(round(v.bounds.size.width*s*ts),round(v.bounds.size.height*s*ts));
  if(px.width<1||px.height<1||CGSizeEqualToSize(metalLayer.drawableSize,px))return;
- metalLayer.contentsScale=s;metalLayer.drawableSize=px;fprintf(stderr,"[totk] window drawable %.0fx%.0f (scale %.0f)\n",px.width,px.height,s);
+ metalLayer.contentsScale=s;metalLayer.drawableSize=px;fprintf(stderr,"[totk] window drawable %.0fx%.0f (scale %.0f)\n",px.width,px.height,s);runtime_aspect_view(px.width,px.height);
 }
 @interface TOTKWindowDelegate:NSObject<NSWindowDelegate>
 @end
@@ -295,7 +299,7 @@ void runtime_front_run(void(*callback)(void)){
   front_install_menu();
   window.collectionBehavior|=NSWindowCollectionBehaviorFullScreenPrimary;
   window.contentView=[[TOTKInputView alloc] initWithFrame:NSMakeRect(0,0,ww,wh)];
-  metalLayer=[CAMetalLayer layer];metalLayer.device=MTLCreateSystemDefaultDevice();metalLayer.pixelFormat=MTLPixelFormatBGRA8Unorm;metalLayer.drawableSize=CGSizeMake(ww,wh);
+  metalLayer=[CAMetalLayer layer];metalLayer.device=MTLCreateSystemDefaultDevice();metalLayer.pixelFormat=MTLPixelFormatBGRA8Unorm;metalLayer.drawableSize=CGSizeMake(ww,wh);runtime_aspect_view(ww,wh);
   metalLayer.framebufferOnly=NO;window.contentView.wantsLayer=YES;window.contentView.layer=metalLayer;
   bootOverlay=[[NSView alloc] initWithFrame:window.contentView.bounds];bootOverlay.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
   bootOverlay.wantsLayer=YES;bootOverlay.layer.backgroundColor=[NSColor colorWithCalibratedRed:0.035 green:0.075 blue:0.09 alpha:1].CGColor;
