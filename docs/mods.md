@@ -75,6 +75,31 @@ The game reads the installed folder as it is; it does not follow the folder you 
 If the new version removes files, set the old version folder aside (or delete it after a backup) before
 copying, or the removed files stay active. Generate the manifest again after every change.
 
+### Breath of the Wild
+
+The Breath of the Wild app reads its mods from
+
+```text
+~/Library/Application Support/MacNativeGames/BotW/mods/botw160
+```
+
+Everything above applies: copy the mod's RomFS contents into that folder and generate the manifest with the app,
+naming the folder `botw160` or passing `--version botw160`:
+
+```bash
+MODDIR="$HOME/Library/Application Support/MacNativeGames/BotW/mods/botw160"
+python3 games/totk/scripts/make_mod_manifest.py "$MODDIR" --app "/path/to/Breath of the Wild.app"
+```
+
+Check `grep "mods/botw160 checked" ~/Library/Logs/MacNativeGames/botw.log | tail -1` after the start.
+
+- A mod that makes a resource larger than the original also has to ship the matching resource size table,
+  `System/Resource/ResourceSizeTable.product.srsizetable`, built for 1.6.0. Without it the game reserves the original
+  size and stops at start (for example a translation whose `Pack/Bootup_<lang>.pack` grew).
+- The game's language follows the app's preferred language, which also picks the language folder a mod must use (`USen` for
+  `en-US`). To give only this game another language:
+  `defaults write org.macnativegames.botw AppleLanguages -array en-US`.
+
 ### Notes
 
 - Do not edit `manifest.tsv` by hand; regenerate it.
@@ -160,6 +185,29 @@ Mac App 只加载 **RomFS mod**。`exefs/` 里的文件不会被加载（运行�
 游戏读取的是安装目录本身，不会跟着你下载或解压的那个文件夹走。如果新版本删掉了旧版本的某些
 文件，先把旧的版本目录整个移走（或备份后删除）再复制，否则被删掉的文件会继续生效。每次改动后
 都要重新生成清单。
+
+### 旷野之息
+
+旷野之息 App 从这里读取 mod：
+
+```text
+~/Library/Application Support/MacNativeGames/BotW/mods/botw160
+```
+
+上面的说明都适用：把 mod 的 RomFS 内容复制进这个目录，再用 App 生成清单（目录名为 `botw160`，或加 `--version botw160`）：
+
+```bash
+MODDIR="$HOME/Library/Application Support/MacNativeGames/BotW/mods/botw160"
+python3 games/totk/scripts/make_mod_manifest.py "$MODDIR" --app "/path/to/Breath of the Wild.app"
+```
+
+启动后用 `grep "mods/botw160 checked" ~/Library/Logs/MacNativeGames/botw.log | tail -1` 检查。
+
+- 如果 mod 让某个资源比原版大，还必须带上为 1.6.0 生成的资源大小表
+  `System/Resource/ResourceSizeTable.product.srsizetable`。没有它游戏会按原版大小分配，启动时就会停止（例如
+  `Pack/Bootup_<语言>.pack` 变大的翻译 mod）。
+- 游戏语言跟随 App 的首选语言，也由它决定 mod 要放在哪个语言目录（`en-US` 对应 `USen`）。只给这个游戏换语言：
+  `defaults write org.macnativegames.botw AppleLanguages -array en-US`。
 
 ### 注意
 
