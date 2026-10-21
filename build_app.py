@@ -42,7 +42,7 @@ For iPhone/iPad: Xcode 26+ with iOS/Metal toolchains, plus xcodegen, CMake and N
 Optional: Xcode's Metal toolchain (xcodebuild -downloadComponent MetalToolchain) compiles the startup shaders into the
 app, so moving or rebuilding it does not repeat that work at launch.
 """
-import argparse, concurrent.futures, hashlib, json, os, platform, shutil, struct, subprocess, sys, threading, time
+import argparse, concurrent.futures, glob, hashlib, json, os, platform, shutil, struct, subprocess, sys, threading, time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
@@ -1109,6 +1109,9 @@ def data_bundle(tree, version, logs, *, bundle_id=BUNDLE_ID):
         CFBundleIdentifier=f'{bundle_id}.data.{version}', CFBundleName='Game data', CFBundlePackageType='BNDL',
         CFBundleShortVersionString=VERSIONS[version]['display_version'], CFBundleVersion='1')))
     run(['codesign', '--force', '--sign', '-', tmp], logs / f'sign-data-{version}.log')
+    # Checked once here, where the 16 GB are hashed anyway; an app carrying this bundle checks only its own seal (which
+    # records this bundle's signature), not --deep (55 s on each packaging, 2026-10-21).
+    run(['codesign', '--verify', '--strict', tmp], logs / f'verify-data-{version}.log')
     stamp.unlink(missing_ok=True)
     if bundle.exists():
         shutil.rmtree(bundle)
@@ -1168,9 +1171,46 @@ def keep_game_data(new, old, *, verify=app_seal_valid):
 
 def sign_app(app, logs):
     # Seal the bundle, including Info.plist and game resources. Copied helper
-    # executables keep their existing signatures and byte identity.
+    # executables keep their existing signatures and byte identity. Checked once by install_app.
     run(['codesign', '--force', '--sign', '-', app], logs / 'sign-app.log')
-    run(['codesign', '--verify', '--deep', '--strict', app], logs / 'verify-app-signature.log')
+
+
+def remove_in_background(path):
+    """Delete a replaced app after the new one is in place, without waiting: its 90,000 shader files took 25 s."""
+    subprocess.Popen(['rm', '-rf', str(path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def install_app(new, out, *, verify=None, remove=None):
+    """Put the signed app `new` at `out`. Its seal is checked once, before the installed app is touched: by keep_game_data
+    when the installed game data is kept, else here (a seal that does not verify stops the build and leaves the installed
+    app as it is). The installed .app folder stays and takes the new contents; the replaced contents go to a folder whose
+    name is not an app's, deleted in the background with any left by an earlier packaging. Returns whether the installed
+    game data was kept."""
+    verify, remove = verify or app_seal_valid, remove or remove_in_background
+    kept = out.exists() and keep_game_data(new, out, verify=verify)
+    if not kept and not verify(new):
+        raise BuildError(f'{new}: the new app\'s signature does not verify (codesign --verify --strict); the installed app is unchanged')
+    leftovers = sorted(out.parent.glob(f'{glob.escape(out.name)}.replaced-*'))
+    if out.exists():
+        # The .app folder itself stays: macOS keeps its first-run check of an app (Gatekeeper / XProtect read the whole
+        # bundle, 185-200 s for the 17 GB one) with the folder. A new folder with the same contents was scanned again,
+        # new Contents in the same folder were not (2026-10-22). Everything in it moves out, the new Contents move in.
+        old = out.with_name(f'{out.name}.replaced-{os.getpid()}')
+        if old.exists():
+            remove_tree(old)
+        old.mkdir()
+        for entry in list(out.iterdir()):
+            entry.rename(old / entry.name)
+        for entry in list(new.iterdir()):
+            entry.rename(out / entry.name)
+        new.rmdir()
+        leftovers.append(old)
+    else:
+        new.rename(out)
+    for path in leftovers:
+        remove(path)
+    return kept
 
 
 def step_app(tree, out, logs, *, version="v0", game='totk'):
@@ -1241,11 +1281,8 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
             say('4/4 app: replacement is ready; waiting for the running game to close before updating it')
             notified = time.monotonic()
         time.sleep(2)
-    if out.exists() and keep_game_data(tmp, out):
+    if install_app(tmp, out):
         say('4/4 app: the game data is unchanged; kept the installed copy, so the first start need not verify it again')
-    if out.exists():
-        remove_tree(out)
-    tmp.rename(out)
 
 
 def last_json(log):
@@ -1597,7 +1634,7 @@ def main(argv):
         say(f'4/4 app: assembling {out}')
         step_app(tree, out, logs, version='botw160', game='botw')
         run([LSREGISTER, '-f', out], logs / 'register-app.log')
-        say('4/4 app: macOS checks the new app once (a few minutes for the 16 GB bundle)')
+        say('4/4 app: macOS checks the app once (seconds when this app folder was checked before, a few minutes for a new one)')
         t1 = time.time()
         r = subprocess.run([out / f'Contents/MacOS/{APPS["botw"][2]}', '--check'], capture_output=True, text=True, timeout=1800)
         if r.returncode: raise BuildError(f'the app does not start: {(r.stdout + r.stderr).strip()}')
@@ -1667,7 +1704,7 @@ def main(argv):
     # macOS scans a new app the first time it runs (minutes for 16 GB, with nothing on screen): run it once here, in its
     # check-only mode, so the player's first start is immediate.
     if args.platform=='macos':
-        say('4/4 app: macOS checks the new app once (a few minutes for the 16 GB bundle)')
+        say('4/4 app: macOS checks the app once (seconds when this app folder was checked before, a few minutes for a new one)')
         t1 = time.time()
         r = subprocess.run([out / 'Contents/MacOS/TOTK', '--check'], capture_output=True, text=True, timeout=1800)
         if r.returncode: raise BuildError(f'the app does not start: {(r.stdout + r.stderr).strip()}')

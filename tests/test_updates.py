@@ -235,7 +235,7 @@ class Updates(unittest.TestCase):
                 (tree/f'build/shader-seed/{version}/seed-manifest.json').write_text(json.dumps(dict(
                     version=version, chain='totk-native-v6-unverified', shaders=8000,
                     files={'pso_manifest.tsv':hashlib.sha256(b'test').hexdigest()})))
-                with patch.object(build_app, 'sign_app') as signing:
+                with patch.object(build_app, 'app_seal_valid', return_value=True), patch.object(build_app, 'sign_app') as signing:
                     build_app.step_app(tree,out,self.root/'logs',version=version)
                 signing.assert_called_once_with(out.with_name(out.name+'.partial'),self.root/'logs')
                 info=plistlib.loads((out/'Contents/Info.plist').read_bytes())
@@ -273,7 +273,7 @@ class Updates(unittest.TestCase):
         (seed/'seed-manifest.json').write_text(json.dumps(dict(version='v112',chain='totk-native-v6-unverified',shaders=1,files={'x':'0'*64})))
         def fake_clone(_source, target):
             target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(b'synthetic payload')
-        with patch.object(build_app,'clone',side_effect=fake_clone),patch.object(build_app,'sign_app') as signing:
+        with patch.object(build_app,'clone',side_effect=fake_clone),patch.object(build_app,'app_seal_valid',return_value=True),patch.object(build_app,'sign_app') as signing:
             with self.assertRaisesRegex(build_app.BuildError,'invalid prepared startup shader seed'):
                 build_app.step_app(tree,out,self.root/'logs',version='v143')
             signing.assert_not_called()
@@ -295,7 +295,7 @@ class Updates(unittest.TestCase):
             self.assertEqual(old.read_bytes(),b'old running app')
             checks.append(True)
             return SimpleNamespace(stdout=str(old.resolve())+'\n' if len(checks)==1 else '')
-        with patch.object(build_app,'data_bundle',side_effect=fake_data_bundle),patch.object(build_app,'clone',side_effect=fake_clone),patch.object(build_app,'sign_app'), \
+        with patch.object(build_app,'data_bundle',side_effect=fake_data_bundle),patch.object(build_app,'clone',side_effect=fake_clone),patch.object(build_app,'sign_app'),patch.object(build_app,'app_seal_valid',return_value=True), \
              patch.object(build_app.subprocess,'run',side_effect=processes),patch.object(build_app.time,'sleep') as pause:
             build_app.step_app(tree,out,self.root/'logs',version='v143')
         self.assertEqual(len(checks),2);pause.assert_called_once_with(2)

@@ -25,7 +25,8 @@ class DataBundle(unittest.TestCase):
         signs = []
         real = build_app.run
         def run(cmd, log, **kw):
-            signs.append(cmd); return real(cmd, log, **kw)
+            if '--sign' in cmd: signs.append(cmd)
+            return real(cmd, log, **kw)
         with patch.object(build_app, 'run', side_effect=run), patch.object(build_app, 'say'):
             bundle = build_app.data_bundle(self.tree, 'v143', self.logs)
         return bundle, len(signs)
@@ -58,7 +59,8 @@ class DataBundle(unittest.TestCase):
         self.assertTrue(link.is_symlink())
         self.assertFalse(os.path.isabs(os.readlink(link)))   # inside the app wherever it goes
         self.assertEqual(link.read_bytes(), b'romfs image')
-        build_app.sign_app(app, self.logs)   # codesign --verify --deep --strict passes
+        build_app.sign_app(app, self.logs)
+        self.assertTrue(build_app.app_seal_valid(app))   # the app's own seal, which records the data bundle's signature
 
 
 if __name__ == '__main__':

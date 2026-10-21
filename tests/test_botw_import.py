@@ -143,7 +143,7 @@ class BotwImport(unittest.TestCase):
             version='botw160', chain='totk-native-v6-unverified', shaders=2000,
             files={'pso_manifest.tsv': hashlib.sha256(b'test').hexdigest()})))
         out = self.root / 'BotW.app'
-        with patch.object(build_app, 'sign_app'):
+        with patch.object(build_app, 'sign_app'), patch.object(build_app, 'app_seal_valid', return_value=True):
             build_app.step_app(tree, out, self.root / 'logs', version='botw160', game='botw')
         self.assertTrue((out / 'Contents/MacOS/BotW').is_file())
         self.assertFalse((out / 'Contents/Resources/totk/extracted/botw160/aoc').exists())
