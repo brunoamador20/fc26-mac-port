@@ -393,6 +393,27 @@ static pidx g_pools;                            // TOTK: sorted by address (nvn_
 static pidx_query_cache g_pool_queries;          // all accesses hold g_mu, including invalidation and stats
 static _Atomic int g_pool_query_on = -1, g_pool_query_check;
 static uint64_t g_pool_query_checked;
+/* TOTK: the replay resolves dozens of buffer addresses per draw (12k draws a frame in a shrine); each lookup took g_mu and
+   searched the index, 0.5 ms of the submit thread a frame (Time Profiler, 1.4.3 shrine, 2026-10-21; about half of it the
+   lock). Each thread keeps the last pools it resolved, valid while g_pool_gen (bumped under g_mu on every pool add / remove)
+   is unchanged. Only a pool no other pool overlaps is kept, so a hit is the pool the locked search returns; it is already
+   resident (pool_res ran), and only its removal takes it out of the residency set, which bumps the generation.
+   TOTK_POOL_TLS=0 or flag pool_tls 0 turns it off; TOTK_POOL_TLS_CHECK=1 or flag pool_tls_check 1 compares every hit with
+   the locked search. */
+#define POOL_TLS_N 8
+typedef struct { uintptr_t lo, hi, base; void *buf; uint64_t gpu, gen; } pool_tls_ent;
+static _Thread_local pool_tls_ent g_ptls[POOL_TLS_N];
+static _Thread_local unsigned g_ptls_next;
+static _Atomic uint64_t g_pool_gen = 1;
+static _Atomic int g_pool_tls_on = -1, g_pool_tls_check;
+static uint64_t g_pool_tls_hits, g_pool_tls_misses, g_pool_tls_verified;   // statistics (the replay thread does nearly all lookups)
+static int pool_tls_on(void) {
+    int v = atomic_load_explicit(&g_pool_tls_on, memory_order_relaxed);
+    if (v < 0) { const char *e = getenv("TOTK_POOL_TLS"); int want = !(e && !atoi(e)), expected = -1;
+        atomic_compare_exchange_strong(&g_pool_tls_on, &expected, want); v = atomic_load(&g_pool_tls_on);
+        e = getenv("TOTK_POOL_TLS_CHECK"); if (e && atoi(e)) atomic_store(&g_pool_tls_check, 1); }
+    return v;
+}
 static int pool_query_on(void) {
     int value = atomic_load_explicit(&g_pool_query_on, memory_order_relaxed);
     if (value < 0) {
@@ -669,7 +690,7 @@ void mtl_pool_add(const void *mem, uint64_t size) {
     pidx_ent ent = {lo, hi, a, (__bridge void *)buf, buf.gpuAddress, mem, 0};
     if (pool_res_all()) { res_add(buf); ent.res = 1; g_pool_res_n++; g_pool_res_bytes += hi - lo; }
     if (!pidx_insert(&g_pools, &ent)) MDIE("内存池表扩容失败（%d 个）", g_pools.n);
-    pidx_query_invalidate(&g_pool_queries);
+    pidx_query_invalidate(&g_pool_queries); atomic_fetch_add_explicit(&g_pool_gen, 1, memory_order_release);
     g_pool_adds++; g_pool_bytes += hi - lo;
     [g_keep addObject:buf];
     pthread_mutex_unlock(&g_mu);
@@ -683,7 +704,7 @@ void mtl_pool_del(const void *mem) {
     pthread_mutex_lock(&g_mu);
     pidx_ent ent;
     if (pidx_remove(&g_pools, mem, &ent)) {
-        pidx_query_invalidate(&g_pool_queries);
+        pidx_query_invalidate(&g_pool_queries); atomic_fetch_add_explicit(&g_pool_gen, 1, memory_order_release);
         __unsafe_unretained id<MTLBuffer> buf = (__bridge id<MTLBuffer>)ent.buf;
         lo = ent.lo; hi = ent.hi; g_pool_bytes -= hi - lo;
         if (ent.res) { res_remove(buf); g_pool_res_n--; g_pool_res_bytes -= hi - lo; }
@@ -702,19 +723,56 @@ static pidx_ent *pool_query(uintptr_t addr, uint64_t len) { // caller holds g_mu
     }
     return p;
 }
-int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
+static const pool_tls_ent *pool_tls_find(uintptr_t a, uint64_t len) {
+    uintptr_t end = a + (uintptr_t)len;
+    if (end < a) return NULL;
+    uint64_t gen = atomic_load_explicit(&g_pool_gen, memory_order_acquire);
+    for (int i = 0; i < POOL_TLS_N; i++) {
+        const pool_tls_ent *e = &g_ptls[i];
+        if (e->gen == gen && e->lo <= a && a < e->hi && end <= e->hi) return e;   // a < hi: an address at the end may also start the next pool
+    }
+    return NULL;
+}
+static void pool_tls_keep(const pidx_ent *p) {   // caller holds g_mu; p was just made resident
+    int i = (int)(p - g_pools.e);
+    if (i < 0 || i >= g_pools.n) return;
+    if (i > 0 && g_pools.maxhi[i - 1] > p->lo) return;          // an earlier pool reaches into this one
+    if (i + 1 < g_pools.n && g_pools.e[i + 1].lo < p->hi) return; // a later pool starts inside this one
+    g_ptls[g_ptls_next++ % POOL_TLS_N] = (pool_tls_ent){p->lo, p->hi, p->base, p->buf, p->gpu, atomic_load_explicit(&g_pool_gen, memory_order_relaxed)};
+}
+// The locked search; with keep, a pool it finds is remembered by this thread.
+static int pool_lookup_locked(uint64_t addr, uint64_t len, void **buf, uint64_t *base, uint64_t *gpu, int keep) {
     pthread_mutex_lock(&g_mu);
     pidx_ent *p = pool_query((uintptr_t)addr, len);
-    if (p) { pool_res(p); *buf = p->buf; *off = addr - p->base; }
+    if (p) { pool_res(p); *buf = p->buf; *base = p->base; *gpu = p->gpu; if (keep) pool_tls_keep(p); }
     pthread_mutex_unlock(&g_mu);
     return p != NULL;
 }
+static int pool_lookup(uint64_t addr, uint64_t len, void **buf, uint64_t *base, uint64_t *gpu) {
+    if (!pool_tls_on()) return pool_lookup_locked(addr, len, buf, base, gpu, 0);
+    const pool_tls_ent *e = pool_tls_find((uintptr_t)addr, len);
+    if (!e) { g_pool_tls_misses++; return pool_lookup_locked(addr, len, buf, base, gpu, 1); }
+    g_pool_tls_hits++;
+    if (atomic_load_explicit(&g_pool_tls_check, memory_order_relaxed)) {
+        void *b2; uint64_t base2, gpu2;
+        if (!pool_lookup_locked(addr, len, &b2, &base2, &gpu2, 0) || b2 != e->buf || base2 != e->base || gpu2 != e->gpu)
+            MDIE("pool lookup cache disagrees at %#llx+%#llx", (unsigned long long)addr, (unsigned long long)len);
+        g_pool_tls_verified++;
+    }
+    *buf = e->buf; *base = e->base; *gpu = e->gpu;
+    return 1;
+}
+int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
+    uint64_t base, gpu;
+    if (!pool_lookup(addr, len, buf, &base, &gpu)) return 0;
+    *off = addr - base;
+    return 1;
+}
 int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_t *gpu) {
-    pthread_mutex_lock(&g_mu);
-    pidx_ent *p = pool_query((uintptr_t)addr, len);
-    if (p) { pool_res(p); *buf = p->buf; *off = addr - p->base; *gpu = p->gpu + *off; }
-    pthread_mutex_unlock(&g_mu);
-    return p != NULL;
+    uint64_t base, pgpu;
+    if (!pool_lookup(addr, len, buf, &base, &pgpu)) return 0;
+    *off = addr - base; *gpu = pgpu + *off;
+    return 1;
 }
 
 // ---------- 提交 ----------
@@ -1861,6 +1919,7 @@ static const char *cctx_snap(void);   // 这次提交里有什么（出错时打
    20/25 10.63, 120/150 10.97), field 11.13 -> 11.02, Lookout Landing 11.22 -> 11.03; GPU time unchanged. */
 static id<MTL4RenderCommandEncoder> g_enc;   // tentative declarations: defined with the render pass state further down
 static uint64_t g_stat_draw;
+static uint64_t g_pass_draw0;   // g_stat_draw when the current render pass opened (TOTK_TIMELINE)
 static int g_chunk_first = -1, g_chunk_size, g_sub_chunks;
 static _Atomic int g_chunk_first_request = -1, g_chunk_size_request = -1;
 static uint64_t g_chunk_mark, g_chunk_commits;
@@ -2345,6 +2404,8 @@ void dm_gfx_set_flag(const char *name, int v) {
     if (!strcmp(name, "vertex_streams")) { atomic_store(&g_vertex_streams_on, v != 0); MLOG("[flag] vertex_streams = %d", v != 0); return; }
     if (!strcmp(name, "arg_bind_cache")) { atomic_store(&g_arg_bind_cache_on, v != 0); MLOG("[flag] arg_bind_cache = %d", v != 0); return; }
     if (!strcmp(name, "pool_query_cache")) { atomic_store(&g_pool_query_on, v != 0); MLOG("[flag] pool_query_cache = %d", v != 0); return; }
+    if (!strcmp(name, "pool_tls")) { (void)pool_tls_on(); atomic_store(&g_pool_tls_on, v != 0); MLOG("[flag] pool_tls = %d", v != 0); return; }
+    if (!strcmp(name, "pool_tls_check")) { atomic_store(&g_pool_tls_check, v != 0); MLOG("[flag] pool_tls_check = %d", v != 0); return; }
     if (!strcmp(name, "pool_query_check")) { atomic_store(&g_pool_query_check, v != 0); MLOG("[flag] pool_query_check = %d", v != 0); return; }
     if (!strcmp(name, "texture_plan")) { (void)texture_plan_on(); atomic_store(&g_texture_plan_on, v != 0); MLOG("[flag] texture_plan = %d", v != 0); return; }
     if (!strcmp(name, "texture_plan_check")) { (void)texture_plan_on(); atomic_store(&g_texture_plan_check, v != 0); MLOG("[flag] texture_plan_check = %d", v != 0); return; }
@@ -3619,6 +3680,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     { uint64_t hits, misses, checked;
       pthread_mutex_lock(&g_mu); hits=g_pool_queries.hits; misses=g_pool_queries.misses; checked=g_pool_query_checked; pthread_mutex_unlock(&g_mu);
       MLOG("[pool-query-cache] enabled=%d hits=%llu misses=%llu checked=%llu",pool_query_on(),(unsigned long long)hits,(unsigned long long)misses,(unsigned long long)checked); }
+    MLOG("[pool-tls] enabled=%d hits=%llu misses=%llu verified=%llu",pool_tls_on(),(unsigned long long)g_pool_tls_hits,(unsigned long long)g_pool_tls_misses,(unsigned long long)g_pool_tls_verified);
     MLOG("[shadow-index] enabled=%d hit=%llu miss=%llu verified=%llu",shadow_index_on(),(unsigned long long)g_shadow_index_hits,(unsigned long long)g_shadow_index_misses,(unsigned long long)g_shadow_index_verified);
     MLOG("[pkg-final-cache] enabled=%d kept=%llu", pkg_final_cache_on(), (unsigned long long)atomic_load(&g_pkg_final_kept));
     MLOG("贴图类型缓存已回收退役视图 %llu 个", (unsigned long long)g_type_retired_views);
@@ -4202,6 +4264,7 @@ static void rp_end(void) { if (g_enc) {
 #ifdef NVN_RT_RANGE_TEST
     int ranged=g_rt_range_active && !g_rt_range_pending;
 #endif
+    if (totk_tl_on()) totk_tl(TL_PASS_END, g_stat_pass, g_stat_draw - g_pass_draw0);
     sd_finish(); enc_r_end(g_enc); zskip_commit_clears(); g_enc = nil; g_rt_merged = 0; g_lay.active = 0;
     /* Diagnostic: inspect each full-size HDR render target immediately after its
        producer pass, on the same Metal 4 queue and before later passes reuse it. */
@@ -4580,6 +4643,8 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
     g_enc = enc_r_begin(pd);
     args_dirty_all();
     g_stat_pass++;
+    g_pass_draw0 = g_stat_draw;
+    if (totk_tl_on()) totk_tl(TL_PASS_BEGIN, g_stat_pass, 0);   // TOTK_TIMELINE: draws per pass
     if (lay_n) { g_lay.active = 1; g_lay.base = g_lay.cur = lay_first; g_lay.count = lay_n; if (g_cg_force_layers) g_lay.cur = g_cg_cur;
         if (!g_lay.passes++) MLOG("[totk] layered pass: first one covers layers %d-%d of a %lux%lu level", lay_first, lay_first + lay_n - 1, (unsigned long)g_pass.tw, (unsigned long)g_pass.th);
         PD("L %llu 分层通道 层 %d-%d", g_stat_pass, lay_first, lay_first + lay_n - 1); }
