@@ -38,6 +38,7 @@
   - 从文件打开的存档再加内容、再写盘，只写出新加的部分；
   - 单条文件：打开 0.08 ms、约 35 KB，从它建管线 0.04 ms。磁盘上每个约 55 KB（含着色器中间格式），3,750 条约 206 MB。
 - 系统版本、GPU 或翻译链变了时，整个 `pipelines/` 目录删掉重建（`pipelines/identity.json`）。
+- `TOTK_SHADER_DEVICE_LIBS=1`（Mac，工具用）：像 iOS 一样加载种子里预编的 `.metallib`，例如 iOS 种子。这样在 Mac 上建出的管线描述的正是 iPhone 加载的库，可以用 `metal-tt` 离线生成 iPhone GPU 的存档。
 
 iPhone 14 实测（同一存档，进游戏后）：
 

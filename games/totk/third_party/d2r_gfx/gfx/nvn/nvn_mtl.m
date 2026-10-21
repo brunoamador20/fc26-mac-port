@@ -4991,11 +4991,18 @@ static NvShader *shader_load(NSString *pc, int stage) {
     NSString *lp = [NSString stringWithFormat:@"%@/%@.metallib", g_msl_dir, pc];
     id<MTLLibrary> lib = nil;
     if (rt) {
-#if TARGET_OS_IPHONE
+#if !TARGET_OS_IPHONE
+        /* TOTK_SHADER_DEVICE_LIBS=1 (Mac, tools): load the seed's prebuilt .metallib files the way iOS does, e.g. the iOS
+           seed, so the pipelines made here describe the very libraries an iPhone loads (pipeline archives built on the
+           Mac for an iPhone GPU with metal-tt). */
+        static int device_libs = -1; if (device_libs < 0) { const char *dl = getenv("TOTK_SHADER_DEVICE_LIBS"); device_libs = dl && !strcmp(dl, "1"); }
+        if (device_libs)
+#endif
+        {
         // iOS: the variant precompiled on the Mac (ios/tools/build_metallibs.sh, same options) if it came in shaders.pack
         NSString *rt_lib = totk_rt_file([pc stringByAppendingString:@".metallib"]);
         if ([NSFileManager.defaultManager fileExistsAtPath:rt_lib]) { lib = lib_from_file(rt_lib, &e); if (!lib) MLOG("【红】预编译着色器库加载失败 %s：%s（改为现编）", pc.UTF8String, e.localizedDescription.UTF8String); else atomic_fetch_add(&g_rt_prebuilt, 1); }
-#endif
+        }
         if (!lib) { NSData *raw = [NSData dataWithContentsOfFile:rt_src options:0 error:&e];
 #if !TARGET_OS_IPHONE
                     if (raw && (lib = shader_lib_prebuilt(raw))) atomic_fetch_add(&g_rt_prebuilt, 1);
@@ -6840,7 +6847,8 @@ static void warm_start(void) {
        world when the lists were skipped too). */
     if (g_par_valid || (g_par_on && par_fill_light())) {
         NSMutableArray<NSString *> *lists = [NSMutableArray array];
-        for (NSString *p in paths) if (![p hasSuffix:@"shader-seed/pso_manifest.tsv"]) [lists addObject:p];
+        NSString *prepared = [g_shmap_path.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"shader-seed/pso_manifest.tsv"];
+        for (NSString *p in paths) if (![p isEqualToString:prepared]) [lists addObject:p];   // exactly the shader-only list (iOS's own seed folder is also called shader-seed)
         cached = @[];
         if (g_par_valid) {
             paths = lists;
