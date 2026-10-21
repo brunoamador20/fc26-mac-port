@@ -397,7 +397,7 @@ static int pool_query_on(void) {
     int value = atomic_load_explicit(&g_pool_query_on, memory_order_relaxed);
     if (value < 0) {
         const char *env = getenv("TOTK_POOL_QUERY_CACHE");
-        int initial = env && atoi(env), expected = -1;
+        int initial = !(env && !atoi(env)), expected = -1;
         atomic_compare_exchange_strong(&g_pool_query_on, &expected, initial);
         value = atomic_load_explicit(&g_pool_query_on, memory_order_relaxed);
     }
@@ -827,7 +827,7 @@ static uint64_t g_usnap_index_hits, g_usnap_index_misses, g_usnap_index_verified
 static int g_usnap_index_negative;
 static int usnap_index_on(void) {
     int v=atomic_load(&g_usnap_index_on);
-    if(v<0){const char *e=getenv("TOTK_USNAP_INDEX");v=e && atoi(e);atomic_store(&g_usnap_index_on,v);}
+    if(v<0){const char *e=getenv("TOTK_USNAP_INDEX");v=!(e && !atoi(e));atomic_store(&g_usnap_index_on,v);}
     return v;
 }
 static void usnap_copy_one(usnap_t *c);
@@ -1153,7 +1153,7 @@ static int arg_bind_cache_on(void) {
     int value = atomic_load_explicit(&g_arg_bind_cache_on, memory_order_relaxed);
     if (value < 0) {
         const char *env = getenv("TOTK_ARG_BIND_CACHE");
-        int initial = env && atoi(env), expected = -1;
+        int initial = !(env && !atoi(env)), expected = -1;
         atomic_compare_exchange_strong(&g_arg_bind_cache_on, &expected, initial);
         value = atomic_load_explicit(&g_arg_bind_cache_on, memory_order_relaxed);
     }
@@ -1558,7 +1558,7 @@ static uint64_t g_shadow_index_hits, g_shadow_index_misses, g_shadow_index_verif
 static int g_shadow_index_stale_probe;
 static int shadow_index_on(void) {
     int v = atomic_load(&g_shadow_index_on);
-    if (v < 0) { const char *e=getenv("TOTK_SHADOW_INDEX"); v=e && atoi(e); atomic_store(&g_shadow_index_on,v); }
+    if (v < 0) { const char *e=getenv("TOTK_SHADOW_INDEX"); v=!(e && !atoi(e)); atomic_store(&g_shadow_index_on,v); }
     return v;
 }
 static unsigned shadow_index_slot(uint64_t lo, uint64_t size) {
@@ -2205,13 +2205,13 @@ uint64_t mtl_dead_serial_textures(void) { return g_dead_put_total; }
 // Host record of a packaged texture: the current MTLTexture, the upload stamp, and the global write generation at the last check
 typedef struct { uint64_t pf, type, w, h, z, levels, layers, samples, usage, storage; uint8_t swz[4]; } reup_key;   // TOTK: what tex_desc varies between mirrored textures (re-upload recycling, see reup_take)
 /* Same-shader argument blocks may survive intervening program changes only
-   while every binding/resource generation still matches. Default off. */
+   while every binding/resource generation still matches. On by default (TOTK_ARG_EPOCH=0 turns it off). */
 static _Atomic int g_arg_epoch_on = -1, g_arg_epoch_check;
 static _Atomic uint64_t g_arg_epoch_hits, g_arg_epoch_extra, g_arg_epoch_verified;
 static int g_arg_epoch_negative;
 static int arg_epoch_on(void) {
     int v = atomic_load_explicit(&g_arg_epoch_on, memory_order_relaxed);
-    if (v < 0) { const char *e = getenv("TOTK_ARG_EPOCH"); v = e && atoi(e); atomic_store(&g_arg_epoch_on, v);
+    if (v < 0) { const char *e = getenv("TOTK_ARG_EPOCH"); v = !(e && !atoi(e)); atomic_store(&g_arg_epoch_on, v);
         e = getenv("TOTK_ARG_EPOCH_CHECK"); atomic_store(&g_arg_epoch_check, e && atoi(e)); }
     return v;
 }
@@ -2219,7 +2219,7 @@ typedef struct {
     uint64_t pass, arena, bindings, registry, serial, dirty, snapshot_drops, config;
 } arg_epoch_key;
 /* Texture/sampler slots can remain identical when only uniform bindings change.
-   Keep the publication lock, resource generations and pass lifetime. Default off. */
+   Keep the publication lock, resource generations and pass lifetime. On by default (TOTK_TEX_SLOTS=0 turns it off). */
 typedef struct { uint64_t pass, arena, registry, serial, dirty, owned, stage; } tex_slot_key;
 typedef struct {
     tex_slot_key key;
@@ -2232,7 +2232,7 @@ static int g_tex_slots_negative;
 static int tex_slots_on(void) {
     int v = atomic_load_explicit(&g_tex_slots_on, memory_order_relaxed);
     if (v < 0) {
-        const char *e = getenv("TOTK_TEX_SLOTS"); v = e && atoi(e); atomic_store(&g_tex_slots_on, v);
+        const char *e = getenv("TOTK_TEX_SLOTS"); v = !(e && !atoi(e)); atomic_store(&g_tex_slots_on, v);
         e = getenv("TOTK_TEX_SLOTS_CHECK"); atomic_store(&g_tex_slots_check, e && atoi(e));
     }
     return v;
@@ -2243,7 +2243,7 @@ static _Atomic int g_anom_requested = -1;
 static uint64_t g_texture_plan_total, g_texture_plan_selected, g_texture_plan_verified;
 static int texture_plan_on(void) {
     int v = atomic_load(&g_texture_plan_on);
-    if (v < 0) { const char *e = getenv("TOTK_TEXTURE_PLAN"); v = e && atoi(e); atomic_store(&g_texture_plan_on, v);
+    if (v < 0) { const char *e = getenv("TOTK_TEXTURE_PLAN"); v = !(e && !atoi(e)); atomic_store(&g_texture_plan_on, v);
         e = getenv("TOTK_TEXTURE_PLAN_CHECK"); atomic_store(&g_texture_plan_check, e && atoi(e)); }
     return v;
 }
@@ -2259,7 +2259,7 @@ static _Atomic uint64_t g_pkg_final_kept;
 static int reup_offer(id<MTLTexture> old, const reup_key *key);
 static int pkg_final_cache_on(void) {
     int v = atomic_load(&g_pkg_final_cache);
-    if (v < 0) { const char *e = getenv("TOTK_PKG_FINAL_CACHE"); v = e && atoi(e); atomic_store(&g_pkg_final_cache, v); }
+    if (v < 0) { const char *e = getenv("TOTK_PKG_FINAL_CACHE"); v = !(e && !atoi(e)); atomic_store(&g_pkg_final_cache, v); }
     return v;
 }
 @interface NvPkg : NSObject { @public id<MTLTexture> tex; uint64_t stamp, seen, hash, owned_gen; int tracked, owned, hashed; reup_key key; uint64_t chash, csub, used; uintptr_t lo, hi; uint8_t *edge; uint32_t eh, et; int edge_want; } @end   // lo / hi (TOTK): the texture's memory (pkg_orphan_report)   // tracked (TOTK): result of the last nvn_dirty_tracked   // hash：DM_NVN_DIRTYCHECK 时上传内容的全量哈希 | hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK
