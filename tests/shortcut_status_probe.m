@@ -18,16 +18,7 @@ void dm_gfx_set_flag(const char *name, int value) {
     else if (!strcmp(name, "mfx_upscale")) mfxup_set(value);
     else abort();
 }
-/* Key 4's step and ratio as runtime/aspect_patch.h reports them (its cycle is tested in tests/test_aspect.c). */
-static int aspect_step = -1;
-static float aspect_ratio;
-int runtime_aspect_step(void) { return aspect_step; }
-float runtime_aspect_now(void) { return aspect_ratio; }
-int runtime_aspect_toggle(void) {
-    if (aspect_step < 0) return 0;
-    aspect_step = (aspect_step + 1) % 3; aspect_ratio = aspect_step == 1 ? 1.6f : aspect_step == 2 ? 21.0f / 9 : 0;
-    return 1;
-}
+void shortcut_test_aspect_init(double view);
 static void press(unsigned key) {
     runtime_input_key_synthetic(key, 1);
     runtime_input_key_synthetic(key, 0);
@@ -77,7 +68,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     press(23); tick(); expect(panel, @"Edge smoothing (MetalFX Temporal): on");
     press(23); tick(); expect(panel, @"Edge smoothing (MetalFX Temporal): off");
     expect(panel, @"Aspect ratio: 16:9");
-    aspect_step = 0;
+    shortcut_test_aspect_init(1.6);   /* key 4 becomes available; a 16:10 window */
     press(21); tick(); expect(panel, @"Aspect ratio: fit to window 1.60:1");
     press(21); tick(); expect(panel, @"Aspect ratio: 21:9");
     press(21); tick(); expect(panel, @"Aspect ratio: 16:9");
