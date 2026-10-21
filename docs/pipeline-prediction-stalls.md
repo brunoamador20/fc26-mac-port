@@ -19,11 +19,11 @@ planes a pass attaches is decided only when it begins, `ds_scan`); wrong guesses
   (`prog_prediction_stages`); the program's active variant is not changed. New programs are left to their draws.
 - **The scan keeps the future pass's render targets** (`R.rt`), so a fragment variant's signature describes the
   pass it will draw in.
-- **Bounded.** At most 8,192 commands, 32 keys per queue and 2 ms per scan; keys with the pass's own attachments
+- **Bounded.** At most 8,192 commands, 64 keys per queue and 2 ms per scan; keys with the pass's own attachments
   start as soon as they are found, the other attach modes after the scan. `TOTK_PSO_PREDICT_SCAN`,
   `TOTK_PSO_PREDICT_KEYS` (up to 160) and `TOTK_PSO_PREDICT_US` change the three limits; the log prints them once.
   The time is checked between commands, so it is not a hard bound on descriptors or driver calls.
-- **Stale guesses are freed.** The pending table has 384 slots. A guess no draw takes (a wrong attach mode, a
+- **Stale guesses are freed.** The pending table has 768 slots. A guess no draw takes (a wrong attach mode, a
   draw that did not happen) used to keep its slot forever; after a few scans the table was full and nothing was
   predicted any more. Now a completed guess no draw took is freed two submissions later. A slot whose compile has
   not finished is never reused: its worker still writes into it.
@@ -34,6 +34,38 @@ planes a pass attaches is decided only when it begins, `ds_scan`); wrong guesses
   statistics line every 100 scans (`并行预编 至提交 …`: scans and the budget that ended them, pipelines started,
   pipelines taken by draws and how long draws waited for them, guesses refused because the table was full, stale
   guesses freed).
+
+## Scanning on after a budget
+
+A submission was scanned once, at its first miss. When that scan stopped at a budget (in a world entry almost always
+the 8,192 commands), the rest of the submission was never predicted and its new pipelines were compiled on the
+submission thread one after another (265 in one frame, 2.6 s, on entering a new area). Now the next miss of the
+submission scans again from there, up to 32 times (`TOTK_PSO_RESCANS`, 0 = one scan as before); keys already compiling
+are skipped, so each scan moves on. The statistics line also counts the pipelines compiled on the submission thread.
+
+1.2.1, Apple M4 Max, a copy of a save on the Great Sky Island, loaded from the title, a walk and a camera turn, with the
+warm-up lists and the pipeline archive off (`DM_PSO_MANIFEST=off TOTK_PIPELINE_ARCHIVE=0`), so the world entry meets its
+pipelines for the first time. Old = the build without this change. Runs in this order; Metal's own cache gets warmer
+with every run, so compare a run with its neighbours:
+
+| run | pipeline time inside long frames | compile frames over 100 ms | longest compile frame |
+|---|---|---|---|
+| old | 35.8 s | 35 | 8.7 s |
+| new | 5.5 s | 12 | 2.7 s |
+| old | 7.1 s | 9 | 5.1 s |
+| new | 2.9 s | 8 | 1.35 s |
+| old | 2.3 s | 9 | 0.86 s |
+| new | 1.05 s | 6 | 0.42 s |
+
+Against the mean of its two neighbours: old 7.1 s / 5.1 s against new 4.2 s / 2.0 s around it, new 2.9 s / 1.35 s
+against old 4.7 s / 3.0 s around it (pipeline time / longest compile frame).
+
+The pipelines compiled on the submission thread stay about the same (920-1,040 a run): in a world entry most of them
+belong to a binding variant the program has not drawn yet, which a scan cannot see (`prog_prediction_stages`). They get
+cheaper because the background compiles of the guesses around them come first. The cost, counted at about submission
+21,000: three times the scans (100 -> 300, 0.42 -> 0.58 ms each) and about 2.7 times the background work (about 1,750
+-> 4,700 pipelines started, most of them guesses no draw takes). The steady frame after the entry did not change (frame
+p50 7.4-7.7 ms, GPU p50 3.6-3.9 ms in both builds). Smaller Macs, iPhone and iPad are untested.
 
 ## Still done on the submission thread
 
