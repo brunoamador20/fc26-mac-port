@@ -218,6 +218,7 @@ NSArray<NSString *> *totk_rt_list(void) {
     return [all.allObjects sortedArrayUsingSelector:@selector(compare:)];
 }
 static NSString *index_path(NSString *shader) { return [totk_rt_dir() stringByAppendingFormat:@"/%@.variants", shader]; }
+static NSMutableArray *variants_of(NSString *shader);
 static NSArray *variants_file(NSString *path) {
     NSData *d = [NSData dataWithContentsOfFile:path];
     NSArray *a = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil;
@@ -417,6 +418,15 @@ NSString *totk_rt_variant(NSString *shader, int stage, const uint8_t *control, c
     variant_record(shader, rq, translate(&g_svc, rq, started), existed, started, 0);
     pthread_mutex_unlock(&g_rt_lock);
     return rq[@"variant"];
+}
+
+NSArray<NSString *> *totk_rt_known_variants(NSString *shader) {
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    pthread_mutex_lock(&g_rt_lock);
+    for (NSDictionary *v in variants_of(shader))
+        if ([v isKindOfClass:NSDictionary.class] && [v[@"variant"] isKindOfClass:NSString.class]) [out addObject:v[@"variant"]];
+    pthread_mutex_unlock(&g_rt_lock);
+    return out;
 }
 
 void totk_rt_counts(uint64_t *fresh, int64_t *total, uint64_t *last_new_ns) {
