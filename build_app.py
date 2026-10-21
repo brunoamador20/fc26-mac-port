@@ -919,6 +919,31 @@ def metal_compiler():
 METAL_FLAGS = ['-fmetal-math-mode=safe']
 
 
+def variant_folder(game):
+    """Where the game keeps the source of each patched shader variant it compiled while it was played (nvn_mtl.m
+    variant_library: sampler border colours, missing varyings, the layer index, no depth output, MetalFX roles), named by
+    its SHA-256: the player's shader cache, ~/Library/Application Support/MacNativeGames/<game>/shader-cache/rt-<chain>."""
+    return Path.home()/'Library/Application Support/MacNativeGames'/APPS[game][2]/'shader-cache/rt-totk-native-v6-unverified/variants'
+
+
+def variant_sources(game):
+    """The recorded variant sources whose name is their SHA-256 (anything else is left out). Compiled ahead with the
+    startup shaders, they are loaded by the game instead of compiled when a draw first needs them: 80-225 ms each on the
+    submit thread with a cold Metal cache, and most of those draws cannot be deferred (2026-10-22)."""
+    folder = variant_folder(game)
+    found = sorted(folder.glob('*.metal')) if folder.is_dir() else []
+    return [p for p in found if len(p.stem) == 64 and sha256(p) == p.stem]
+
+
+def place_variant_libs(tree, res, version):
+    """The compiled variants step_shader_libs listed, in the app's shader-libs beside the startup shaders'."""
+    listed = tree/f'build/shader-libs/variants-{version}.json'
+    for digest in json.loads(listed.read_text()) if listed.is_file() else []:
+        lib = tree/f'build/shader-libs/{digest}.metallib'
+        if len(digest) == 64 and all(c in '0123456789abcdef' for c in digest) and lib.is_file():
+            clone(lib, res/'build/shader-libs'/lib.name)
+
+
 def step_shader_libs(tree, logs, *, version='v0'):
     """Compile the startup shaders ahead of time. Metal's own cache of shaders compiled at launch does not follow the
     app to a folder whose path has another length (step_warm_metal); these files go inside the app. Each is named by the
@@ -942,7 +967,11 @@ def step_shader_libs(tree, logs, *, version='v0'):
         digest = sha256(src)
         if not (libs/f'{digest}.metallib').is_file():
             todo.setdefault(digest, src)
-    say(f'3/4 shaders: compiling {len(todo)} of {len(sources)} startup shaders ahead of time')
+    variants = variant_sources('botw' if version.startswith('botw') else 'totk')
+    for src in variants:
+        if not (libs/f'{src.stem}.metallib').is_file():
+            todo.setdefault(src.stem, src)
+    say(f'3/4 shaders: compiling {len(todo)} of {len(sources)} startup shaders and {len(variants)} patched variants ahead of time')
 
     def compile_one(item):
         digest, src = item
@@ -957,6 +986,7 @@ def step_shader_libs(tree, logs, *, version='v0'):
     log = logs/'shader-libs.log'
     log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text('\n'.join(failed))
+    (libs/f'variants-{version}.json').write_text(json.dumps([p.stem for p in variants if (libs/f'{p.stem}.metallib').is_file()]))
     if failed:   # the game compiles these from source at launch, as before
         say(f'   {len(failed)} shaders did not compile ahead of time; they are compiled at launch ({log})')
 
@@ -1155,6 +1185,7 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
             lib = tree/f'build/shader-libs/{report["files"][src.name]}.metallib'
             if lib.is_file():
                 clone(lib, res/'build/shader-libs'/lib.name)
+        place_variant_libs(tree, res, version)
     # after the checks above: signing it is slow
     place_data_bundle(data_bundle(tree, version, logs, bundle_id=bundle_id), tmp, res, version)
     clone(tree / 'build/app-launcher', tmp / f'Contents/MacOS/{executable}')
