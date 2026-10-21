@@ -1088,10 +1088,10 @@ def step_code_botw(tree, botw, game, keys, env, logs):
     report_path.write_text(json.dumps(report, indent=2) + '\n')
 
 
-def step_data_botw(tree, botw, game, keys, logs, *, shared_fonts=None, update=None):
+def step_data_botw(tree, botw, game, keys, logs, *, firmware=None, shared_fonts=None, update=None):
     """The base + 1.6.0 RomFS merged from the card image (games/botw/scripts/extract_romfs.py, hactool BKTR), the two
     add-on content volumes (extract_aoc_romfs.py), and the shared fonts: this card's system update partition is empty, so
-    they come from --shared-fonts or from a previous build in the work folder."""
+    they come from --shared-fonts, from an unpacked firmware (--firmware) or from a previous build in the work folder."""
     version, expected = 'botw160', BOTW160
     py = tree / '.venv/bin/python'
     folder = tree / f'extracted/{version}/romfs'
@@ -1142,19 +1142,26 @@ def step_data_botw(tree, botw, game, keys, logs, *, shared_fonts=None, update=No
                 check(f'add-on content {i}', report['romfs_sha256'], want['sha256'])
     fonts = tree / 'extracted/firmware/shared-fonts'
     if not fonts_valid(fonts):
-        if not shared_fonts:
-            raise BuildError('Breath of the Wild needs --shared-fonts <folder with the six verified .bfttf files> (a Tears of '
-                             'the Kingdom build extracts them from that card into its work folder, extracted/firmware/shared-fonts); '
-                             'this card has no system update partition to take them from')
-        report = font_report(shared_fonts)
-        if shared_fonts.resolve() != fonts.resolve():
+        if shared_fonts:
+            report = font_report(shared_fonts)
+            if shared_fonts.resolve() != fonts.resolve():
+                if fonts.exists():
+                    shutil.rmtree(fonts)
+                fonts.mkdir(parents=True)
+                for f in report['fonts']:
+                    name = f"{f['type']}-{f['name']}.bfttf"
+                    shutil.copy2(shared_fonts / name, fonts / name)
+            (fonts / 'manifest.json').write_text(json.dumps(report, indent=2) + '\n')
+        elif firmware:
+            say('2/4 data: extracting the system shared fonts from the firmware')
             if fonts.exists():
                 shutil.rmtree(fonts)
-            fonts.mkdir(parents=True)
-            for f in report['fonts']:
-                name = f"{f['type']}-{f['name']}.bfttf"
-                shutil.copy2(shared_fonts / name, fonts / name)
-        (fonts / 'manifest.json').write_text(json.dumps(report, indent=2) + '\n')
+            run([py, 'scripts/extract_shared_fonts.py', '--keys', keys, '--firmware', firmware, '--output', fonts],
+                logs / 'shared_fonts.log', cwd=tree)
+        else:
+            raise BuildError('Breath of the Wild needs --firmware <unpacked firmware NCA directory> or --shared-fonts <folder with '
+                             'the six verified .bfttf files> (a Tears of the Kingdom build extracts them into its work folder, '
+                             'extracted/firmware/shared-fonts); this card has no system update partition to take them from')
         validate_fonts(fonts)
 
 
@@ -1255,7 +1262,7 @@ def main(argv):
         if update:
             update = prepare_update_container(tree, update, keys, logs)
         step_code_botw(tree, botw, update or game, keys, env, logs)
-        step_data_botw(tree, botw, game, keys, logs, shared_fonts=shared_fonts, update=update)
+        step_data_botw(tree, botw, game, keys, logs, firmware=firmware, shared_fonts=shared_fonts, update=update)
         step_shaders_botw(tree, botw, logs)
         step_shader_libs(tree, logs, version='botw160')
         step_binary(tree, game, keys, {**env, 'SHADER_LIST': str(BOTW_LIST)}, logs, version='botw160', title='01007ef00011e000')
