@@ -38,7 +38,7 @@
   - 从文件打开的存档再加内容、再写盘，只写出新加的部分；
   - 单条文件：打开 0.08 ms、约 35 KB，从它建管线 0.04 ms。磁盘上每个约 55 KB（含着色器中间格式），3,750 条约 206 MB。
 - 系统版本、GPU 或翻译链变了时，整个 `pipelines/` 目录删掉重建（`pipelines/identity.json`）。
-- 往一个新存档里加管线时，Metal 会在用户缓存目录里建一个工作目录（`com.apple.gpuarchiver/gpuarchiver-*`，约 380 KB），写完以后没有进程再打开它，但 Metal 一直不删，进程退出也不删。一条管线一个文件，所以每写一条就留下一个：一分钟的第一次运行留下 432 个，一夜涨到 65,536 个、25 GB，到上限后再也建不出新目录。现在每次写完只删这次新出现的那个（写存档逐条进行，Mac 上这个目录是整个用户共用的，不碰别的程序的目录）；iOS 上这个目录只属于本 App，启动时在后台清掉以前留下的。Mac 第一次运行实测：写 3,000 条，删 3,000 个，目录不再增加。
+- 往一个新存档里加管线时，Metal 会在用户缓存目录里建一个工作目录（`com.apple.gpuarchiver/gpuarchiver-*`，约 380 KB），写完以后没有进程再打开它，但 Metal 一直不删，进程退出也不删。一条管线一个文件，所以每写一条就留下一个：一分钟的第一次运行留下 432 个，一夜涨到 65,536 个、25 GB，到上限后再也建不出新目录。现在每次写完只删这次新出现的那个（写存档逐条进行，不碰别的程序的目录）。目录的位置：有 bundle id 的程序（iPhone / iPad 的 App、打包好的 Mac App）在 `<缓存目录>/<bundle id>/com.apple.gpuarchiver`，只属于本 App，启动时在后台清掉以前留下的；没有 bundle id 的程序（如 `build/totk-native-v143`）在 `<缓存目录>/com.apple.gpuarchiver`，整个用户共用。iOS 上 `confstr(_CS_DARWIN_USER_CACHE_DIR)` 取不到路径，所以缓存目录取 `confstr` 的和系统 Caches 目录两处，各查带和不带 bundle id 两种位置；第一版只看了 `confstr` 的，在 iPhone 上什么都没删（2026-10-21：一次第一次运行留下 239 个，改后启动时删掉 239 个，剩 0 个）。Mac 第一次运行实测：写 3,000 条，删 3,000 个，目录不再增加。
 - `TOTK_SHADER_DEVICE_LIBS=1`（Mac，工具用）：像 iOS 一样加载种子里预编的 `.metallib`，例如 iOS 种子。这样在 Mac 上建出的管线描述的正是 iPhone 加载的库，可以用 `metal-tt` 离线生成 iPhone GPU 的存档。
 
 iPhone 14 实测（同一存档，进游戏后）：
