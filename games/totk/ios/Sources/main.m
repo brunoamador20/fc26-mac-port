@@ -118,6 +118,11 @@ static void audio_observe(void) {
     if (freopen(log.fileSystemRepresentation,"w",stderr)) setvbuf(stderr,NULL,_IOLBF,0);
     setenv("TOTK_ROMFS",[res stringByAppendingPathComponent:@"romfs"].fileSystemRepresentation,1);
     setenv("TOTK_OPERATION_MODE","handheld",1);
+    // Game language: the Settings app (Settings.bundle › TOTK_LANG) stores the choice in our defaults; empty means the
+    // system language, which is what the runtime already follows. iOS 27 does not honour Info.plist LSEnvironment, so
+    // the value must be applied here. overwrite=0 keeps devicectl --environment-variables winning when testing from the Mac.
+    NSString *lang = [NSUserDefaults.standardUserDefaults stringForKey:@"TOTK_LANG"];
+    if (lang.length>0&&lang.length<8) setenv("TOTK_LANG",lang.UTF8String,0);
     setenv("TOTK_ROMFS_PATCHES",[res stringByAppendingPathComponent:@"romfs-patches"].fileSystemRepresentation,1);
     setenv("TOTK_ROMFS_PATCHES_OUT",[res stringByAppendingPathComponent:@"romfs-patches-out"].fileSystemRepresentation,1);
     setenv("TOTK_SHARED_FONTS",[res stringByAppendingPathComponent:@"shared-fonts"].fileSystemRepresentation,1);
