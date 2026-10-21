@@ -9,7 +9,12 @@
 //    1,024 per file 777 MB: Metal clones every pipeline description into one flatbuffer when it opens the file);
 //  - Metal searches every archive given to a pipeline (102 new pipelines with 142 files attached took 3.1 s);
 //  - an archive opened from a file and written again keeps only what was added after opening;
-//  - a one-pipeline file: 0.08 ms and about 35 KB to open, the pipeline from it 0.04 ms.
+//  - a one-pipeline file: 0.08 ms and about 35 KB to open, the pipeline from it 0.04 ms;
+//  - every archive a pipeline is added to leaves a build folder in the user cache folder (com.apple.gpuarchiver/
+//    gpuarchiver-*, about 380 KB, PersistentState and its parts) that Metal never removes, not even when the process exits:
+//    432 folders in a one-minute first run, 65,536 folders and 25 GB overnight until no folder could be made any more
+//    (reported by the other session, 2026-10-21). Nothing holds them open once the archive is written, so par_write
+//    removes the one its own write made (par_ga_*).
 // The key only finds the file: Metal checks the functions and state, so a wrong file is a miss, never a wrong pipeline.
 // On everywhere; TOTK_PIPELINE_ARCHIVE=0 turns it off. Valid for one OS version, GPU and translation chain
 // (pipelines/identity.json); otherwise the folder is removed. Included by nvn_mtl.m after MLOG and g_dev.
@@ -55,12 +60,46 @@ static NSString *par_hash(const void *bytes, size_t n) {
     for (int i = 0; i < 20; i++) [s appendFormat:@"%02x", d[i]];   // 160 bits name a file
     return s;
 }
+/* The folder Metal's archive builder works in (see the top). It is per user on the Mac, so other programs' folders are there
+   too: par_write removes only folders that appeared while it wrote, and writes one at a time (g_par_wmu) so a folder that
+   appears then is its own. */
+static pthread_mutex_t g_par_wmu = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t g_par_ga_removed;
+static NSString *par_ga_dir(void) {
+    static NSString *dir; static dispatch_once_t once;
+    dispatch_once(&once, ^{ char b[PATH_MAX]; if (confstr(_CS_DARWIN_USER_CACHE_DIR, b, sizeof b)) dir = [@(b) stringByAppendingPathComponent:@"com.apple.gpuarchiver"]; });
+    return dir;
+}
+static NSSet<NSString *> *par_ga_list(void) {
+    NSString *dir = par_ga_dir();
+    return [NSSet setWithArray:(dir ? [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] : nil) ?: @[]];
+}
+static void par_ga_remove_new(NSSet<NSString *> *before) {
+    NSMutableSet<NSString *> *made = [par_ga_list() mutableCopy]; [made minusSet:before];
+    for (NSString *name in made) {
+        if (![name hasPrefix:@"gpuarchiver-"]) continue;
+        NSError *e = nil;
+        if ([NSFileManager.defaultManager removeItemAtPath:[par_ga_dir() stringByAppendingPathComponent:name] error:&e]) atomic_fetch_add(&g_par_ga_removed, 1);
+        else { static _Atomic int said; if (atomic_fetch_add(&said, 1) < 4) MLOG("【红】管线存档：删不掉 Metal 留下的工作目录 %s（%s）", name.UTF8String, e.localizedDescription.UTF8String); }
+    }
+}
 // Once: the folder of this OS version, GPU and chain, and the keys it has files for.
 static void par_open_dir(id<MTLDevice> dev) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         if (!par_enabled()) return;
         NSFileManager *fm = NSFileManager.defaultManager;
+#if TARGET_OS_IPHONE
+        /* On iOS the folder is this app's own, so every build folder in it was left by an earlier run (a 4,615-pipeline first
+           run before par_ga_remove_new left 4,615). Removed in the background, holding the write lock so no write is under way. */
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            pthread_mutex_lock(&g_par_wmu); NSUInteger n = 0;
+            for (NSString *name in par_ga_list())
+                if ([name hasPrefix:@"gpuarchiver-"] && [NSFileManager.defaultManager removeItemAtPath:[par_ga_dir() stringByAppendingPathComponent:name] error:nil]) n++;
+            pthread_mutex_unlock(&g_par_wmu);
+            if (n) MLOG("管线存档：删掉以前留下的 Metal 工作目录 %lu 个", (unsigned long)n);
+        });
+#endif
         NSString *stamp_path = [par_dir() stringByAppendingPathComponent:@"identity.json"];
         NSData *sd = [NSData dataWithContentsOfFile:stamp_path];
         NSDictionary *stamp = sd ? [NSJSONSerialization JSONObjectWithData:sd options:0 error:nil] : nil;
@@ -102,17 +141,23 @@ static id<MTLBinaryArchive> par_archive_for(id<MTLDevice> dev, NSString *key) {
 static void par_write(id<MTLDevice> dev, NSString *key, id desc) {
     pthread_mutex_lock(&g_par_mu); BOOL have = [g_par_have containsObject:key]; pthread_mutex_unlock(&g_par_mu);
     if (have) return;   // another variant under the same key: keep the first
-    NSError *e = nil;
-    id<MTLBinaryArchive> a = [dev newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:&e];
-    BOOL ok = a && ([desc isKindOfClass:MTLRenderPipelineDescriptor.class] ? [a addRenderPipelineFunctionsWithDescriptor:desc error:&e]
-                                                                           : [a addComputePipelineFunctionsWithDescriptor:desc error:&e]);
+    NSError *e = nil; BOOL ok;
     NSString *path = par_file(key), *temp = [path stringByAppendingString:@".tmp"];
-    if (ok) ok = [a serializeToURL:[NSURL fileURLWithPath:temp] error:&e] && rename(temp.fileSystemRepresentation, path.fileSystemRepresentation) == 0;
+    pthread_mutex_lock(&g_par_wmu);
+    NSSet<NSString *> *before = par_ga_list();
+    @autoreleasepool {
+        id<MTLBinaryArchive> a = [dev newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:&e];
+        ok = a && ([desc isKindOfClass:MTLRenderPipelineDescriptor.class] ? [a addRenderPipelineFunctionsWithDescriptor:desc error:&e]
+                                                                          : [a addComputePipelineFunctionsWithDescriptor:desc error:&e]);
+        if (ok) ok = [a serializeToURL:[NSURL fileURLWithPath:temp] error:&e] && rename(temp.fileSystemRepresentation, path.fileSystemRepresentation) == 0;
+    }
+    par_ga_remove_new(before);
+    pthread_mutex_unlock(&g_par_wmu);
     if (!ok) { unlink(temp.fileSystemRepresentation);
                if (atomic_fetch_add(&g_par_write_failed, 1) < 4) MLOG("【红】管线存档：写不了（%s）", e ? e.localizedDescription.UTF8String : "改名失败"); return; }
     pthread_mutex_lock(&g_par_mu); [g_par_have addObject:key]; pthread_mutex_unlock(&g_par_mu);
     uint64_t n = atomic_fetch_add(&g_par_written, 1) + 1;
-    if (n % 500 == 0) MLOG("管线存档：这次已写 %llu 条", (unsigned long long)n);
+    if (n % 500 == 0) MLOG("管线存档：这次已写 %llu 条（删掉 Metal 留下的工作目录 %llu 个）", (unsigned long long)n, (unsigned long long)atomic_load(&g_par_ga_removed));
 }
 enum { PAR_IDLE_NS = 3000000000u };
 static _Atomic uint64_t g_par_last_compile_ns;   // set by pso_new / cs_new when they compiled
