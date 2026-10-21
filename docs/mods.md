@@ -47,10 +47,9 @@ used. In detail:
 
 ### Install a mod
 
-A build can do steps 2 and 3 for you, but only when you say so: `--mod <mod folder> --install-mod-romfs`.
-That flag replaces the version folder whole (it is emptied first - see [the data half](#data)), so the build
-leaves the folder alone unless you pass it. Without the flag, the build prints the two commands that fill it
-by hand; the steps below are the manual route either way.
+A build can perform steps 2 and 3 with `--mod <mod folder> --install-mod-romfs`. That flag replaces the version
+folder whole (it is emptied first - see [the mod's RomFS files](#data)); without it the build leaves the folder alone
+and prints the two commands that fill it by hand. The steps below are the manual route either way.
 
 1. Quit the game completely.
 2. Copy the mod's RomFS paths **directly** into the version folder. If the mod ships a `romfs/` folder,
@@ -61,7 +60,7 @@ by hand; the steps below are the manual route either way.
    rsync -a --exclude='.DS_Store' --exclude='manifest.tsv' "/path/to/mod/romfs/" "$MODDIR/"
    ```
 
-3. Generate the manifest with the app you built. Run this from the repository root:
+3. Generate the manifest with the built app. Run this from the repository root:
 
    ```bash
    python3.14 games/totk/scripts/make_mod_manifest.py "$MODDIR" \
@@ -73,9 +72,9 @@ by hand; the steps below are the manual route either way.
    It prints a line such as `...: 12 files (10 replaced, 2 added)`.
 
    `--check`, `--exclude` and `--version` belong to this script, not to `build_app.py` (which only takes
-   `--mod` and `--install-mod-romfs` and runs the script itself, `--check` included, whatever flags you did or
-   did not pass): `--check` reports what the manifest would hold and writes nothing, `--exclude` leaves a path to the
-   app's own version of it.
+   `--mod` and `--install-mod-romfs` and runs the script itself, `--check` included, whatever flags were passed):
+   `--check` reports what the manifest would hold and writes nothing, `--exclude` leaves a path to the app's own
+   version of it.
 
 4. Start the game and check the log:
 
@@ -87,46 +86,41 @@ by hand; the steps below are the manual route either way.
 
 ### Switching versions
 
-The game reads the installed folder as it is; it does not follow the folder you downloaded or unpacked.
+The game reads the installed folder as it is; it does not follow the folder that was downloaded or unpacked.
 If the new version removes files, set the old version folder aside (or delete it after a backup) before
 copying, or the removed files stay active. Generate the manifest again after every change.
 
 <a id="code"></a>
 ### Code patches (build time)
 
-A mod that changes the game's code ships `exefs/` files: an IPS or IPS32 patch, or the newer text form
-(`.pchtxt`). Those can be merged into the app while it is built:
+`--mod <mod folder>` merges a mod's main-module code patches into the app while it is built. The app has no module
+loader: at start it maps the three code modules it was built from (main, sdk and subsdk0), rewritten for Apple
+silicon and bound by SHA-256. The patches are applied to the verified retail main of the version being built before
+that rewrite, so the app still matches the hash it is bound to; RomFS (data) mods are unaffected and are still
+loaded at start.
 
 ```bash
 python3.14 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys" --mod "/path/to/Mod"
 ```
 
-Why the build and not the game: the app has no module loader. At start it maps the three code modules it
-was built from - main, sdk and subsdk0 - rewritten for Apple silicon and bound by SHA-256, and nothing in
-it reads a mod's `exefs/` the way Ryujinx or a Switch does (that is the extra-module support of v2, see
-below). So the code side goes in one step earlier: `--mod` merges the mod's main-module patches into the
-verified retail module before it is rewritten, and the app ships code that still matches its hash. RomFS
-(data) mods are not affected - they are still loaded at start, as described above.
+Several mods with code patches are combined in a mod manager first: TKMM's merged output is one folder with one
+`exefs/` and one `romfs/` (a manager may also pack several mods' records into one `.ips`), and `--mod` takes that
+folder as it is. Two patch files that change the same bytes are refused with both names, so a merge that overwrote
+one mod's change with another's stops the build instead of shipping silently.
 
-With several mods, let the mod manager do the combining: TKMM's merged output is one folder with one
-`exefs/` and one `romfs/` (a manager may also pack several mods' records into one `.ips`), so `--mod
-<that folder>` picks all of them up, and add `--install-mod-romfs` to have its `romfs/` replace the version
-folder. Two patch files that change
-the same bytes are refused with both names, so a merge that overwrote one mod's change with another's
-stops the build instead of shipping silently.
-
-The folder you pass holds the mod's files in the usual layout - `exefs/` for code, `romfs/` for data - and
-either half is enough: without `exefs/` there is no code to merge, and without `romfs/` the version folder is
-never touched. An `exefs/` that holds nothing to merge into main (`subsdk9`, a `main.npdm`) is a note, not a
-failure: the build carries on, its code half is in the app, and its data half takes effect once the folder is
-installed (`--install-mod-romfs`, or by hand). With `--update` the patch is merged into
-the updated module, which is the one the app runs.
+The folder holds the mod's files in the usual layout - `exefs/` for code, `romfs/` for data - and either half is
+enough: without `exefs/` there is no code to merge, and without `romfs/` the version folder is never touched. An
+`exefs/` that holds nothing to merge into main (`subsdk9`, a `main.npdm`) is a note, not a failure: the build
+carries on, its code half is in the app, and its data half takes effect once the folder is installed
+(`--install-mod-romfs`, or by hand). With `--update` the patch is merged into the updated module, which is the one
+the app runs.
 
 <a id="data"></a>
-### The data half: `--install-mod-romfs`
+### The mod's RomFS files: `--install-mod-romfs`
 
-The version folder is yours - another mod, or files you copied by hand, may be in it - so a build never writes
-there by itself. Add the flag when you want the build to fill it:
+A build does not write to the version folder (`~/Library/Application Support/MacNativeGames/TOTK/mods/<version>`)
+unless this flag is given: the folder may hold another mod's files, or files copied by hand. With the flag, the
+build replaces it with the mod's `romfs/` and writes its `manifest.tsv`:
 
 ```bash
 python3.14 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys" \
@@ -137,22 +131,21 @@ Then, at the very end, the build:
 
 - **empties** `~/Library/Application Support/MacNativeGames/TOTK/mods/<version>` and copies the mod's
   `romfs/` into it, so after the build the folder holds exactly this mod's RomFS and nothing else - a file
-  another mod put there, or one you copied yourself, is gone (a mod whose files the game would all take from
+  another mod put there, or one copied by hand, is gone (a mod whose files the game would all take from
   the app instead replaces nothing, and then the folder is left alone: see below);
 - writes `manifest.tsv` with `scripts/make_mod_manifest.py` against the app just built, so a path the app
-  replaces itself is left out (the heap table included: the 2K overlay carries the mod's heap sizes; the UI archive is
-  merged instead, which leaves the mod's own copy next to it as `<name>.mod-original` - the game ignores it), and a
-  misspelt path stops the build at its last step - the app is already written by then - with the reason instead of
-  stopping the game later.
+  replaces itself is left out (the heap table included: the 2K overlay carries the mod's heap sizes; the UI
+  archive is merged instead, which leaves the mod's own copy next to it as `<name>.mod-original` - the game
+  ignores it), and a misspelt path stops the build at its last step - the app is already written by then - with
+  the reason instead of stopping the game later.
 
-Your folder is not emptied for something untried: the build copies the mod's `romfs/` into a folder next to
-it, writes the manifest there, and moves the new copy into place only when it is complete (the old copy is
-deleted after that). Before any of it, the manifest tool runs with `--check` on the mod's own folder, so a
-misspelt path stops the build while your folder still holds what it held; and a mod whose files the game would
-all take from the app instead (every one identical to the original, or one the app replaces itself) replaces
-nothing the game loads - then the build says so and leaves your folder alone rather than emptying it for a
-folder with no manifest. The build says what it is about to do when it starts (Ctrl-C there if it is not what
-you meant) and again right before the copy:
+The folder is not emptied until a complete replacement exists: the build copies the mod's `romfs/` into a folder
+next to it, writes the manifest there, and moves the new copy into place only when it is complete (the old copy
+is deleted after that). Before any of it, the manifest tool runs with `--check` on the mod's own folder, so a
+misspelt path stops the build while the version folder still holds what it held; and a mod whose files the game
+would all take from the app instead (every one identical to the original, or one the app replaces itself) replaces
+nothing the game loads - the build says so and leaves the folder alone rather than emptying it for a folder with no
+manifest. The build warns when it starts and again right before the copy:
 
 ```text
 --install-mod-romfs: the player's mod folder for the version this build makes will be EMPTIED and filled with
@@ -165,12 +158,12 @@ is deleted. Without the flag the build leaves the folder alone.
    .../mods/v143/manifest.tsv: 5229 files (4200 replaced, 1029 added)
 ```
 
-Without the flag the build leaves the folder untouched and prints the two commands that do it by hand, so
-nothing about your mods changes unless you ask for it.
+Without the flag the build leaves the folder untouched and prints the two commands that perform the copy and the
+manifest by hand.
 
-The game still loads this folder at start, exactly as before: nothing changed at run time, the build only does
-the copying and the manifest for you. The iPhone / iPad build has no player mod folder yet, so there `--mod`
-merges the code patches only (and `--install-mod-romfs` is refused there: there is no folder to fill).
+Nothing changes at run time: the game loads this folder and its manifest as before. The iPhone / iPad build has
+no player mod folder yet, so there `--mod` merges the code patches only (and `--install-mod-romfs` is refused
+there: there is no folder to fill).
 
 What the build does, in order:
 
@@ -187,21 +180,21 @@ What the build does, in order:
      `@disabled` switches the following section off again (a file that keeps an edit around without applying
      it), `@enabled` switches it back on, and `@stop` ends the file. A `@flag offset_shift 0x100` line is
      accepted - it names the 0x100-byte NSO header an IPS form counts, which these addresses already leave
-     out; any other shift, or another flag, is refused by file and line. That `@nsobid-` line is what ties
-     the file to this main, so the file may be named anything.
+     out; any other shift, or another flag, is refused by file and line. The `@nsobid-` line identifies
+     the target build, so the file name does not matter.
    - `.ips` / `.ips32`: applied as emulators apply them, whose offsets count the 0x100-byte NSO header,
      so the build subtracts 0x100. A record below 0x100, a truncated file or a missing `EOF` is an error.
      The file names neither its module nor its build, so it is read as a main patch only when it is named
      `main`, or after main's build id (`exefs/<build id>.ips`, the Atmosphere and mod-manager
      convention). Anything else is left out with a note: a patch for `sdk` or `subsdk9`, or one named
-     after another build of main. An `.ips` named `main` has no id to check, so name it after the build
-     id, or ship a `.pchtxt`, when you want that check.
+     after another build of main. An `.ips` named `main` has no id to check; naming it after the build
+     id, or shipping a `.pchtxt`, provides that check.
 
 3. Checks the result before building on it. The patch is refused, with the address and the reason, when
    it lands outside main's text, rodata or data (the padding after text is reserved), when two patch
    files change the same bytes, when it changes nothing, or when it touches a site the app patches
    itself - the 60 FPS and real-time frame-step sites, render/output resolution, ultrawide, cloth, and
-   the rewriter's registered cuts. Leave those features to the app (`TOTK_FPS60`, `TOTK_REALTIME`,
+   the rewriter's registered cuts. Those features are set by the app (`TOTK_FPS60`, `TOTK_REALTIME`,
    `TOTK_RENDER_RES`, `TOTK_OUTPUT_RES`, `TOTK_ASPECT`): the runtime re-checks the original instruction
    at each of its sites and stops the game if it changed.
 4. Rewrites the patched module for Apple silicon and binds the app to its SHA-256. The report in `--work`
@@ -218,15 +211,14 @@ What else a mod's `exefs/` may hold:
 | `*.pchtxt`, `*.ips`, `*.ips32` for main | merged into the build; an `.ips` must be named `main` or after main's build id, while a `.pchtxt` names its build in `@nsobid-` and may be named anything |
 | `main.npdm` | ignored with a note: the native loader never reads a module's metadata |
 | `subsdk9` and other extra code modules | **not loaded**, with a note in the build output and in the report: the app loads the three modules it was built from (main, sdk, subsdk0), so the module's own code never runs |
-| a whole replacement `main` | refused: ship a patch instead, so the build can check it against this version |
+| a whole replacement `main` | refused: a patch is required instead, so the build can check it against this version |
 | nothing for main (`subsdk9` alone, a `main.npdm` alone, even an empty `exefs/`) | noted, not refused: nothing is merged into main and the build carries on - its code is not in the app, and its data applies once the folder is installed |
 
 An extra module is how a mod built with a hooking framework (exlaunch and the like) changes code while
 the game runs: its trampolines never install here. Such a mod - The Second Quest is one - keeps its main
 patches and its whole RomFS, but not the part of its code changes that lives in that module. Making one
 work means the app growing a module loader (rewriting the module for Apple silicon and answering its
-service calls), which this version does not do; open an issue with the module and what it changes if you
-need it.
+service calls), which this version does not do.
 
 Changing the mod's code after a build means building again (the mod's bytes are part of the app), and a
 build with `--mod --install-mod-romfs` also replaces its data folder. Changing only RomFS files needs no build:
@@ -282,12 +274,12 @@ Check `grep "mods/botw160 checked" ~/Library/Logs/MacNativeGames/botw.log | tail
 - `make_mod_manifest.py` handles all of them itself: the UI archive is merged as above, and any other mod file whose
   path the app replaces is left out of the manifest (with a line saying so), because both overlays cannot be loaded. For
   the heap table the line says whether the app's 2K overlay carries the mod's sizes (`already carries these heap sizes`,
-  which the build arranges with `--mod`) or tells you to build with `--mod`.
-- A mod manager (TKMM, or Ryujinx's `mods/contents/<title id>/<name>`) hands you `exefs/` and `romfs/` in one folder:
-  pass that folder to `--mod` - its `exefs` patches are merged, and a manager's merged `.ips` may hold several mods'
-  records in one file - and add `--install-mod-romfs` to have the build replace the version folder with its `romfs/`
-  and write the manifest itself (no `--exclude` needed: the manager's heap table and the app's 2K overlay are
-  reconciled for you). Re-merge in the manager and build again after every change: the game checks every file's hash
+  which the build arranges with `--mod`) or says to build with `--mod`.
+- A mod manager (TKMM, or Ryujinx's `mods/contents/<title id>/<name>`) provides `exefs/` and `romfs/` in one folder:
+  `--mod` takes that folder - its `exefs` patches are merged, and a manager's merged `.ips` may hold several mods'
+  records in one file - and `--install-mod-romfs` has the build replace the version folder with its `romfs/` and
+  write the manifest itself (no `--exclude` needed: the manager's heap table and the app's 2K overlay are reconciled).
+  Re-merge in the manager and build again after every change: the game checks every file's hash
   at start. This is also how several mods with code patches are
   combined: merge them in the manager first, then build with `--mod <the manager's output folder>
   --install-mod-romfs`; the build refuses
@@ -360,9 +352,9 @@ never checks and Metal refuses to build; the app caps the chain at what the dime
 
 ### 安装步骤
 
-构建可以替你完成第 2、3 步，但只在你明确要求时：`--mod <mod 目录> --install-mod-romfs`。这个参数会把版本
-目录整个替换掉（先清空，见下文[数据部分](#data-zh)），所以不带它时构建不会碰这个目录。不带参数时，构建会在结束
-处打印手动执行的两条命令；下面是手动流程（构建做的是同一件事，只是先在旁边的目录里做好再整体换进来）。
+构建可以用 `--mod <mod 目录> --install-mod-romfs` 完成第 2、3 步。这个参数会把版本目录整个替换掉（先清空，
+见下文[模组的 RomFS 文件](#data-zh)）；不带它时构建不会碰这个目录，只在结束时打印手动执行的两条命令。下面是
+手动流程（构建做的是同一件事，只是先在旁边的目录里做好再整体换进来）。
 
 1. 先完全退出游戏。
 2. 把 mod 的 RomFS 路径**直接**放进版本目录。如果 mod 带一层 `romfs/` 文件夹，复制的是它里面的
@@ -373,7 +365,7 @@ never checks and Metal refuses to build; the app caps the chain at what the dime
    rsync -a --exclude='.DS_Store' --exclude='manifest.tsv' "/path/to/mod/romfs/" "$MODDIR/"
    ```
 
-3. 用你构建好的 App 生成清单。在仓库根目录执行：
+3. 用构建好的 App 生成清单。在仓库根目录执行：
 
    ```bash
    python3.14 games/totk/scripts/make_mod_manifest.py "$MODDIR" \
@@ -384,8 +376,8 @@ never checks and Metal refuses to build; the app caps the chain at what the dime
    文件的哈希，跳过与原始完全相同的文件，然后写入 `manifest.tsv`。成功时会打印类似
    `...: 12 files (10 replaced, 2 added)` 的一行。
 
-   `--check`、`--exclude`、`--version` 都是**这个脚本**的选项，不是 `build_app.py` 的（构建只有 `--mod` 和
-   `--install-mod-romfs`，无论你传不传这些参数，它都会自己带 `--check` 跑这个脚本）：`--check` 只报告清单会
+   `--check`、`--exclude`、`--version` 都是**这个脚本**的选项，不是 `build_app.py` 的（构建只接收 `--mod` 和
+   `--install-mod-romfs`，自己带 `--check` 调用这个脚本，与传入的参数无关）：`--check` 只报告清单会
    包含什么、不写任何文件；`--exclude` 把某个路径留给 App 自己的版本。
 
 4. 启动游戏，确认日志：
@@ -398,41 +390,38 @@ never checks and Metal refuses to build; the app caps the chain at what the dime
 
 ### 换版本时
 
-游戏读取的是安装目录本身，不会跟着你下载或解压的那个文件夹走。如果新版本删掉了旧版本的某些
+游戏读取的是安装目录本身，不会跟着下载或解压出来的那个文件夹走。如果新版本删掉了旧版本的某些
 文件，先把旧的版本目录整个移走（或备份后删除）再复制，否则被删掉的文件会继续生效。每次改动后
 都要重新生成清单。
 
 <a id="code-zh"></a>
 ### 代码补丁（构建时合并）
 
-改了游戏代码的 mod 会带 `exefs/` 文件：IPS、IPS32 补丁，或者新的文本格式 `.pchtxt`。这些可以在
-构建 App 时合并进去：
+`--mod <模组文件夹>` 在构建 App 时把模组主模块的代码补丁（IPS、IPS32，或文本格式 `.pchtxt`）合并进去。
 
 ```bash
 python3.14 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys" --mod "/path/to/Mod"
 ```
 
-为什么只能在构建时、而不是运行时：App 没有模块加载器。启动时它映射的是构建时的那三个代码模块（main、
-sdk、subsdk0），已经改写为 Apple 芯片版本并按 SHA-256 绑定，里面没有任何东西会像 Ryujinx 或 Switch 那样去
-加载 mod 的 `exefs/`（那是 v2 的额外模块支持，见下文）。所以代码这一半只能在更早一步进去：`--mod` 在改写
-之前把 mod 的主模块补丁合并进核对过的原版模块，App 里跑的仍是与哈希一致的那份代码。RomFS（数据）部分不受
-影响，仍按上面的说明在启动时加载。
+App 没有模块加载器：启动时它映射的是构建时的那三个代码模块（main、sdk、subsdk0），已经改写为 Apple 芯片版本
+并按 SHA-256 绑定。`--mod` 在改写之前把补丁应用到当前版本核对过的原版 main 上，所以构建出的 App 仍与它绑定的
+哈希一致；RomFS（数据）部分不受影响，仍按上面的说明在启动时加载。
 
-有多个 mod 时，让模组管理器去做合并这件事：TKMM 的合并输出就是一个文件夹，里面一套 `exefs/`、一套
-`romfs/`（管理器也可能把几个 mod 的记录合进同一个 `.ips`），`--mod <那个文件夹>` 会把它们一起收进来，
-再加上 `--install-mod-romfs`，它的 `romfs/` 才会替换对应版本的目录。两个补丁文件改到同一批字节时构建会拒绝并报出两个文件名，所以「合并时被另一个 mod
-覆盖」这种情况会停在构建阶段，不会不声不响地打进去。
+多个带代码补丁的 mod 先在模组管理器里合并：TKMM 的合并输出就是一个文件夹，里面一套 `exefs/`、一套
+`romfs/`（管理器也可能把几个 mod 的记录合进同一个 `.ips`），`--mod` 原样接收这个文件夹。两个补丁文件改到同一批
+字节时构建会拒绝并报出两个文件名，所以「合并时被另一个 mod 覆盖」这种情况会停在构建阶段，不会不声不响地打进去。
 
-传入的文件夹按 mod 的常见结构放文件——代码在 `exefs/`、数据在 `romfs/`；只有一半也可以：没有 `exefs/`
-就是没有代码要合并，没有 `romfs/` 时构建根本不会碰版本目录。`exefs/` 里没有可合并进 main 的东西（只有
+文件夹按 mod 的常见结构放文件——代码在 `exefs/`、数据在 `romfs/`；只有一半也可以：没有 `exefs/`
+就是没有代码要合并，没有 `romfs/` 时构建不会碰版本目录。`exefs/` 里没有可合并进 main 的东西（只有
 `subsdk9`、只有 `main.npdm`，甚至空的 `exefs/`）只算提示、不算失败：构建照常往下走，只是这个 mod 只生效数据
 那一半。带 `--update` 时补丁合并进更新后的模块，也就是 App 实际运行的那个。
 
 <a id="data-zh"></a>
-### 数据部分：`--install-mod-romfs`
+### 模组的 RomFS 文件：`--install-mod-romfs`
 
-版本目录是你的：里面可能有另一个 mod 的文件，也可能是你手动复制进去的。所以构建默认不会往那里写。想要构建
-替你装好，加上这个参数：
+不加这个参数时，构建不会写版本目录（`~/Library/Application Support/MacNativeGames/TOTK/mods/<version>`）：
+里面可能有另一个 mod 的文件，也可能是手动复制进去的。加上这个参数，构建会用模组的 `romfs/` 替换它并生成
+`manifest.tsv`：
 
 ```bash
 python3.14 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.keys" \
@@ -442,16 +431,17 @@ python3.14 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.ke
 这时构建最后会：
 
 - **清空** `~/Library/Application Support/MacNativeGames/TOTK/mods/<version>`，再把 mod 的 `romfs/` 复制进去，
-  所以构建结束后这个目录里就是这一个 mod 的 RomFS，没有别的——另一个 mod 放在那里的文件、你自己复制进去的
+  所以构建结束后这个目录里就是这一个 mod 的 RomFS，没有别的——另一个 mod 放在那里的文件、手动复制进去的
   文件都会被删掉（如果这个 mod 的文件最终一个都不会被游戏加载，那就什么都没替换，目录保持不动，见下文）；
 - 用 `scripts/make_mod_manifest.py` 对着刚构建好的 App 生成 `manifest.tsv`，所以 App 自己替换的路径会被排除
   （包括堆表：2K 覆盖文件已经带着 mod 的堆大小；UI 归档则是合并，模组原文件会以 `<name>.mod-original` 留在旁边，
   游戏不会读它）；路径大小写写错的会终止构建并给出原因，而不是等到启动时才停止。
 
-不会拿你的目录去试错：构建先把 mod 的 `romfs/` 复制到它旁边的一个目录里、在那里写好清单，确认完整之后才把新的一份
-换进来（旧的一份随后删除）。在此之前还会用 `--check` 在 mod 自己的目录上跑一遍清单工具，所以路径写错的 mod 会在你的
-目录还没被碰过时就停下；另外，如果这个 mod 的文件最终一个都不会被游戏加载（全部与原版相同，或者全是 App 自己会替换
-的文件），它其实什么都没替换——这时构建会说明并保持你的目录不动，而不是清空成一个没有清单的空目录。构建开始时就会醒目提示一次（不想继续就在这里 Ctrl-C），复制前再说一次：
+版本目录在完整副本就绪之前不会被清空：构建先把 mod 的 `romfs/` 复制到它旁边的一个目录里、在那里写好清单，确认完整
+之后才把新的一份换进来（旧的一份随后删除）。在此之前还会用 `--check` 在 mod 自己的目录上跑一遍清单工具，所以路径写错
+的 mod 会在版本目录还没被碰过时就停下；另外，如果这个 mod 的文件最终一个都不会被游戏加载（全部与原版相同，或者全是
+App 自己会替换的文件），它其实什么都没替换——这时构建会说明并保持版本目录不动，而不是清空成一个没有清单的空目录。
+构建开始时和复制前各提示一次：
 
 ```text
 --install-mod-romfs: the player's mod folder for the version this build makes will be EMPTIED and filled with
@@ -464,9 +454,9 @@ is deleted. Without the flag the build leaves the folder alone.
    .../mods/v143/manifest.tsv: 5229 files (4200 replaced, 1029 added)
 ```
 
-不带这个参数时，构建完全不碰这个目录，只打印手动执行的两条命令：你的 mod 环境不会因为你构建了一次就变化。
+不带这个参数时，构建完全不碰这个目录，只打印手动执行的两条命令。
 
-运行时没有任何变化，游戏仍然在启动时加载这个目录；只是复制和写清单这一步由构建替你做了。iPhone / iPad 构建
+运行时没有任何变化，游戏仍然在启动时加载这个目录和清单；构建只负责复制和写清单。iPhone / iPad 构建
 目前没有玩家 mod 目录，所以那里 `--mod` 只合并代码补丁（`--install-mod-romfs` 会被直接拒绝：没有可填的目录）。
 
 构建做的事，按顺序：
@@ -479,19 +469,17 @@ is deleted. Without the flag the build leaves the folder alone.
      的这种）。后面是 `<十六进制主地址> <十六进制字节>` 行，只有 `@enabled` 之后的行生效：`@disabled` 把后面的
      段落重新关掉（作者留着但不启用某段改动的写法），`@enabled` 再打开，`@stop` 结束整个文件。`@flag
      offset_shift 0x100` 这种行可以出现（它指的是 IPS 那种算法里的 0x100 字节 NSO 头，这里的地址本来就不含
-     它）；其它位移值或其它 flag 会按文件和行号拒绝。`@nsobid-` 那一行就是文件和这个 main 的绑定，所以文件名
-     可以随便起。
+     它）；其它位移值或其它 flag 会按文件和行号拒绝。`@nsobid-` 那一行决定目标 build，所以文件名任意。
    - `.ips` / `.ips32`：按模拟器的用法应用，其偏移量包含 0x100 字节的 NSO 头，构建时会减掉 0x100。
      偏移小于 0x100、文件截断、缺少 `EOF` 都算错误。这种文件本身不写模块名和 build id，所以只有名字是
      `main`，或者是 main 的 build id（`exefs/<build id>.ips`，Atmosphere 和模组管理器的约定）时才会
      当作 main 补丁读入；其余情况（给 `sdk`、`subsdk9` 的补丁，或者名字里是另一个 build id 的补丁）
-     会留出清单并提示。名字叫 `main` 的 `.ips` 没有 id 可核对，想要这道检查就按 build id 命名，或者
-     改成 `.pchtxt`。
+     会留出清单并提示。名为 `main` 的 `.ips` 没有 id 可核对；按 build id 命名，或改用 `.pchtxt`，才会有这项检查。
 
 3. 打完后先检查再往下走。以下情况会被拒绝，并指出地址和原因：补丁落在 main 的 text、rodata、data
    之外（text 之后的填充区是保留的）；两个补丁文件改同一批字节；补丁什么都没改；补丁改到了 App 自己
    打补丁的位置——60 帧与实时单帧步进的地址、渲染/输出分辨率、超宽屏、布料，以及改写器登记的 cut。
-   这些功能请交给 App（`TOTK_FPS60`、`TOTK_REALTIME`、`TOTK_RENDER_RES`、`TOTK_OUTPUT_RES`、
+   这些功能由 App 设置（`TOTK_FPS60`、`TOTK_REALTIME`、`TOTK_RENDER_RES`、`TOTK_OUTPUT_RES`、
    `TOTK_ASPECT`）：运行时会逐个核对那里原来的指令，被改了就直接停止游戏。
 4. 把打过补丁的模块改写为 Apple 芯片版本，App 按它的 SHA-256 绑定。`--work` 里的报告（1.0.0 是
    `analysis/phase12-validation.json`，其他版本是 `analysis/<version>-port/phase12-validation.json`，
@@ -506,13 +494,13 @@ mod 的 `exefs/` 里可能还有这些文件，构建这样处理：
 | 给 main 的 `*.pchtxt`、`*.ips`、`*.ips32` | 合并进构建；`.ips` 必须叫 `main` 或按 main 的 build id 命名，`.pchtxt` 由 `@nsobid-` 指定版本、文件名任意 |
 | `main.npdm` | 忽略并提示：原生加载器不读模块元数据 |
 | `subsdk9` 等额外代码模块 | **不加载**：构建输出和报告里都会注明；App 只加载构建时的三个模块（main、sdk、subsdk0），模块自己的代码不会运行 |
-| 整个替换的 `main` | 拒绝：请改成补丁，构建才能按版本核对 |
+| 整个替换的 `main` | 拒绝：只能用补丁，构建才能按版本核对 |
 | 没有可合并进 main 的东西（只有 `subsdk9`、只有 `main.npdm`，甚至空的 `exefs/`） | 只提示、不拒绝：main 不做任何合并，构建继续；这个 mod 的代码不进 App，数据部分要装进版本目录才生效 |
 
 用 exlaunch 这类 hook 框架做的 mod，运行时改代码的部分就在这种额外模块里：它的 trampoline 在本 App
 里不会安装。像 The Second Quest 这样的 mod，主模块补丁和整个 RomFS 都会生效，但依赖那个模块的那部分
 代码改动不会。要支持它就得让 App 具备模块加载能力（把模块也改写为 Apple 芯片版本，并实现它用到的
-服务），本版本没有做；需要的话请带上模块和它改了什么开个 issue。
+服务），本版本没有做。
 
 构建之后再改 mod 的代码就要重新构建（mod 的字节已经是 App 的一部分），而带 `--mod --install-mod-romfs` 的
 构建也会顺带替换它的数据目录。只改 RomFS 文件不需要构建：把文件放进版本目录、重新生成清单即可（上面的第 2、3
@@ -559,8 +547,8 @@ python3 games/totk/scripts/make_mod_manifest.py "$MODDIR" --app "/path/to/Breath
   - **堆表**由构建叠加：带 `--mod` 时 2K 覆盖文件是在模组那份堆表之上生成的；
   - 其余路径（比如 game-over 流程）留给 App，并打印说明排除了哪个文件。
 - 这些文件由 `make_mod_manifest.py` 自己处理：UI 归档按上面的方式合并，其它与 App 自身替换项相同的模组文件不会写进
-  清单（并打印一行说明），因为两份覆盖无法同时加载。堆表那一行会告诉你 App 是否已经带着这些堆大小
-  否则提示你用 `--mod` 重新构建。
+  清单（并打印一行说明），因为两份覆盖无法同时加载。堆表那一行说明 App 是否已经带着这些堆大小，
+  否则提示用 `--mod` 重新构建。
 - 模组管理器（TKMM，或 Ryujinx 的 `mods/contents/<title id>/<name>`）给出的是同一个文件夹里的 `exefs/` 和 `romfs/`：
   把这个文件夹交给 `--mod`（里面的 `exefs` 补丁会合并，管理器合并出来的 `.ips` 可能一个文件里装着好几个模组的记录），
   再加上 `--install-mod-romfs` 让构建把对应版本的 mods 目录整个换成它的 `romfs/` 并生成清单（不需要再手动
