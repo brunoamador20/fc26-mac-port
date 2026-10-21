@@ -5854,7 +5854,7 @@ static NSString *fs_src_without_depth(NvShader *fs);
 /* TOTK: samplers that clamp to a border colour Metal does not have (samp_border_custom) are emulated in the shader: the
    stage's sample calls on them return that colour when the coordinate is outside [0, 1]. border_key lists the stage's
    bound samplers that need it (argument id and colour; nil when none), border_src rewrites the MSL. */
-static NSString *border_key(NvShader *sh, int stage, float colours[][4], int aids[], int *n) {
+static NSString *border_key(NvShader *sh, int stage, float colours[][4], int aids[], unsigned axes[], int *n) {
     *n = 0;
     if (!atomic_load_explicit(&g_border_custom_any, memory_order_relaxed)) return nil;
     NSMutableString *key = nil;
@@ -5865,15 +5865,19 @@ static NSString *border_key(NvShader *sh, int stage, float colours[][4], int aid
         int sid = (int)((b->kind == NVN_RB_SAMPT ? S.tex[stage][b->reg] : S.samp[stage][b->reg]) >> 20);
         if (sid <= 0 || sid >= g_nsreg || !g_sreg_ok[sid] || !samp_border_custom(&g_sreg[sid])) continue;
         memcpy(colours[*n], g_sreg[sid].border, sizeof colours[*n]); aids[*n] = b->aid;
+        const samp_par *p = &g_sreg[sid];
+        axes[*n] = ((p->ws == 4 || p->ws == 5) ? 1u : 0u) |
+                   ((p->wt == 4 || p->wt == 5) ? 2u : 0u) |
+                   ((p->wr == 4 || p->wr == 5) ? 4u : 0u);
         if (!key) key = [NSMutableString string];
-        [key appendFormat:@"%d:%a,%a,%a,%a;", b->aid, colours[*n][0], colours[*n][1], colours[*n][2], colours[*n][3]];
+        [key appendFormat:@"%d:%u:%a,%a,%a,%a;", b->aid, axes[*n], colours[*n][0], colours[*n][1], colours[*n][2], colours[*n][3]];
         ++*n;
     }
     registry_unlock();
     if (key) sh->border_seen = 1;
     return key;
 }
-static NSString *border_src(NvShader *sh, NSString *src0, float colours[][4], const int aids[], int n) {
+static NSString *border_src(NvShader *sh, NSString *src0, float colours[][4], const int aids[], const unsigned axes[], int n) {
     NSString *src = src0; int patched = 0;
     for (int i = 0; i < n; i++) {   // SPIRV-Cross: "sampler <name> [[id(<aid>)]]" in the argument struct, used as tex.sample(spvDescriptorSet0.<name>, coord, ...)
         NSString *decl = [NSString stringWithFormat:@"sampler\\s+(\\w+)\\s*\\[\\[id\\(%d\\)\\]\\]", aids[i]];
@@ -5883,17 +5887,17 @@ static NSString *border_src(NvShader *sh, NSString *src0, float colours[][4], co
         NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:[NSString stringWithFormat:@"([\\w.]+)\\.sample\\((\\s*spvDescriptorSet0\\.%@\\s*,)", name] options:0 error:nil];
         patched += (int)[re numberOfMatchesInString:src options:0 range:NSMakeRange(0, src.length)];
         src = [re stringByReplacingMatchesInString:src options:0 range:NSMakeRange(0, src.length)
-                                      withTemplate:[NSString stringWithFormat:@"totk_border_sample(float4(%a, %a, %a, %a), $1,$2", colours[i][0], colours[i][1], colours[i][2], colours[i][3]]];
+                                      withTemplate:[NSString stringWithFormat:@"totk_border_sample(float4(%a, %a, %a, %a), %uu, $1,$2", colours[i][0], colours[i][1], colours[i][2], colours[i][3], axes[i]]];
     }
     if (!patched) { static int warned; if (!warned++) MLOG("[totk] shader %s: a sampler clamps to a border colour Metal lacks, but no sample call to emulate it was found", sh->key); return nil; }
     NSString *helper =   // 2D, 2D array and 3D textures test the normalized coordinate; other kinds (cube, depth) sample as before
-        @"template<typename T, typename... A> static inline vec<T, 4> totk_border_sample(float4 border, texture2d<T> t, sampler s, float2 uv, A... a)\n"
-        @"{ return any(uv < 0.0) || any(uv > 1.0) ? vec<T, 4>(border) : t.sample(s, uv, a...); }\n"
-        @"template<typename T, typename... A> static inline vec<T, 4> totk_border_sample(float4 border, texture2d_array<T> t, sampler s, float2 uv, A... a)\n"
-        @"{ return any(uv < 0.0) || any(uv > 1.0) ? vec<T, 4>(border) : t.sample(s, uv, a...); }\n"
-        @"template<typename T, typename... A> static inline vec<T, 4> totk_border_sample(float4 border, texture3d<T> t, sampler s, float3 uv, A... a)\n"
-        @"{ return any(uv < 0.0) || any(uv > 1.0) ? vec<T, 4>(border) : t.sample(s, uv, a...); }\n"
-        @"template<typename Tex, typename C, typename... A> static inline auto totk_border_sample(float4 border, Tex t, sampler s, C uv, A... a) -> decltype(t.sample(s, uv, a...))\n"
+        @"template<typename T, typename... A> static inline vec<T, 4> totk_border_sample(float4 border, uint axes, texture2d<T> t, sampler s, float2 uv, A... a)\n"
+        @"{ return ((axes & 1u) && (uv.x < 0.0 || uv.x > 1.0)) || ((axes & 2u) && (uv.y < 0.0 || uv.y > 1.0)) ? vec<T, 4>(border) : t.sample(s, uv, a...); }\n"
+        @"template<typename T, typename... A> static inline vec<T, 4> totk_border_sample(float4 border, uint axes, texture2d_array<T> t, sampler s, float2 uv, A... a)\n"
+        @"{ return ((axes & 1u) && (uv.x < 0.0 || uv.x > 1.0)) || ((axes & 2u) && (uv.y < 0.0 || uv.y > 1.0)) ? vec<T, 4>(border) : t.sample(s, uv, a...); }\n"
+        @"template<typename T, typename... A> static inline vec<T, 4> totk_border_sample(float4 border, uint axes, texture3d<T> t, sampler s, float3 uv, A... a)\n"
+        @"{ return ((axes & 1u) && (uv.x < 0.0 || uv.x > 1.0)) || ((axes & 2u) && (uv.y < 0.0 || uv.y > 1.0)) || ((axes & 4u) && (uv.z < 0.0 || uv.z > 1.0)) ? vec<T, 4>(border) : t.sample(s, uv, a...); }\n"
+        @"template<typename Tex, typename C, typename... A> static inline auto totk_border_sample(float4 border, uint axes, Tex t, sampler s, C uv, A... a) -> decltype(t.sample(s, uv, a...))\n"
         @"{ return t.sample(s, uv, a...); }\n";
     NSRange r = [src rangeOfString:@"using namespace metal;\n"];
     if (r.location == NSNotFound) MDIE("shader %s: no 'using namespace metal;' for the border colour helper", sh->key);
@@ -5904,14 +5908,14 @@ static NSString *border_src(NvShader *sh, NSString *src0, float colours[][4], co
 /* The fragment function for the draw's samplers (border_key), nil when none needs the emulation. */
 static id<MTLFunction> fs_fn_border(NvShader *fs, int nodepth) {
     if (!fs || !sh_has_src(fs)) return nil;
-    float colours[8][4]; int aids[8], n;
-    NSString *key = border_key(fs, 1, colours, aids, &n);
+    float colours[8][4]; int aids[8], n; unsigned axes[8];
+    NSString *key = border_key(fs, 1, colours, aids, axes, &n);
     if (!key) return nil;
     if (nodepth && fs->writes_depth) key = [@"nodepth;" stringByAppendingString:key];
     static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT; os_unfair_lock_lock(&lock);
     id<MTLFunction> fn = fs->bpatch[key];
     if (!fn) {
-        NSString *src = border_src(fs, nodepth && fs->writes_depth ? fs_src_without_depth(fs) : sh_src(fs), colours, aids, n);
+        NSString *src = border_src(fs, nodepth && fs->writes_depth ? fs_src_without_depth(fs) : sh_src(fs), colours, aids, axes, n);
         if (!src) { os_unfair_lock_unlock(&lock); return nil; }
         NSError *err = nil; id<MTLLibrary> lib = totk_msl_library(src, &err);
         fn = lib ? [lib newFunctionWithName:fs->fn.name] : nil;
@@ -5925,8 +5929,8 @@ static id<MTLFunction> fs_fn_border(NvShader *fs, int nodepth) {
 static id<MTLFunction> vs_fn_for(NvShader *vs, NvShader *fs, int layered, int border) {
     static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT;
     if (layered && !vs_layerable(vs)) MDIE("vertex shader %s cannot write the render target array index", vs->key);
-    float bc[8][4]; int ba[8], bn = 0;   // TOTK: vertex-stage samplers with a border colour Metal lacks (PSO_VBORDER)
-    NSString *bkey = border && sh_has_src(vs) ? border_key(vs, 0, bc, ba, &bn) : nil;
+    float bc[8][4]; int ba[8], bn = 0; unsigned axes[8];   // TOTK: vertex-stage samplers with a border colour Metal lacks (PSO_VBORDER)
+    NSString *bkey = border && sh_has_src(vs) ? border_key(vs, 0, bc, ba, axes, &bn) : nil;
     if (!sh_has_src(vs) || (!layered && !bkey && (!fs || !sh_has_src(fs)))) return vs->fn;
     os_unfair_lock_lock(&lk);
     NSDictionary *in = fs && sh_has_src(fs) ? msl_varyings(fs) : nil, *out = in ? msl_varyings(vs) : nil;
@@ -5941,7 +5945,7 @@ static id<MTLFunction> vs_fn_for(NvShader *vs, NvShader *fs, int layered, int bo
         if (layered) [add appendString:@"    uint totk_layer [[render_target_array_index]];\n"];
         NSString *head = @"struct main0_out\n{\n";
         NSString *vsrc0 = sh_src(vs);
-        if (bkey) { NSString *b = border_src(vs, vsrc0, bc, ba, bn); if (b) vsrc0 = b; }
+        if (bkey) { NSString *b = border_src(vs, vsrc0, bc, ba, axes, bn); if (b) vsrc0 = b; }
         NSRange r = [vsrc0 rangeOfString:head];
         if (r.location == NSNotFound) MDIE("vertex shader %s: no main0_out to extend", vs->key);
         NSString *src = [vsrc0 stringByReplacingCharactersInRange:r withString:[head stringByAppendingString:add]];
@@ -6286,7 +6290,13 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get(NvProg *pr, MTLRen
     if (g_pso_lmap) { memcpy(k.lmap, g_pso_lmap, 8); k.fsfn = (__bridge void *)g_pso_fsfn; }
     __unsafe_unretained id<MTLFunction> bfn = !g_pso_lmap && !g_mfx.role ? fs_fn_border(fs, k.dfmt == 0) : nil;   // TOTK: sampler border colour emulation
     if (bfn) k.fsfn = (__bridge void *)bfn;
-    { float bc[8][4]; int ba[8], bn; if (border_key(vs, 0, bc, ba, &bn)) k.a2c |= PSO_VBORDER; }
+    { float bc[8][4]; int ba[8], bn; unsigned axes[8]; if (border_key(vs, 0, bc, ba, axes, &bn)) {
+        k.a2c |= PSO_VBORDER;
+        // The same shader can bind different border constants. Cache the actual
+        // vertex variant identity, not just the fact that one exists. Persisted
+        // recipes clear this pointer in pso_skey_from, keeping the stable ABI.
+        k.vs = (__bridge void *)vs_fn_for(vs, fs, (k.a2c & PSO_LAYERED) != 0, 1);
+    } }
     __unsafe_unretained id<MTLRenderPipelineState> cached = (__bridge id<MTLRenderPipelineState>)hm_get_ptr(&g_pso, &k);
     if (cached) return cached;
     id<MTLRenderPipelineState> ps;
@@ -14183,3 +14193,5 @@ void botw_serial_note(uint64_t serial, const char *what) {
     for (int i = 0; i < c; i++) if (seen[i] == serial) { MLOG("[tile] f%llu ser=%llu %s", (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)serial, what); return; }
 }
 #endif
+
+#include "nvn_sampler_border_probe.h"
