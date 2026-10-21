@@ -298,6 +298,7 @@ void mtl_write_texels(const tex_t *t, unsigned level, unsigned layer0, const NVN
 void mtl_reg_tex(int id, const tex_t *t, const view_t *v);
 void mtl_reg_samp(int id, const samp_par *p);
 void mtl_prog_release(prog_t *p);
+void mtl_prog_prefetch(const prog_t *p);   // TOTK_SHADER_PREFETCH=1: start compiling the program's known shader variants in the background
 // 新序号（> 0，全局递增）
 // New serial (> 0, globally increasing)
 uint64_t nvn_new_serial(void);

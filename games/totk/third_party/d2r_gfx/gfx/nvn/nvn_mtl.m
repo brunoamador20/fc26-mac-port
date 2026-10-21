@@ -6497,9 +6497,61 @@ static void warm_load_rows(NSArray<NSString *> *rows, NSMutableDictionary<NSStri
 }
 static void warm_enqueue(WarmItem *item) {
     os_unfair_lock_lock(&g_warm_lock);
+    if (!g_warm_items) g_warm_items = [NSMutableArray array];
     [g_warm_items addObject:item];
     atomic_store_explicit(&g_warm_ready, 1, memory_order_release);
     os_unfair_lock_unlock(&g_warm_lock);
+}
+/* TOTK_SHADER_PREFETCH=1 (off by default): when the game hands a program its shaders (nvnProgramSetShaders, usually while
+   it loads, before the first draw), the variants of those shaders that the translation cache already holds are compiled
+   into Metal libraries on background threads and handed to the submission thread like the warm-up's (warm_claim at the
+   next submission). The first draw then finds the library instead of compiling it itself: on the starting sky island
+   the frames that stalled for a new library (65 of them, 181 libraries, 29 s in a 21-minute run) were all variants
+   already in the cache, compiled from their MSL at the draw. Variants not in the cache, and pipelines, are still made
+   at the draw as before. Nothing is translated here and no draw is skipped. */
+static int prefetch_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("TOTK_SHADER_PREFETCH"); on = e && !strcmp(e, "1"); } return on; }
+static _Atomic uint64_t g_pf_progs, g_pf_queued, g_pf_built, g_pf_ns, g_pf_last;
+void mtl_prog_prefetch(const prog_t *p) {
+    if (!prefetch_on() || !p || !p->nstage) return;
+    static NSMutableSet<NSString *> *seen; static dispatch_queue_t q; static dispatch_semaphore_t slots; static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT;
+    static dispatch_once_t once; dispatch_once(&once, ^{
+        seen = [NSMutableSet set];
+        q = dispatch_queue_create("totk.shader-prefetch", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT, QOS_CLASS_USER_INITIATED, 0));
+        slots = dispatch_semaphore_create(4);   // the system compiler service runs requests side by side; 4 leaves cores to the game
+        MLOG("[prefetch] 着色器预编已开（TOTK_SHADER_PREFETCH=1）：游戏设着色器时，后台编翻译缓存里已有的变体，最多 4 个同时编");
+    });
+    atomic_fetch_add(&g_pf_progs, 1);
+    for (unsigned i = 0; i < p->nstage && i < 6; i++) {
+        const uint8_t *control = p->sd[i].control; uint32_t length = 0, st = 0;
+        if (!control || !p->sd[i].data) continue;
+        memcpy(&length, control + 0x704, 4); memcpy(&st, control + 0x714, 4);
+        if (!length || length > 16 * 1024 * 1024 || (st != 0 && st != 1 && st != 5)) continue;
+        /* the same key prog_get computes: control section, then the code */
+        uint8_t md[32]; CC_SHA256_CTX ctx; CC_SHA256_Init(&ctx); CC_SHA256_Update(&ctx, control, ctl_key_len(control));
+        CC_SHA256_Update(&ctx, (const void *)(uintptr_t)p->sd[i].data, length); CC_SHA256_Final(md, &ctx);
+        char key[65]; for (unsigned j = 0; j < 32; j++) snprintf(key + 2 * j, 3, "%02x", md[j]);
+        NSString *shader = @(key);
+        os_unfair_lock_lock(&lk); BOOL fresh = ![seen containsObject:shader]; if (fresh) [seen addObject:shader]; os_unfair_lock_unlock(&lk);
+        if (!fresh) continue;
+        int stage = (int)st;
+        dispatch_async(q, ^{ @autoreleasepool {
+            for (NSString *v in totk_rt_known_variants(shader)) {
+                NSString *pc = [v stringByAppendingString:@"_b"];
+                if (warm_failed(pc)) continue;
+                atomic_fetch_add(&g_pf_queued, 1);
+                dispatch_semaphore_wait(slots, DISPATCH_TIME_FOREVER);
+                uint64_t t0 = bp_now(); NvShader *sh = warm_shader_load(pc, stage); uint64_t dt = bp_now() - t0;
+                dispatch_semaphore_signal(slots);
+                if (!sh) { warm_fail(pc); continue; }
+                WarmItem *item = [WarmItem new]; item->kind = 0; item->key = pc; item->shader = sh; warm_enqueue(item);
+                atomic_fetch_add(&g_pf_built, 1); atomic_fetch_add(&g_pf_ns, dt);
+            }
+            uint64_t now = bp_now(), last = atomic_load(&g_pf_last);
+            if (now - last > 5000000000ull && atomic_compare_exchange_strong(&g_pf_last, &last, now))
+                MLOG("[prefetch] 累计：程序 %llu 个，排队编着色器 %llu 个，编好 %llu 个，后台共 %.0f ms",
+                     (unsigned long long)g_pf_progs, (unsigned long long)g_pf_queued, (unsigned long long)g_pf_built, g_pf_ns / 1e6);
+        } });
+    }
 }
 /* Count the exact manifest rows and cached variants this run will visit before
    displaying a determinate bar. Shader/PSO counts are separate: one pipeline

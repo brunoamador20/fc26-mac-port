@@ -16,6 +16,8 @@ NSSet<NSString *> *totk_rt_observed_shader_keys(void);
 NSSet<NSString *> *totk_rt_shader_scope(void);
 // Returns the variant name whose <dir>/<variant>_b.{metal,json} match the answers, translating when needed.
 // stage: NVN shader stage (0 vertex, 1 fragment, 5 compute). answers: {"tex","img","attr","fout"} dictionaries.
+// The variants of a shader already in the translation cache (or the seed), without translating anything; empty when none.
+NSArray<NSString *> *totk_rt_known_variants(NSString *shader);
 NSString *totk_rt_variant(NSString *shader, int stage, const uint8_t *control, const uint8_t *code, NSDictionary *answers, NSArray *local);   // nil on iOS when the variant is not translated yet (request recorded)
 #endif
 #include <stdint.h>
