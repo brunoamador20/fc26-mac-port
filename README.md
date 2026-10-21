@@ -174,7 +174,7 @@ The 1.2.1 port (October 19) passed the same rewrite verification (600 of 600 neg
 
 ### Breath of the Wild 1.6.0 (early)
 
-The same script builds **The Legend of Zelda: Breath of the Wild 1.6.0** (`01007EF00011E000`) from a card image that holds the base game, the 1.6.0 update and the two add-on content titles together (no `--update`; the game is recognised by the title IDs in the file, never by its name). This card has no system update partition, so the six shared fonts must come from a Tears of the Kingdom build's work folder (`TOTK_build/totk/extracted/firmware/shared-fonts`) or another verified font folder. The startup shaders come from the game data and the game's own [shared shader list](docs/shader-list.md) (`games/botw/assets/shader_list.tsv`), as for Tears of the Kingdom: every shader of the boot and title packages for its default bind state, plus every bind state the list names, compiled ahead and waited for only as far as the title screen needs.
+The same script builds **The Legend of Zelda: Breath of the Wild 1.6.0** (`01007EF00011E000`) from a card image that holds the base game, the 1.6.0 update and the two add-on content titles together (no `--update`; the game is recognised by the title IDs in the file, never by its name). This card has no system update partition, so the six shared fonts come from an unpacked firmware (`--firmware`, as for a Tears of the Kingdom NSP), a Tears of the Kingdom build's work folder (`--shared-fonts TOTK_build/totk/extracted/firmware/shared-fonts`) or another verified font folder. The startup shaders come from the game data and the game's own [shared shader list](docs/shader-list.md) (`games/botw/assets/shader_list.tsv`), as for Tears of the Kingdom: every shader of the boot and title packages for its default bind state, plus every bind state the list names, compiled ahead and waited for only as far as the title screen needs.
 
 ```sh
 python3.14 build_app.py ~/Games/botw.xci -k ~/keys/prod.keys --shared-fonts ~/Games/TOTK_build/totk/extracted/firmware/shared-fonts
@@ -449,7 +449,7 @@ python3.14 games/totk/tools/install_desktop_entry.py --app "/路径/Tears of the
 
 ### 旷野之息 1.6.0（早期）
 
-同一个脚本也能打包**《塞尔达传说 旷野之息》1.6.0**（`01007EF00011E000`）：卡带镜像里要同时有本体、1.6.0 更新和两个追加内容（不用 `--update`；认的是文件里的标题 ID，不看文件名）。这张卡没有系统更新分区，六个共享字体要从王国之泪打包的工作目录拿（`TOTK_build/totk/extracted/firmware/shared-fonts`），或别的已校验的字体目录。启动着色器和王国之泪一样来自游戏数据和这个游戏自己的[公共着色器清单](docs/shader-list.md)（`games/botw/assets/shader_list.tsv`）：启动包和标题包里的每个着色器按默认绑定状态翻译，清单里的每个绑定状态也翻译，打包时预先编好，第一帧只等标题要的那些。
+同一个脚本也能打包**《塞尔达传说 旷野之息》1.6.0**（`01007EF00011E000`）：卡带镜像里要同时有本体、1.6.0 更新和两个追加内容（不用 `--update`；认的是文件里的标题 ID，不看文件名）。这张卡没有系统更新分区，六个共享字体可以用 `--firmware` 从已解包的固件提取（和王国之泪的 NSP 一样），或用 `--shared-fonts` 从王国之泪打包的工作目录拿（`TOTK_build/totk/extracted/firmware/shared-fonts`），或别的已校验的字体目录。启动着色器和王国之泪一样来自游戏数据和这个游戏自己的[公共着色器清单](docs/shader-list.md)（`games/botw/assets/shader_list.tsv`）：启动包和标题包里的每个着色器按默认绑定状态翻译，清单里的每个绑定状态也翻译，打包时预先编好，第一帧只等标题要的那些。
 
 ```sh
 python3.14 build_app.py ~/Games/botw.xci -k ~/keys/prod.keys --shared-fonts ~/Games/TOTK_build/totk/extracted/firmware/shared-fonts
