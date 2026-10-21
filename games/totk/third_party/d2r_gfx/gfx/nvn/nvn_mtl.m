@@ -6614,6 +6614,7 @@ static void warm_enqueue(WarmItem *item) {
 /* Count the exact manifest rows and cached variants this run will visit before
    displaying a determinate bar. Shader/PSO counts are separate: one pipeline
    row may load two shaders, and a failed row still advances the task bar. */
+static int g_warm_pipelines_only;   // a pipeline archive is used: the lists' S rows (shader libraries alone) are skipped
 static void warm_plan(NSArray<NSString *> *paths, NSArray<NSString *> *files, NSMutableSet<NSString *> *keys,
                       NSMutableSet<NSString *> *eligible,
                       uint64_t *tasks, uint64_t *shaders, uint64_t *pipelines) {
@@ -6626,7 +6627,7 @@ static void warm_plan(NSArray<NSString *> *paths, NSArray<NSString *> *files, NS
             [rows addObject:line];
             NSArray<NSString *> *c = [line componentsSeparatedByString:@"\t"];
             if ([c[0] isEqualToString:@"S"] && c.count >= 3 && [c[1] length]) {
-                if (!warm_available(c[1])) continue;
+                if (g_warm_pipelines_only || !warm_available(c[1])) continue;
                 [keys addObject:c[1]];
             }
             else if ([c[0] isEqualToString:@"R"] && c.count >= 2) {
@@ -6952,13 +6953,14 @@ static void warm_start(void) {
     par_open_dir(g_dev);   // the pipeline archive: with files, the pipeline lists are made from them and the rest when drawn
     /* With a valid pipeline archive the pipeline lists are still warmed (the title's, the shared list's, this device's):
        they will be drawn, so making them before play costs no more memory, and from the archive it is quick. Skipped:
-       the shader libraries alone (the prepared seed's S rows and every other shader in the cache, about 20,000 on
-       1.4.3, most of which a session never draws). Only the title list first (2026-10-20: 866 ms frames on entering the
-       world when the lists were skipped too). */
+       the shader libraries alone: every list's S rows (warm_plan; the seed's list is nearly all S rows: 20,368 on the
+       iPhone for 1.4.3) and every other shader in the cache, most of which a session never draws. Chosen by row kind,
+       not by file: 8b6d26b kept the iPhone seed's list by its path, and a second start loaded all 20,368 libraries
+       again (12,266 after 7 minutes; the warm-up never ended).
+       Only the title list first (2026-10-20: 866 ms frames on entering the world when the lists were skipped too). */
     if (g_par_valid || (g_par_on && par_fill_light())) {
-        NSMutableArray<NSString *> *lists = [NSMutableArray array];
-        NSString *prepared = [g_shmap_path.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"shader-seed/pso_manifest.tsv"];
-        for (NSString *p in paths) if (![p isEqualToString:prepared]) [lists addObject:p];   // exactly the shader-only list (iOS's own seed folder is also called shader-seed)
+        NSMutableArray<NSString *> *lists = [paths mutableCopy];
+        g_warm_pipelines_only = 1;
         cached = @[];
         if (g_par_valid) {
             paths = lists;
