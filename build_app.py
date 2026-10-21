@@ -132,6 +132,31 @@ def sha256(path):
     return h.hexdigest()
 
 
+def seed_digests(seed):
+    """name -> SHA-256 for the seed files whose identity (device, inode, size, modification and change time) is still the
+    one prepare_shader_seed.py recorded when it checked them (<seed>.verified.json, its verified_digests). Hashing all
+    65,436 files in each packaging took tens of seconds (2026-10-21); a changed file is hashed as before."""
+    try:
+        record = json.loads(seed.with_name(seed.name + '.verified.json').read_text())
+        if record.get('schema') != 1:
+            return {}
+        known = {}
+        for name, entry in record['files'].items():
+            try:
+                s = os.stat(seed / name)
+            except OSError:
+                continue
+            if Path(name).name == name and entry[:-1] == [s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns]:
+                known[name] = entry[-1]
+        return known
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+
+
+def seed_sha256(seed, name, known):
+    return known.get(name) or sha256(seed / name)
+
+
 def check(what, got, want):
     if got != want:
         raise BuildError(f'{what}: SHA-256 {got[:16]}... is not the expected {want[:16]}... '
@@ -963,8 +988,9 @@ def step_shader_libs(tree, logs, *, version='v0'):
     libs.mkdir(parents=True, exist_ok=True)
     stamp.write_text(identity)
     todo = {}
+    known = seed_digests(tree/f'build/shader-seed/{version}')   # the digests the seed's preparation checked
     for src in sources:
-        digest = sha256(src)
+        digest = seed_sha256(src.parent, src.name, known)
         if not (libs/f'{digest}.metallib').is_file():
             todo.setdefault(digest, src)
     variants = variant_sources('botw' if version.startswith('botw') else 'totk')
@@ -1174,9 +1200,10 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
     else:
         try:
             report = json.loads((seed/'seed-manifest.json').read_text())
+            known = seed_digests(seed)
             if (report['version'] != version or report['chain'] != 'totk-native-v6-unverified' or
                     report['shaders'] < (8000 if game == 'totk' else 2000) or not report['files'] or any(
-                        Path(name).name != name or sha256(seed/name) != digest for name, digest in report['files'].items())):
+                        Path(name).name != name or seed_sha256(seed, name, known) != digest for name, digest in report['files'].items())):
                 raise ValueError('version, translation chain or file hash differs')
         except (ValueError, KeyError, OSError, TypeError) as error:
             raise BuildError(f'invalid prepared startup shader seed: {error}') from None

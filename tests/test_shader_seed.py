@@ -339,6 +339,29 @@ class ShaderKeyScope(unittest.TestCase):
             self.prepare_with_service(root, root/'seed', listed, inventory_calls=calls)
             self.assertEqual(calls, [1, 1])
 
+    def test_reuse_takes_recorded_digests_of_unchanged_files_and_hashes_changed_ones(self):
+        # A whole-seed reuse hashed all 65,436 files again (30 s, 2026-10-21); a file whose identity (inode, size,
+        # modification and change times) is the one recorded after it was checked keeps its recorded digest.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); output = root/'seed'
+            manifest, _, _ = self.prepare_with_service(root, output)
+            identity = {k: manifest[k] for k in ('schema', 'chain', 'version', 'game', 'source_romfs_sha256', 'translator_sha256',
+                                                 'spirv_cross_sha256', 'preparation_sha256', 'shader_list_sha256')}
+            recorded = root/'seed.verified.json'
+            self.assertEqual(seed.reusable_seed(output, identity, 1), manifest)
+            name = next(n for n in manifest['files'] if n.endswith('_b.metal'))
+            record = json.loads(recorded.read_text())
+            good = record['files'][name][-1]
+            record['files'][name][-1] = '0'*64   # a wrong recorded digest is believed: proof the file was not read
+            recorded.write_text(json.dumps(record))
+            self.assertIsNone(seed.reusable_seed(output, identity, 1))
+            record['files'][name][-1] = good
+            recorded.write_text(json.dumps(record))
+            self.assertEqual(seed.reusable_seed(output, identity, 1), manifest)
+            path = output/name; old = path.stat()
+            path.write_text('// changed'); os.utime(path, ns=(old.st_atime_ns, old.st_mtime_ns))   # same size? no matter: ctime moved
+            self.assertIsNone(seed.reusable_seed(output, identity, 1))
+
     def test_reuse_rejects_wrong_scope_identity_even_with_a_matching_file_hash(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
