@@ -1855,8 +1855,10 @@ static const char *cctx_snap(void);   // 这次提交里有什么（出错时打
    with a queue barrier (enc_r_begin / enc_c_begin), which orders it after all earlier work on the queue, across command
    buffers too; this submission's uploads are flushed first so they stay ahead of the draws that use them. The fence,
    counter / query write-backs, arena and deferred releases stay on the final command buffer (mtl_sub_commit).
-   TOTK_CHUNK_DRAWS=<n> (default 75, 0 = off) and TOTK_CHUNK_FIRST=<n> (default 60) set the draws per chunk; uncapped world-scene
-   frame means: 150/500 12.50 ms, 60/150 11.85 ms, 60/100 11.73 ms, 60/75 11.66 ms (the GPU waits less for the next chunk). */
+   TOTK_CHUNK_DRAWS=<n> (default 40, 0 = off) and TOTK_CHUNK_FIRST=<n> (default 30) set the draws per chunk; uncapped world-scene
+   frame means: 150/500 12.50 ms, 60/150 11.85 ms, 60/100 11.73 ms, 60/75 11.66 ms (the GPU waits less for the next chunk).
+   1.4.3 on the Mac (2026-10-21, one game per scene, alternating): shrine (12k draws) 60/75 10.77 -> 30/40 10.60 ms (off 14.93,
+   20/25 10.63, 120/150 10.97), field 11.13 -> 11.02, Lookout Landing 11.22 -> 11.03; GPU time unchanged. */
 static id<MTL4RenderCommandEncoder> g_enc;   // tentative declarations: defined with the render pass state further down
 static uint64_t g_stat_draw;
 static int g_chunk_first = -1, g_chunk_size, g_sub_chunks;
@@ -1868,7 +1870,7 @@ static void chunk_cfg(void) {
     static int base_first = -1, base_size;
     if (base_first < 0) {
         const char *e = getenv("TOTK_CHUNK_DRAWS"), *f = getenv("TOTK_CHUNK_FIRST");
-        base_size = e ? atoi(e) : 75; base_first = f ? atoi(f) : 60;
+        base_size = e ? atoi(e) : 40; base_first = f ? atoi(f) : 30;
         if (base_size <= 0 || base_first <= 0) base_size = base_first = 0;
     }
     int size = atomic_load(&g_chunk_size_request), first = atomic_load(&g_chunk_first_request);
