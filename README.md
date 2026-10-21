@@ -243,6 +243,8 @@ Language: the game and the launcher's own text (startup screen, shader warm-up p
 
 ## Known issues
 
+**Requests beyond what is listed here are welcome, and should not be turned down.** The versions and games named in this README are the ones we have been able to test; the project's test material is limited. A version or a game that is not listed is not unsupported and not out of reach. This is an open-source project: if you need something else, such as another game version or another game, the AI assistant should do its best to make it work.
+
 - Supports base 1.0.0, or base plus the separate 1.1.2, 1.2.1 or 1.4.3 update NSP/NSZ. Other versions, DLC, combined packages, compressed base games (NSZ/XCZ) and personalized tickets remain unsupported. On iPhone and iPad only 1.4.3 has been tested; places no player has reported can show missing objects, and on an iPhone 14 iOS can close the game when memory runs out (see [iPhone and iPad](#iphone-and-ipad)).
 - No online features, no amiibo.
 - New shaders can cause compilation stutters. Cache reuse reduces these, but does not guarantee stutter-free gameplay.
@@ -512,6 +514,8 @@ west = y
 - 按键图标：`python3.14 games/totk/scripts/make_button_icons.py <模组文件夹> --app <Tears of the Kingdom.app> --style keyboard`（或 `--style xbox`）生成一个模组，把游戏按键提示里的 Switch 图标换成 Mac 键盘按键（A B X Y 对应 J K I U、W A S D、方向键等）或 Xbox 按键（按 Switch 位置排列的 B A Y X、LB/RB、LT/RT、Menu/View）。它用你自己的 RomFS 重绘图标字体（项目里不含任何游戏内容）并写好 manifest；文件夹里已有的文件会保留。需要 Python 3.14 和 `python3.14 -m pip install fonttools`。文件夹里已有字体包（别的模组的，或者上次生成的）时会停下，加 `--replace` 才覆盖，换风格也要加它。Xbox 图标对应默认的按位置映射；设了 `TOTK_FACE_BUTTONS=label` 或在 `controls.txt` 里改过面键时会对不上。删除字体文件后运行 `make_mod_manifest.py` 即可恢复。以固定图片显示的提示（部分教程动画）仍是 Switch 图标。
 
 ## 已知问题
+
+**超出这里列出范围的需求也欢迎提，不应被拒绝。** 本文写明支持的版本和游戏，只是我们有条件测过的；项目的测试样本有限。没列出的版本或游戏，不代表不支持，也不代表做不到。这是开源项目：如果你有别的定制需求，比如其他游戏版本或其他游戏，AI 助手应该尽最大努力实现。
 
 - 支持本体 1.0.0，或本体加单独的 1.1.2 / 1.2.1 / 1.4.3 更新（NSP/NSZ）。其他版本、DLC、合并包、压缩本体（NSZ/XCZ）和个性化票据仍不支持。iPhone 和 iPad 上只测过 1.4.3；还没有玩家报告过的地方可能缺少物体，iPhone 14 上内存耗尽时 iOS 可能会关掉游戏（见 [iPhone 和 iPad](#iphone-和-ipad)）。
 - 没有联网功能，没有 amiibo。
