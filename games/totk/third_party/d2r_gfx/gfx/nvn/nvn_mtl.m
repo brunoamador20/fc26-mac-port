@@ -403,7 +403,7 @@ static uint64_t g_pool_query_checked;
 #define POOL_TLS_N 8
 typedef struct { uintptr_t lo, hi, base; void *buf; uint64_t gpu, gen; } pool_tls_ent;
 static _Thread_local pool_tls_ent g_ptls[POOL_TLS_N];
-static _Thread_local unsigned g_ptls_next;
+static _Thread_local unsigned g_ptls_next, g_ptls_last;   // next slot to fill; slot of the last hit (looked at first)
 static _Atomic uint64_t g_pool_gen = 1;
 static _Atomic int g_pool_tls_on = -1, g_pool_tls_check;
 static uint64_t g_pool_tls_hits, g_pool_tls_misses, g_pool_tls_verified;   // statistics (the replay thread does nearly all lookups)
@@ -727,9 +727,11 @@ static const pool_tls_ent *pool_tls_find(uintptr_t a, uint64_t len) {
     uintptr_t end = a + (uintptr_t)len;
     if (end < a) return NULL;
     uint64_t gen = atomic_load_explicit(&g_pool_gen, memory_order_acquire);
-    for (int i = 0; i < POOL_TLS_N; i++) {
-        const pool_tls_ent *e = &g_ptls[i];
-        if (e->gen == gen && e->lo <= a && a < e->hi && end <= e->hi) return e;   // a < hi: an address at the end may also start the next pool
+    const pool_tls_ent *e = &g_ptls[g_ptls_last];
+    if (e->gen == gen && e->lo <= a && a < e->hi && end <= e->hi) return e;   // a < hi: an address at the end may also start the next pool
+    for (unsigned i = 0; i < POOL_TLS_N; i++) {
+        e = &g_ptls[i];
+        if (e->gen == gen && e->lo <= a && a < e->hi && end <= e->hi) { g_ptls_last = i; return e; }
     }
     return NULL;
 }
@@ -3768,17 +3770,20 @@ static uint64_t g_stat_draw, g_stat_pass, g_bw_load, g_bw_store, g_pass_full_rw,
 // DM_NVN_PASSDUMP: records pass attachments / samples / presents one by one (textures by serial) for offline data-flow analysis; the pass numbers of P / D / R / S lines agree (= g_stat_pass after the pass is opened)
 // DM_NVN_PASSDUMP=frame number, or start-end (inclusive at both ends)
 static long g_pd_at = -1, g_pd_n;
-static int passdump(void) {
+static int g_pd_armed = -1;   // TOTK: 0 when neither DM_NVN_PASSDUMP nor a "passdump" command asked for a dump: passdump() is called per binding
+static int passdump_slow(void);
+static inline int passdump(void) { return g_pd_armed == 0 ? 0 : passdump_slow(); }
+static int passdump_slow(void) {
 #ifdef NVN_RT_RANGE_TEST
     if (g_rr_checking) return 0;
 #endif
-    static long a0 = -2, a1; if (a0 == -2) { const char *e = getenv("DM_NVN_PASSDUMP"); a0 = e ? atol(e) : -1; a1 = e && strchr(e, '-') ? atol(strchr(e, '-') + 1) : a0; }
+    static long a0 = -2, a1; if (a0 == -2) { const char *e = getenv("DM_NVN_PASSDUMP"); a0 = e ? atol(e) : -1; a1 = e && strchr(e, '-') ? atol(strchr(e, '-') + 1) : a0; if (a0 < 0 && g_pd_at < 0) g_pd_armed = 0; }
     long f = (long)atomic_load(&g_cur_frame);
     if (g_pd_at >= 0 && f >= g_pd_at && f < g_pd_at + g_pd_n) return 1;   // TOTK: "passdump <frames>" from TOTK_INPUT_FILE
     return a0 >= 0 && f >= a0 && f <= a1;
 }
 /* TOTK: TOTK_INPUT_FILE command "passdump <n>": full pass dump (as DM_NVN_PASSDUMP_ALL) of the n frames after the next one. */
-void dm_gfx_passdump_next(long n) { g_pd_n = n > 0 && n < 16 ? n : 1; g_pd_at = (long)atomic_load(&g_cur_frame) + 2; MLOG("[pass] 按输入文件转储帧 %ld 起 %ld 帧", g_pd_at, g_pd_n); }
+void dm_gfx_passdump_next(long n) { g_pd_n = n > 0 && n < 16 ? n : 1; g_pd_at = (long)atomic_load(&g_cur_frame) + 2; g_pd_armed = 1; MLOG("[pass] 按输入文件转储帧 %ld 起 %ld 帧", g_pd_at, g_pd_n); }
 #define PD(...) do { if (passdump()) { fprintf(stderr, "[pass] F%llu ", (unsigned long long)atomic_load(&g_cur_frame)); fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } } while (0)
 static void pd_xfer(const char *what, uint64_t src, uint64_t dst, uint64_t n) { PD("X %llu %s src=%#llx dst=%#llx n=%#llx", g_stat_pass, what, (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n); }
 static void pd_update_bytes(const void *data, uint64_t dst, uint64_t n, uint64_t seq) {
@@ -5674,10 +5679,17 @@ static struct {
     NVNbufferRange vbuf[16];
     p_bind_buf ubo[6][16], ssbo[6][16];
     uint64_t tex[6][128], samp[6][128], img[6][32];
+    uint64_t tex_gen[6];   // TOTK: a fresh value of g_tex_gen_seq whenever tex[stage] changes (TEX_CHANGED); saved / restored with S
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; int depth_clamp; int render_disabled; int raster_discard;
     float blend_color[4]; int64_t copy_stride;
 } S;
+/* TOTK: stage_sig compared 128 texture handles of the stage with its last copy on every draw (a 1 KiB memcmp, 0.13 ms a
+   frame in a shrine). Every write to S.tex now gives that stage a fresh, never reused number, so equal numbers mean equal
+   handles also after S is saved and restored. TOTK_TEX_GEN_CHECK=1 compares the handles as well and stops on a difference. */
+static uint64_t g_tex_gen_seq;
+#define TEX_CHANGED(st) (S.tex_gen[st] = ++g_tex_gen_seq)
+static int tex_gen_check(void) { static int v = -1; if (v < 0) { const char *e = getenv("TOTK_TEX_GEN_CHECK"); v = e && atoi(e); } return v; }
 // No render target set: no colour target and no depth / stencil (a pass of rasterization only, see rp_begin_ex)
 static int rt_none(void) {
     if (!R.has_rt || R.rt.depth) return 0;
@@ -5782,16 +5794,18 @@ static uint64_t stage_sig(int st) {
        so a program first translated with other bindings is re-fitted at draw time. */
     /* The depth-slot mask only changes with this stage's bound handles or a descriptor registration (g_reg_gen): it is
        kept per stage and recomputed when either changed (it was a lookup per bound slot on every draw, about 7%). */
-    { static uint64_t last_tex[6][128], last_gen[6] = {~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull}, last_dm[6];
+    { static uint64_t last_tex[6][128], last_gen[6] = {~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull}, last_tg[6] = {~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull}, last_dm[6];
       uint64_t dm; uint64_t gen = g_reg_gen;
       int hi = st >= 0 && st < 6 ? g_tex_hi[st] : 128;
-      if (st >= 0 && st < 6 && gen == last_gen[st] && !memcmp(last_tex[st], S.tex[st], sizeof(uint64_t) * hi)) dm = last_dm[st];
+      if (st >= 0 && st < 6 && gen == last_gen[st] && S.tex_gen[st] == last_tg[st]) {
+          if (tex_gen_check() && memcmp(last_tex[st], S.tex[st], sizeof(uint64_t) * hi)) MDIE("texture slot generation %llu of stage %d kept, handles changed", (unsigned long long)S.tex_gen[st], st);
+          dm = last_dm[st]; }
       else {
           dm = 0; int locked = registry_lock();
           for (int r = 0; r < hi; r++) if (S.tex[st][r]) { const treg_t *t = bound_tex(S.tex[st][r]); if (!t) continue;
               int f = t->has_v && t->v.set_format ? t->v.format : t->t.d.format; if (f >= 0x32 && f <= 0x36) dm ^= 0x9E3779B97F4A7C15ull * (uint64_t)(r + 1); }
           registry_unlock();
-          if (st >= 0 && st < 6 && locked) { memcpy(last_tex[st], S.tex[st], sizeof(uint64_t) * hi); last_gen[st] = gen; last_dm[st] = dm; }
+          if (st >= 0 && st < 6 && locked) { if (tex_gen_check()) memcpy(last_tex[st], S.tex[st], sizeof(uint64_t) * hi); last_gen[st] = gen; last_tg[st] = S.tex_gen[st]; last_dm[st] = dm; }
       }
       if (dm) sg ^= dm | 1ull << 63; }
     return sg;
@@ -7832,7 +7846,7 @@ static int state_op(uint32_t op, const void *a) {
         case OP_BIND_VBUF: { const p_bind_vbuf *b = a; memcpy(&S.vbuf[b->first], b->r, sizeof *b->r * b->n); break; }
         case OP_BIND_UBO: { const p_bind_buf *b = a; if (b->stage < 6 && b->index < 16 && memcmp(&S.ubo[b->stage][b->index], b, sizeof *b)) { S.ubo[b->stage][b->index] = *b; args_dirty_stage(b->stage); } break; }
         case OP_BIND_SSBO: { const p_bind_buf *b = a; if (b->stage < 6 && b->index < 16 && memcmp(&S.ssbo[b->stage][b->index], b, sizeof *b)) { S.ssbo[b->stage][b->index] = *b; args_dirty_stage(b->stage); } break; }
-        case OP_BIND_TEX: { const p_bind_handles *b = a; if (b->stage < 6 && b->first + b->n <= 128 && memcmp(&S.tex[b->stage][b->first], b->h, 8 * b->n)) { memcpy(&S.tex[b->stage][b->first], b->h, 8 * b->n); args_dirty_stage(b->stage); if (b->first + b->n > g_tex_hi[b->stage]) g_tex_hi[b->stage] = b->first + b->n; } break; }
+        case OP_BIND_TEX: { const p_bind_handles *b = a; if (b->stage < 6 && b->first + b->n <= 128 && memcmp(&S.tex[b->stage][b->first], b->h, 8 * b->n)) { memcpy(&S.tex[b->stage][b->first], b->h, 8 * b->n); TEX_CHANGED(b->stage); args_dirty_stage(b->stage); if (b->first + b->n > g_tex_hi[b->stage]) g_tex_hi[b->stage] = b->first + b->n; } break; }
         case OP_BIND_SAMP: { const p_bind_handles *b = a; if (b->stage < 6 && b->first + b->n <= 128 && memcmp(&S.samp[b->stage][b->first], b->h, 8 * b->n)) { memcpy(&S.samp[b->stage][b->first], b->h, 8 * b->n); args_dirty_stage(b->stage); } break; }
         case OP_BIND_IMG: { const p_bind_handles *b = a; if (b->stage < 6 && b->first >= 0 && b->first + b->n <= 32) { if (memcmp(&S.img[b->stage][b->first], b->h, 8 * b->n)) { memcpy(&S.img[b->stage][b->first], b->h, 8 * b->n); args_dirty_stage(b->stage); } } else RED_ONCE(31, "图像槽越界 阶段 %d 起 %d 数 %d", b->stage, b->first, b->n); break; }
         case OP_STENCIL: {
@@ -10043,7 +10057,7 @@ static void draw_inner(const p_draw *dw, const p_draw_idx *di) {
         if (!strncmp(f->key, "ebcfcd1fa0a77dbc", 16) && !g_enc && R.rt.n == 1 && R.rt.color[0] && !R.clear_c[0]) {
             uint64_t h = 0; for (int i = 0; i < f->rf.nb && !h; i++) if (f->rf.b[i].kind == NVN_RB_TEX && f->rf.b[i].reg < 128) h = S.tex[1][f->rf.b[i].reg];
             if (h) { fx_from = R.rt.color[0]->serial; fx_to = h; PD("N %llu 跳过 FXAA：ser=%llu 的读者改读 ser=%llu", g_stat_pass, (unsigned long long)fx_from, (unsigned long long)h_ser(h)); return; } }
-        else if (fx_from && !strncmp(f->key, "52aac1f2306b8fc5", 16)) { for (int r = 0; r < 128; r++) if (S.tex[1][r] && h_ser(S.tex[1][r]) == fx_from) S.tex[1][r] = fx_to; fx_from = 0; } } }
+        else if (fx_from && !strncmp(f->key, "52aac1f2306b8fc5", 16)) { for (int r = 0; r < 128; r++) if (S.tex[1][r] && h_ser(S.tex[1][r]) == fx_from) S.tex[1][r] = fx_to; TEX_CHANGED(1); fx_from = 0; } } }
     { static uint64_t bloomq_frame; if (bloomq_frame != atomic_load(&g_cur_frame)) { bloomq_frame = atomic_load(&g_cur_frame); bloomq_reset(); }
       if (bloomq_enabled() && tbdr_on() && !g_defer_replaying && pr->sh[1]) {
         NvShader *f = pr->sh[1]; uint64_t tgt = 0; int lv, sl;
@@ -10072,7 +10086,7 @@ static void draw_inner(const p_draw *dw, const p_draw_idx *di) {
         } else if (g_bloomq.state == 2 && !strncmp(f->key, "cc264583f2000c81", 16)) {
             if (bloomq_target(&tgt, &lv, &sl) && tgt == g_bloomq.b0_ser) { g_bloomq.state = 3; PD("C %llu 泛光 1/4 跳过 B0 上采样", g_stat_pass); return; }
         } else if (g_bloomq.state == 3 && !strncmp(f->key, "2e2d6700a2569795", 16)) {
-            if (g_bloomq.b1_h) { for (int r = 0; r < 128; r++) if (S.tex[1][r] && h_ser(S.tex[1][r]) == g_bloomq.b0_ser) S.tex[1][r] = g_bloomq.b1_h; PD("D %llu 泛光 1/4 叠加改读 B1", g_stat_pass); g_bloomq_last_b0 = g_bloomq.b0_ser; g_bloomq_last_b1h = g_bloomq.b1_h; g_bloomq_last_b1s = g_bloomq.b1_ser; bloomq_reset(); }
+            if (g_bloomq.b1_h) { for (int r = 0; r < 128; r++) if (S.tex[1][r] && h_ser(S.tex[1][r]) == g_bloomq.b0_ser) S.tex[1][r] = g_bloomq.b1_h; TEX_CHANGED(1); PD("D %llu 泛光 1/4 叠加改读 B1", g_stat_pass); g_bloomq_last_b0 = g_bloomq.b0_ser; g_bloomq_last_b1h = g_bloomq.b1_h; g_bloomq_last_b1s = g_bloomq.b1_ser; bloomq_reset(); }
             else { RED_ONCE(63, "泛光 1/4 状态缺少 B1 句柄"); bloomq_reset(); }
         } else if (!g_bloomq.state && g_bloomq_last_b1h && h_ser(g_bloomq_last_b1h) == g_bloomq_last_b1s && !strncmp(f->key, "2e2d6700a2569795", 16)) {   // B1 句柄仍指同一张贴图（换分辨率重建后不认） | The B1 handle still points to the same texture (not recognized after a rebuild on resolution change)
             // 本帧泛光链没跑（运行时外推的外推帧跳过了它：输入 469 区域外是上一帧 LDR，不能跑）就到了泛光叠加：照最近一次改读 B1，叠上一帧的泛光。
@@ -10080,6 +10094,7 @@ static void draw_inner(const p_draw *dw, const p_draw_idx *di) {
             // The bloom overlay is reached without the bloom chain having run this frame (the extrapolated frame of runtime extrapolation skipped it: outside the region the input 469 is the previous frame's LDR, so it cannot run): redirect the read to B1 as last time, overlaying the previous frame's bloom.
             // Without the redirect it would read B0 -- with bloom 1/4 on, B0's upsample is always skipped and never written, so what is read is uninitialized video memory (on M4 Pro the units in the region turn entirely green; elsewhere it is mostly 0, i.e. missing bloom)
             int hit = 0; for (int r = 0; r < 128; r++) if (S.tex[1][r] && h_ser(S.tex[1][r]) == g_bloomq_last_b0) { S.tex[1][r] = g_bloomq_last_b1h; hit = 1; }
+            if (hit) TEX_CHANGED(1);
             if (hit) { PD("D %llu 泛光链没跑：叠加沿用上一帧 B1", g_stat_pass); static uint64_t n; if (n++ % 600 == 0) MLOG("泛光 1/4：泛光链没跑的帧叠加沿用上一帧 B1（第 %llu 次）", (unsigned long long)n); }
         } else if (g_bloomq.state) { RED_ONCE(61, "泛光 1/4 起点：链中途出现别的绘制，本帧泛光不完整"); bloomq_reset(); }
       }
@@ -13303,7 +13318,7 @@ int mtl_probe_storage_view(void) {
         view_t view={0};view.set_format=1;view.format=0x27;
         mtl_reg_tex(1,&alias,mode?&view:NULL);
         id<MTLBuffer> rb=probe_buf(4096);op_hdr end={OP_END,8};mtl_sub_begin();mtl_exec((const uint8_t *)&end);
-        if(kind==2)S.img[stage][reg]=1;else S.tex[stage][reg]=1;
+        if(kind==2)S.img[stage][reg]=1;else { S.tex[stage][reg]=1; TEX_CHANGED(stage); }
         for(int layer=0;layer<2;layer++)for(int level=0;level<2;level++) {
             memset(&R,0,sizeof R);R.has_rt=1;R.rt.n=1;R.rt.color[0]=&t;R.rt.has_cview[0]=1;
             view_t *v=&R.rt.cview[0];v->set_levels=v->set_layers=1;v->base_level=level;v->nlevels=1;v->min_layer=layer;v->nlayers=1;
@@ -13899,7 +13914,7 @@ int mtl_probe_drv_c0(void) {
     uint64_t value; memcpy(&value,bytes+0x140,8);
     if (value != 0x123456789abcdef0ull || *(const uint32_t *)(bytes+0x148)!=12345 || *(const float *)(bytes+0x610)!=2047.9375f) MDIE("drv-cache probe: changed vertex storage binding");
     checked += 3;
-    driver_bank_gpu(2,0,&bank_buffer); S.tex[0][3]=0x80000042; S.samp[0][3]=0x123;
+    driver_bank_gpu(2,0,&bank_buffer); S.tex[0][3]=0x80000042; TEX_CHANGED(0); S.samp[0][3]=0x123;
     driver_bank_gpu(2,0,&bank_buffer); bc=&g_driver_bank[0][1]; bytes=(const uint8_t *)bank_buffer.contents+bc->offset;
     if (*(const uint32_t *)(bytes+0x180)!=0x80000042 || *(const uint32_t *)(bytes+0x580)!=0x123 || *(const uint32_t *)(bytes+0x38)!=0x80000042) MDIE("drv-cache probe: changed texture/sampler handle");
     checked += 3;
@@ -13914,7 +13929,7 @@ int mtl_probe_drv_c0(void) {
     mtl_sub_begin(); mtl_exec((const uint8_t *)&end); misses=g_driver_miss; driver_bank_gpu(0,5,&bank_buffer);
     if(g_driver_miss!=misses+1) MDIE("drv-cache probe: bank survived arena epoch change"); checked++;
     mtl_sub_commit(); mtl_finish();
-    memset(&S.ssbo,0,sizeof S.ssbo); memset(&S.ubo,0,sizeof S.ubo); memset(&S.tex,0,sizeof S.tex); memset(&S.samp,0,sizeof S.samp);
+    memset(&S.ssbo,0,sizeof S.ssbo); memset(&S.ubo,0,sizeof S.ubo); memset(&S.tex,0,sizeof S.tex); for(int st=0;st<6;st++)TEX_CHANGED(st); memset(&S.samp,0,sizeof S.samp);
     serial_put(p.serial, nil); mtl_pool_del(mem); free(mem);
     return checked;
 }
