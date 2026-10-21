@@ -56,9 +56,12 @@ int mtl_probe_sampler_border(void) {
             memset(g_pass.cfmt,0,sizeof g_pass.cfmt);g_pass.cfmt[0]=MTLPixelFormatRGBA32Float;g_pass.dfmt=0;g_pass.sfmt=0;g_pass.samples=1;g_pass.layered=0;g_pass.serial++;
             id<MTLRenderPipelineState> pipeline=pso_get(program,nil);if(!pipeline)MDIE("border probe PSO");
             {   // the recipe the pipeline is recorded with (pso_adopt B row) reads back exactly and names the same variant (warm_border)
-                border_in b,r;NSString *key=border_key(sh[stage],stage,b.c,b.a,b.x,&b.n);
+                border_in b,r;NSString *key=border_key(sh[stage],stage,b.c,b.a,b.x,b.p,&b.n);
                 if(key){
                     if(!border_parse(key,&r)||r.n!=b.n)MDIE("border probe recipe %s does not read back",key.UTF8String);
+                    for(int i=0;i<b.n;i++){const samp_par *bp=&b.p[i],*rp=&r.p[i];int f=border_filtered(bp);
+                        if(f!=border_filtered(rp)||(f&&(rp->ws!=bp->ws||rp->wt!=bp->wt||rp->wr!=bp->wr||rp->magf!=bp->magf||rp->minf!=bp->minf||rp->aniso!=bp->aniso||rp->lod_min!=bp->lod_min||rp->lod_max!=bp->lod_max)))MDIE("border probe recipe %s lost filter state",key.UTF8String);
+                        if(f)checked++;}
                     for(int i=0;i<b.n;i++)if(r.a[i]!=b.a[i]||r.x[i]!=b.x[i]||memcmp(r.c[i],b.c[i],sizeof r.c[i]))MDIE("border probe recipe %s read back differently",key.UTF8String);
                     id<MTLFunction> from_draw=stage?fs_fn_border(sh[1],0,NULL):vs_fn_for(sh[0],sh[1],0,1,NULL);
                     id<MTLFunction> from_recipe=stage?fs_fn_border_with(sh[1],0,key,r,NULL):vs_fn_variant(sh[0],sh[1],0,key,r,NULL);
