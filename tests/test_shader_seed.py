@@ -221,13 +221,123 @@ class ShaderKeyScope(unittest.TestCase):
                 self.assertEqual(inventory.call_count, 1)
                 # A pre-metadata seed may have all successful translations and matching build hashes. It must still
                 # regenerate its inventory instead of treating that smaller list as the game's full scope.
+                # (The scan itself comes from the inventory cache now: the RomFS is read once.)
                 del manifest['files']['shader-keys.json']
                 (output/'seed-manifest.json').write_text(json.dumps(manifest))
-                seed.prepare(romfs, output, translator, cross, '1.2.1', shared)
-                self.assertEqual(inventory.call_count, 2)
+                again = seed.prepare(romfs, output, translator, cross, '1.2.1', shared)
+                self.assertIn('shader-keys.json', again['files'])
+                self.assertEqual(json.loads((output/'shader-keys.json').read_text())['keys'], scope['keys'])
                 (output/'shader-keys.json').unlink()
-                seed.prepare(romfs, output, translator, cross, '1.2.1', shared)
-                self.assertEqual(inventory.call_count, 3)
+                again = seed.prepare(romfs, output, translator, cross, '1.2.1', shared)
+                self.assertEqual(json.loads((output/'shader-keys.json').read_text())['keys'], scope['keys'])
+                self.assertEqual(inventory.call_count, 1)
+
+    def prepare_with_service(self, root, output, listed=(), translator_text='', fail=(), inventory_calls=None):
+        """prepare() with a synthetic service; returns (manifest, the variants it was asked to translate)."""
+        asked = []
+
+        class Service:
+            def __init__(self, *args, **kwargs):
+                self.stdin = self.stdout = self
+                self.reply = ''
+
+            def write(self, line):
+                request = json.loads(line)
+                asked.append(request['variant'])
+                if request['variant'] in fail:
+                    self.reply = '{"ok":false,"error":"synthetic failure"}\n'
+                    return
+                base = Path(request['code']).with_suffix('')
+                deps = {k: request[k] for k in ('tex', 'img', 'attr', 'fout')}
+                base.with_name(base.name+'_b.metal').write_text('// synthetic '+request['variant'])
+                base.with_name(base.name+'_b.json').write_text(json.dumps(
+                    dict(chain=seed.CHAIN, stage=request['stage'], deps=deps)))
+                self.reply = '{"ok":true}\n'
+
+            def flush(self): pass
+            def close(self): pass
+            def wait(self): return 0
+            def readline(self): return self.reply
+
+        romfs = root/'romfs'; romfs.mkdir(exist_ok=True)
+        (romfs/'index.json').write_text(json.dumps(dict(romfs_sha256='c'*64)))
+        translator, cross, shared = [root/name for name in ['translator', 'spirv-cross', 'list.tsv']]
+        translator.write_text(translator_text); cross.write_text('')
+        shared.write_text(''.join(f'V\t{key}\t{deps}\n' for key, deps in listed))
+        rows = list(seed.bnsh_shaders(bnsh()))
+        shaders = {key: (stage, control, code, 'Shader/test') for key, stage, control, code in rows}
+        startup = {rows[0][0], rows[1][0]}
+        with mock.patch.object(seed, 'MIN_SHADERS', 1), mock.patch.dict(seed.GAMES['totk'], min_shaders=1), \
+                mock.patch.object(seed, 'inventory', return_value=({}, dict(shaders), set(startup), [])) as inventory, \
+                mock.patch.object(seed, 'located', return_value={}), \
+                mock.patch.object(seed, 'source_reader', return_value=lambda _: None), \
+                mock.patch.object(seed.ShaderList, 'load', return_value=mock.Mock(
+                    variants={(key, deps) for key, deps in listed}, locators=set())), \
+                mock.patch.object(seed.subprocess, 'Popen', side_effect=Service):
+            manifest = seed.prepare(romfs, output, translator, cross, '1.2.1', shared)
+        if inventory_calls is not None:
+            inventory_calls.append(inventory.call_count)
+        return manifest, asked, rows
+
+    @staticmethod
+    def tree(folder):
+        return {p.name: p.read_bytes() for p in sorted(folder.iterdir()) if p.name != 'seed-manifest.json'}
+
+    @staticmethod
+    def deps(**answers):
+        return json.dumps(answers, sort_keys=True, separators=(',', ':'))
+
+    def test_a_longer_list_translates_only_its_new_bind_states_and_gives_the_same_seed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            rows = list(seed.bnsh_shaders(bnsh()))
+            first = [(rows[0][0], self.deps(tex={'1': 'cube'}))]
+            more = first+[(rows[1][0], self.deps(tex={'2': '3d'}))]
+            calls = []
+            _, asked, _ = self.prepare_with_service(root, root/'seed', first, inventory_calls=calls)
+            self.assertEqual(len(asked), 3)   # two default bind states and one listed
+            (root/'seed'/('f'*64+'-'+'0'*12+'_b.metal')).write_text('left from an older seed')   # removed, not kept
+            manifest, asked, _ = self.prepare_with_service(root, root/'seed', more, inventory_calls=calls)
+            self.assertEqual(asked, [rows[1][0]+'-'+seed.suffix({**seed.ANSWERS, 'tex': {'2': '3d'}})])
+            self.assertEqual(calls, [1, 0])   # the RomFS was not scanned again
+            self.assertEqual(manifest['shaders'], 4)
+            # A fresh preparation of the longer list, with no caches, gives byte-identical files.
+            fresh = root/'fresh'; fresh.mkdir()
+            full, asked, _ = self.prepare_with_service(fresh, fresh/'seed', more)
+            self.assertEqual(len(asked), 4)
+            self.assertEqual(self.tree(root/'seed'), self.tree(fresh/'seed'))
+            self.assertEqual(manifest['files'], full['files'])
+
+    def test_a_new_translator_empties_the_translation_cache(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.prepare_with_service(root, root/'seed')
+            _, asked, _ = self.prepare_with_service(root, root/'seed', translator_text='another build')
+            self.assertEqual(len(asked), 2)
+
+    def test_failed_translations_are_remembered_and_unused_entries_dropped(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            rows = list(seed.bnsh_shaders(bnsh()))
+            broken = rows[1][0]+'-'+seed.SUFFIX
+            listed = [(rows[0][0], self.deps(tex={'1': 'cube'}))]
+            manifest, asked, _ = self.prepare_with_service(root, root/'seed', listed, fail={broken})
+            self.assertEqual([r['variant'] for r in manifest['skipped']], [broken])
+            again, asked, _ = self.prepare_with_service(root, root/'seed', (), fail={broken})
+            self.assertEqual(asked, [])
+            self.assertEqual(again['skipped'], manifest['skipped'])
+            dropped = listed[0][0]+'-'+seed.suffix({**seed.ANSWERS, 'tex': {'1': 'cube'}})
+            self.assertFalse(any(p.name.startswith(dropped) for p in (root/'seed.translations').iterdir()))
+
+    def test_a_changed_inventory_cache_is_scanned_again(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); calls = []
+            self.prepare_with_service(root, root/'seed', inventory_calls=calls)
+            blob = root/'seed.inventory'/'shaders.bin'
+            data = bytearray(blob.read_bytes()); data[0] ^= 1; blob.write_bytes(bytes(data))
+            listed = [(list(seed.bnsh_shaders(bnsh()))[0][0], self.deps(tex={'9': 'cube'}))]   # not the whole-seed reuse
+            self.prepare_with_service(root, root/'seed', listed, inventory_calls=calls)
+            self.assertEqual(calls, [1, 1])
 
     def test_reuse_rejects_wrong_scope_identity_even_with_a_matching_file_hash(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -330,6 +440,31 @@ int main(int argc, const char **argv) { @autoreleasepool {
             self.assertEqual(result['imported_files'], 0)
             self.assertEqual(sorted(result['overlay']), sorted(json.loads((source/'seed-manifest.json').read_text())['files']))
             self.assertEqual(list(cache.iterdir()), [])
+
+    def test_a_seed_inside_a_signed_mac_app_is_read_in_place(self):
+        # The Mac app (build_app.py) carries its seed in the signed bundle, as iOS does: no hash, no copy (63 s on the
+        # first start after a packaging, 2026-10-21). Outside a signed .app, or with TOTK_SHADER_SEED_IN_PLACE=0, the
+        # seed is checked and imported as before.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            app = root/'Game.app'
+            (app/'Contents/_CodeSignature').mkdir(parents=True)
+            (app/'Contents/_CodeSignature/CodeResources').write_text('seal')
+            inside = app/'Contents/Resources/totk/build'; inside.mkdir(parents=True)
+            source, cache, key, variant = self.fixture(inside)
+            env = {k: v for k, v in os.environ.items() if k != 'TOTK_SHADER_SEED_IN_PLACE'}
+            probe = lambda extra={}: subprocess.run([str(self.binary), str(source), str(cache)], capture_output=True,
+                                                    text=True, env=env | extra)
+            r = probe(); self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(json.loads(r.stdout).get('sealed'))
+            self.assertEqual(list(cache.iterdir()), [])
+            r = probe({'TOTK_SHADER_SEED_IN_PLACE': '0'}); self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertGreater(json.loads(r.stdout)['imported_files'], 0)
+            shutil.rmtree(cache); cache.mkdir()
+            (app/'Contents/_CodeSignature/CodeResources').unlink()   # not signed: checked and imported
+            r = probe(); self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertFalse(json.loads(r.stdout).get('sealed'))
+            self.assertGreater(json.loads(r.stdout)['imported_files'], 0)
 
     def test_a_cache_with_files_is_merged_file_by_file(self):
         with tempfile.TemporaryDirectory() as folder:

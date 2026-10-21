@@ -869,6 +869,45 @@ def place_data_bundle(bundle, app, res, version):
     link.symlink_to(os.path.relpath(app / 'Contents/Helpers' / bundle.name / 'Contents/Resources/romfs.bin', link.parent))
 
 
+def app_seal_valid(app):
+    """The app's own seal, which records each helper bundle's signature (not --deep: that hashes the 16 GB image)."""
+    return subprocess.run(['codesign', '--verify', '--strict', app], capture_output=True).returncode == 0
+
+
+def keep_game_data(new, old, *, verify=app_seal_valid):
+    """When the app being replaced carries the same signed game data as the new one (the same signature, which names the
+    image's SHA-256, the same Info.plist and image size), move its data bundle into the new app in place of the fresh
+    clone. The image keeps its inode and times, so the runtime's RomFS verification record (runtime/romfs.c, keyed by
+    them) still matches and the first start after a packaging does not hash 16 GB again (19.5 s, 2026-10-21). An image
+    changed since keeps nothing either: its modification time moved, so the runtime hashes it and refuses it. Called when
+    the old app no longer runs, just before it is replaced; if the new app's seal does not verify, the clone goes back."""
+    image = 'Contents/Resources/romfs.bin'
+    kept = False
+    for bundle in sorted((new / 'Contents/Helpers').glob('GameData-*.bundle')):
+        before = old / 'Contents/Helpers' / bundle.name
+        if not all((before / rel).is_file() and (before / rel).read_bytes() == (bundle / rel).read_bytes()
+                   for rel in ('Contents/_CodeSignature/CodeResources', 'Contents/Info.plist')):
+            continue
+        if not (before / image).is_file() or (before / image).stat().st_size != (bundle / image).stat().st_size:
+            continue
+        fresh = new.with_name(f'{new.name}.{bundle.name}.fresh')   # outside the app: anything extra in it fails the seal
+        if fresh.exists():
+            remove_tree(fresh)
+        bundle.rename(fresh)
+        try:
+            before.rename(bundle)
+        except OSError:
+            fresh.rename(bundle)
+            continue
+        if not verify(new):
+            bundle.rename(before)
+            fresh.rename(bundle)
+            continue
+        remove_tree(fresh)
+        kept = True
+    return kept
+
+
 def sign_app(app, logs):
     # Seal the bundle, including Info.plist and game resources. Copied helper
     # executables keep their existing signatures and byte identity.
@@ -942,6 +981,8 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
             say('4/4 app: replacement is ready; waiting for the running game to close before updating it')
             notified = time.monotonic()
         time.sleep(2)
+    if out.exists() and keep_game_data(tmp, out):
+        say('4/4 app: the game data is unchanged; kept the installed copy, so the first start need not verify it again')
     if out.exists():
         remove_tree(out)
     tmp.rename(out)
