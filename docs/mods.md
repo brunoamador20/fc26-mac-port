@@ -175,8 +175,8 @@ What the build does, in order:
 2. Applies the mod's patches. Offsets are **main addresses** - the address space the game's code lives
    in, the same numbers the app's own patch tables use:
 
-   - `.pchtxt`: the community format, read as the runtime's own `TOTK_PCHTXT` reader does - plus the section
-     switches this build honours (`@disabled`, `@flag`, see below; the runtime's reader skips both for now). The first line must be
+   - `.pchtxt`: the community format, read the same way as the runtime's own `TOTK_PCHTXT` reader (section
+     switches and `@flag` lines included, see below). The first line must be
      `@nsobid-<build id>`: the 16 bytes the rewriter's tables use (32 hex digits) or the 20 bytes the
      runtime compares (40 hex digits; the runtime's own `TOTK_PCHTXT` experiment takes only that longer
      form). Patch lines `<hex main address> <hex bytes>` follow, and only lines after `@enabled` count:
