@@ -4594,7 +4594,7 @@ static int scissor_full(const tex_t *t, const view_t *v, int has_v) {
 // ================= 着色器 / 描述符池 / 管线 / 绘制 =================
 // ================= Shaders / descriptor pool / pipelines / draws =================
 #include "nvn_registry_lock.h"
-static pthread_mutex_t g_rmu = PTHREAD_MUTEX_INITIALIZER;
+static os_unfair_lock g_rmu = OS_UNFAIR_LOCK_INIT;
 static _Thread_local unsigned g_rmu_depth;
 static inline int registry_lock(void) { return nvn_registry_enter(&g_rmu, &g_rmu_depth); }
 static inline void registry_unlock(void) { nvn_registry_leave(&g_rmu, &g_rmu_depth); }
@@ -5311,7 +5311,7 @@ static void pkg_evict_sweep(void) {
     if (!mode || (g_sub_serial & 3)) return;
     uint64_t avail = 0, want = 0;
     if (mode == 1) { avail = evict_available(); if (!avail || avail >= low) return; want = high - avail; }
-    pthread_mutex_lock(&g_rmu);
+    registry_lock();
     pthread_mutex_lock(&g_smu);
     /* texture-pool ids resolved on the fast path count as uses of their serial's copy */
     for (int i = 0; i < g_ntreg; i++) {
@@ -5352,7 +5352,7 @@ static void pkg_evict_sweep(void) {
         }
     }
     pthread_mutex_unlock(&g_smu);
-    pthread_mutex_unlock(&g_rmu);
+    registry_unlock();
     free(c);
     if (k) {
         g_pkg_evicted += k; g_pkg_evicted_mb_x += freed >> 20; g_evict_sweeps++;
