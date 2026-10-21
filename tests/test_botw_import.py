@@ -101,6 +101,33 @@ class BotwImport(unittest.TestCase):
         self.assertFalse(aoc.parent.exists())
         self.assertFalse(config.exists())
 
+    def cached_romfs(self):
+        tree = self.root / 'tree'
+        folder = tree / 'extracted/botw160/romfs'
+        folder.mkdir(parents=True)
+        (folder / 'romfs.bin').write_bytes(b'cached')
+        (folder / 'index.json').write_text(json.dumps({'status': 'pass', 'romfs_sha256': 'verified'}))
+        return tree, dict(build_app.BOTW160, romfs={'sha256': 'verified', 'size': 6})
+
+    def test_fonts_from_firmware(self):
+        tree, expected = self.cached_romfs()
+        firmware = self.root / 'firmware'
+        with patch.object(build_app, 'BOTW160', expected), patch.object(build_app, 'fonts_valid', return_value=False), \
+                patch.object(build_app, 'run') as run, patch.object(build_app, 'validate_fonts') as validate:
+            build_app.step_data_botw(tree, BOTW.parent, self.base, self.keys, self.root / 'logs', firmware=firmware,
+                                     update=self.update)
+        command = run.call_args.args[0]
+        self.assertIn('scripts/extract_shared_fonts.py', command)
+        self.assertEqual(command[command.index('--firmware') + 1], firmware)
+        self.assertEqual(command[command.index('--output') + 1], tree / 'extracted/firmware/shared-fonts')
+        validate.assert_called_once()
+
+    def test_no_font_source_names_both_options(self):
+        tree, expected = self.cached_romfs()
+        with patch.object(build_app, 'BOTW160', expected), patch.object(build_app, 'fonts_valid', return_value=False), \
+                self.assertRaisesRegex(build_app.BuildError, '--firmware .* or --shared-fonts'):
+            build_app.step_data_botw(tree, BOTW.parent, self.base, self.keys, self.root / 'logs', update=self.update)
+
     def test_bundle_without_expansion_pass(self):
         tree = self.root / 'tree'
         files = ['build/totk-native-botw160', 'build/pso_manifest.tsv', 'build/pso_title.tsv',

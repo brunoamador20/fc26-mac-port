@@ -116,6 +116,15 @@ class ModManifest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('1 files', result.stdout)
 
+    def test_botw_app_path_takes_the_version_from_the_folder(self):
+        app = self.root/'Breath of the Wild.app'
+        fake_romfs(app/'Contents/Resources/totk/extracted/botw160/romfs')
+        self.mod = self.root/'mods/botw160'
+        self.put('Pack/A.pack.zs', b'modded a')
+        result = run(self.mod, '--app', app)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('1 files', result.stdout)
+
 
 
 COMMON = 'UI/LayoutArchive/Common.Product.110.Nin_NX_NVN.blarc.zs'

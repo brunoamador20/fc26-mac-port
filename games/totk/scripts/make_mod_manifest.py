@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Write the manifest.tsv of a player's RomFS mod (runtime/romfs.c loads it from TOTK_ROMFS_MODS, which the launcher sets to
-~/Library/Application Support/MacNativeGames/TOTK/mods/<version>).
+~/Library/Application Support/MacNativeGames/TOTK/mods/<version>, or .../BotW/mods/botw160 for Breath of the Wild).
 
 The mod folder holds the replacement files under their RomFS paths (for example Sound/Resource/Stream/Dm_OP_0001.bwav).
 A path the app replaces itself (its romfs-patches and the 2K romfs-patches-out overlays) is left out with a line
@@ -24,7 +24,7 @@ the build's patched members. The merged archive takes the mod file's place (the 
 original: runtime/romfs.c then lets it replace the build's overlay. Any other collision still stops the start. --check
 writes nothing, so it reports what it would merge and leaves the merging to the run that writes.
 
-usage: make_mod_manifest.py <mod folder> (--app <Tears of the Kingdom.app> | --romfs <folder>) [--version v143]
+usage: make_mod_manifest.py <mod folder> (--app <Tears of the Kingdom.app | Breath of the Wild.app> | --romfs <folder>) [--version v143]
                               [--exclude <RomFS path or glob>]... [--check]
 """
 import argparse
@@ -36,6 +36,7 @@ import struct
 import sys
 
 VERSIONS = ('v0', 'v112', 'v121', 'v143')
+APP_VERSIONS = VERSIONS + ('botw160',)   # the folders an app's RomFS can sit in (VERSIONS: Tears of the Kingdom only)
 CHUNK = 8 << 20
 # Windows/macOS droppings that mod managers (TKMM, Ryujinx output folders) leave in a RomFS tree: never a game file.
 JUNK = {'desktop.ini', 'thumbs.db', '.ds_store'}
@@ -304,9 +305,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('mod', type=Path, help='the mod folder, files under their RomFS paths')
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument('--app', type=Path, help='the built Tears of the Kingdom.app')
+    source.add_argument('--app', type=Path, help='the built Tears of the Kingdom.app or Breath of the Wild.app')
     source.add_argument('--romfs', type=Path, help='a folder holding romfs.bin and runtime-index.bin')
-    parser.add_argument('--version', choices=VERSIONS, help='the game version (default: the mod folder name)')
+    parser.add_argument('--version', choices=APP_VERSIONS, help='the game version (default: the mod folder name)')
     parser.add_argument('--exclude', action='append', default=[], metavar='PATH',
                         help='a RomFS path or glob to leave out of the manifest as well (files the app replaces itself '
                              'are left out without it)')
@@ -314,11 +315,11 @@ def main():
                         help='check the folder and say what the manifest would hold; write nothing (build_app.py runs '
                              'this before it replaces a player\'s mod folder)')
     args = parser.parse_args()
-    version = args.version or (args.mod.resolve().name if args.mod.resolve().name in VERSIONS else None)
+    version = args.version or (args.mod.resolve().name if args.mod.resolve().name in APP_VERSIONS else None)
     romfs = args.romfs
     if args.app:
         if not version:
-            parser.error('name the game version with --version (or name the mod folder v0, v112, v121 or v143)')
+            parser.error('name the game version with --version (or name the mod folder v0, v112, v121, v143 or botw160)')
         romfs = args.app/f'Contents/Resources/totk/extracted/{version}/romfs'
     for need in ('romfs.bin', 'runtime-index.bin'):
         if not (romfs/need).is_file():

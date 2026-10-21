@@ -14,7 +14,9 @@
 //    gpuarchiver-*, about 380 KB, PersistentState and its parts) that Metal never removes, not even when the process exits:
 //    432 folders in a one-minute first run, 65,536 folders and 25 GB overnight until no folder could be made any more
 //    (reported by the other session, 2026-10-21). Nothing holds them open once the archive is written, so par_write
-//    removes the one its own write made (par_ga_*).
+//    removes the one its own write made (par_ga_*). The folder sits under the app's bundle id when it has one
+//    (iPhone 14, 2026-10-21: 239 folders left in Library/Caches/<bundle id>/com.apple.gpuarchiver while the first
+//    version of this looked one level up).
 // The key only finds the file: Metal checks the functions and state, so a wrong file is a miss, never a wrong pipeline.
 // On everywhere; TOTK_PIPELINE_ARCHIVE=0 turns it off. Valid for one OS version, GPU and translation chain
 // (pipelines/identity.json); otherwise the folder is removed. Included by nvn_mtl.m after MLOG and g_dev.
@@ -60,27 +62,49 @@ static NSString *par_hash(const void *bytes, size_t n) {
     for (int i = 0; i < 20; i++) [s appendFormat:@"%02x", d[i]];   // 160 bits name a file
     return s;
 }
-/* The folder Metal's archive builder works in (see the top). It is per user on the Mac, so other programs' folders are there
-   too: par_write removes only folders that appeared while it wrote, and writes one at a time (g_par_wmu) so a folder that
-   appears then is its own. */
+/* The folder Metal's archive builder works in (see the top) is com.apple.gpuarchiver under a cache folder, inside a folder
+   named after the bundle id when the program has one (iPhone 14: Library/Caches/<bundle id>/com.apple.gpuarchiver; a bare
+   Mac binary such as build/totk-native-v143: <user cache folder>/com.apple.gpuarchiver; a packaged Mac app:
+   <user cache folder>/<bundle id>/...). The first version took only confstr's user cache folder, which the iPhone app does
+   not get, and removed nothing there (2026-10-21). So every candidate is watched: confstr's folder and the Caches folder,
+   each with and without the bundle id. Folders under the bundle id are this app's own (own: 1); the others are shared with
+   other programs. par_write removes only folders that appeared while it wrote, and writes one at a time (g_par_wmu), so a
+   folder that appears then is its own. */
 static pthread_mutex_t g_par_wmu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_par_ga_removed;
-static NSString *par_ga_dir(void) {
-    static NSString *dir; static dispatch_once_t once;
-    dispatch_once(&once, ^{ char b[PATH_MAX]; if (confstr(_CS_DARWIN_USER_CACHE_DIR, b, sizeof b)) dir = [@(b) stringByAppendingPathComponent:@"com.apple.gpuarchiver"]; });
-    return dir;
+static NSArray<NSDictionary *> *par_ga_dirs(void) {   // @{path, own}
+    static NSArray *dirs; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSMutableArray *bases = [NSMutableArray array];
+        char b[PATH_MAX]; if (confstr(_CS_DARWIN_USER_CACHE_DIR, b, sizeof b)) [bases addObject:@(b)];
+        NSString *caches = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
+        if (caches) [bases addObject:caches];
+        NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
+        NSMutableArray *out = [NSMutableArray array]; NSMutableSet *seen = [NSMutableSet set];
+        for (NSString *base in bases) for (int own = bundle.length ? 1 : 0; own >= 0; own--) {
+            NSString *dir = [(own ? [base stringByAppendingPathComponent:bundle] : base) stringByAppendingPathComponent:@"com.apple.gpuarchiver"];
+            dir = dir.stringByResolvingSymlinksInPath.stringByStandardizingPath;
+            if (![seen containsObject:dir]) { [seen addObject:dir]; [out addObject:@{@"path": dir, @"own": @(own)}]; }
+        }
+        dirs = out;
+    });
+    return dirs;
 }
-static NSSet<NSString *> *par_ga_list(void) {
-    NSString *dir = par_ga_dir();
-    return [NSSet setWithArray:(dir ? [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] : nil) ?: @[]];
+static NSSet<NSString *> *par_ga_list(int own_only) {   // full paths of the build folders there now
+    NSMutableSet *s = [NSMutableSet set];
+    for (NSDictionary *d in par_ga_dirs()) {
+        if (own_only && ![d[@"own"] boolValue]) continue;
+        for (NSString *name in [NSFileManager.defaultManager contentsOfDirectoryAtPath:d[@"path"] error:nil] ?: @[])
+            if ([name hasPrefix:@"gpuarchiver-"]) [s addObject:[d[@"path"] stringByAppendingPathComponent:name]];
+    }
+    return s;
 }
 static void par_ga_remove_new(NSSet<NSString *> *before) {
-    NSMutableSet<NSString *> *made = [par_ga_list() mutableCopy]; [made minusSet:before];
-    for (NSString *name in made) {
-        if (![name hasPrefix:@"gpuarchiver-"]) continue;
+    NSMutableSet<NSString *> *made = [par_ga_list(0) mutableCopy]; [made minusSet:before];
+    for (NSString *path in made) {
         NSError *e = nil;
-        if ([NSFileManager.defaultManager removeItemAtPath:[par_ga_dir() stringByAppendingPathComponent:name] error:&e]) atomic_fetch_add(&g_par_ga_removed, 1);
-        else { static _Atomic int said; if (atomic_fetch_add(&said, 1) < 4) MLOG("【红】管线存档：删不掉 Metal 留下的工作目录 %s（%s）", name.UTF8String, e.localizedDescription.UTF8String); }
+        if ([NSFileManager.defaultManager removeItemAtPath:path error:&e]) atomic_fetch_add(&g_par_ga_removed, 1);
+        else { static _Atomic int said; if (atomic_fetch_add(&said, 1) < 4) MLOG("【红】管线存档：删不掉 Metal 留下的工作目录 %s（%s）", path.UTF8String, e.localizedDescription.UTF8String); }
     }
 }
 // Once: the folder of this OS version, GPU and chain, and the keys it has files for.
@@ -89,17 +113,17 @@ static void par_open_dir(id<MTLDevice> dev) {
     dispatch_once(&once, ^{
         if (!par_enabled()) return;
         NSFileManager *fm = NSFileManager.defaultManager;
-#if TARGET_OS_IPHONE
-        /* On iOS the folder is this app's own, so every build folder in it was left by an earlier run (a 4,615-pipeline first
-           run before par_ga_remove_new left 4,615). Removed in the background, holding the write lock so no write is under way. */
+        /* The app's own folders (under its bundle id) hold only build folders left by earlier runs (a crash in a write;
+           before par_ga_remove_new, every write). Removed in the background, holding the write lock so no write is under
+           way. Shared folders (a bare binary's) keep everything but what par_write itself made. */
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             pthread_mutex_lock(&g_par_wmu); NSUInteger n = 0;
-            for (NSString *name in par_ga_list())
-                if ([name hasPrefix:@"gpuarchiver-"] && [NSFileManager.defaultManager removeItemAtPath:[par_ga_dir() stringByAppendingPathComponent:name] error:nil]) n++;
+            for (NSString *path in par_ga_list(1)) if ([NSFileManager.defaultManager removeItemAtPath:path error:nil]) n++;
             pthread_mutex_unlock(&g_par_wmu);
-            if (n) MLOG("管线存档：删掉以前留下的 Metal 工作目录 %lu 个", (unsigned long)n);
+            NSMutableArray *where = [NSMutableArray array];
+            for (NSDictionary *d in par_ga_dirs()) [where addObject:[NSString stringWithFormat:@"%@（%@）", d[@"path"], [d[@"own"] boolValue] ? @"本 App 的" : @"共用"]];
+            MLOG("管线存档：Metal 的工作目录查这些：%s；启动时删掉以前留下的 %lu 个", [where componentsJoinedByString:@"，"].UTF8String, (unsigned long)n);
         });
-#endif
         NSString *stamp_path = [par_dir() stringByAppendingPathComponent:@"identity.json"];
         NSData *sd = [NSData dataWithContentsOfFile:stamp_path];
         NSDictionary *stamp = sd ? [NSJSONSerialization JSONObjectWithData:sd options:0 error:nil] : nil;
@@ -144,7 +168,7 @@ static void par_write(id<MTLDevice> dev, NSString *key, id desc) {
     NSError *e = nil; BOOL ok;
     NSString *path = par_file(key), *temp = [path stringByAppendingString:@".tmp"];
     pthread_mutex_lock(&g_par_wmu);
-    NSSet<NSString *> *before = par_ga_list();
+    NSSet<NSString *> *before = par_ga_list(0);
     @autoreleasepool {
         id<MTLBinaryArchive> a = [dev newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:&e];
         ok = a && ([desc isKindOfClass:MTLRenderPipelineDescriptor.class] ? [a addRenderPipelineFunctionsWithDescriptor:desc error:&e]

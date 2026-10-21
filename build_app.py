@@ -1068,6 +1068,45 @@ def place_data_bundle(bundle, app, res, version):
     link.symlink_to(os.path.relpath(app / 'Contents/Helpers' / bundle.name / 'Contents/Resources/romfs.bin', link.parent))
 
 
+def app_seal_valid(app):
+    """The app's own seal, which records each helper bundle's signature (not --deep: that hashes the 16 GB image)."""
+    return subprocess.run(['codesign', '--verify', '--strict', app], capture_output=True).returncode == 0
+
+
+def keep_game_data(new, old, *, verify=app_seal_valid):
+    """When the app being replaced carries the same signed game data as the new one (the same signature, which names the
+    image's SHA-256, the same Info.plist and image size), move its data bundle into the new app in place of the fresh
+    clone. The image keeps its inode and times, so the runtime's RomFS verification record (runtime/romfs.c, keyed by
+    them) still matches and the first start after a packaging does not hash 16 GB again (19.5 s, 2026-10-21). An image
+    changed since keeps nothing either: its modification time moved, so the runtime hashes it and refuses it. Called when
+    the old app no longer runs, just before it is replaced; if the new app's seal does not verify, the clone goes back."""
+    image = 'Contents/Resources/romfs.bin'
+    kept = False
+    for bundle in sorted((new / 'Contents/Helpers').glob('GameData-*.bundle')):
+        before = old / 'Contents/Helpers' / bundle.name
+        if not all((before / rel).is_file() and (before / rel).read_bytes() == (bundle / rel).read_bytes()
+                   for rel in ('Contents/_CodeSignature/CodeResources', 'Contents/Info.plist')):
+            continue
+        if not (before / image).is_file() or (before / image).stat().st_size != (bundle / image).stat().st_size:
+            continue
+        fresh = new.with_name(f'{new.name}.{bundle.name}.fresh')   # outside the app: anything extra in it fails the seal
+        if fresh.exists():
+            remove_tree(fresh)
+        bundle.rename(fresh)
+        try:
+            before.rename(bundle)
+        except OSError:
+            fresh.rename(bundle)
+            continue
+        if not verify(new):
+            bundle.rename(before)
+            fresh.rename(bundle)
+            continue
+        remove_tree(fresh)
+        kept = True
+    return kept
+
+
 def sign_app(app, logs):
     # Seal the bundle, including Info.plist and game resources. Copied helper
     # executables keep their existing signatures and byte identity.
@@ -1141,6 +1180,8 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
             say('4/4 app: replacement is ready; waiting for the running game to close before updating it')
             notified = time.monotonic()
         time.sleep(2)
+    if out.exists() and keep_game_data(tmp, out):
+        say('4/4 app: the game data is unchanged; kept the installed copy, so the first start need not verify it again')
     if out.exists():
         remove_tree(out)
     tmp.rename(out)
@@ -1287,10 +1328,10 @@ def step_code_botw(tree, botw, game, keys, env, logs):
     report_path.write_text(json.dumps(report, indent=2) + '\n')
 
 
-def step_data_botw(tree, botw, game, keys, logs, *, shared_fonts=None, update=None):
+def step_data_botw(tree, botw, game, keys, logs, *, firmware=None, shared_fonts=None, update=None):
     """The base + 1.6.0 RomFS merged from the card image (games/botw/scripts/extract_romfs.py, hactool BKTR), the two
     add-on content volumes (extract_aoc_romfs.py), and the shared fonts: this card's system update partition is empty, so
-    they come from --shared-fonts or from a previous build in the work folder."""
+    they come from --shared-fonts, from an unpacked firmware (--firmware) or from a previous build in the work folder."""
     version, expected = 'botw160', BOTW160
     py = tree / '.venv/bin/python'
     folder = tree / f'extracted/{version}/romfs'
@@ -1341,19 +1382,26 @@ def step_data_botw(tree, botw, game, keys, logs, *, shared_fonts=None, update=No
                 check(f'add-on content {i}', report['romfs_sha256'], want['sha256'])
     fonts = tree / 'extracted/firmware/shared-fonts'
     if not fonts_valid(fonts):
-        if not shared_fonts:
-            raise BuildError('Breath of the Wild needs --shared-fonts <folder with the six verified .bfttf files> (a Tears of '
-                             'the Kingdom build extracts them from that card into its work folder, extracted/firmware/shared-fonts); '
-                             'this card has no system update partition to take them from')
-        report = font_report(shared_fonts)
-        if shared_fonts.resolve() != fonts.resolve():
+        if shared_fonts:
+            report = font_report(shared_fonts)
+            if shared_fonts.resolve() != fonts.resolve():
+                if fonts.exists():
+                    shutil.rmtree(fonts)
+                fonts.mkdir(parents=True)
+                for f in report['fonts']:
+                    name = f"{f['type']}-{f['name']}.bfttf"
+                    shutil.copy2(shared_fonts / name, fonts / name)
+            (fonts / 'manifest.json').write_text(json.dumps(report, indent=2) + '\n')
+        elif firmware:
+            say('2/4 data: extracting the system shared fonts from the firmware')
             if fonts.exists():
                 shutil.rmtree(fonts)
-            fonts.mkdir(parents=True)
-            for f in report['fonts']:
-                name = f"{f['type']}-{f['name']}.bfttf"
-                shutil.copy2(shared_fonts / name, fonts / name)
-        (fonts / 'manifest.json').write_text(json.dumps(report, indent=2) + '\n')
+            run([py, 'scripts/extract_shared_fonts.py', '--keys', keys, '--firmware', firmware, '--output', fonts],
+                logs / 'shared_fonts.log', cwd=tree)
+        else:
+            raise BuildError('Breath of the Wild needs --firmware <unpacked firmware NCA directory> or --shared-fonts <folder with '
+                             'the six verified .bfttf files> (a Tears of the Kingdom build extracts them into its work folder, '
+                             'extracted/firmware/shared-fonts); this card has no system update partition to take them from')
         validate_fonts(fonts)
 
 
@@ -1480,10 +1528,11 @@ def main(argv):
         if update:
             update = prepare_update_container(tree, update, keys, logs)
         step_code_botw(tree, botw, update or game, keys, env, logs)
-        step_data_botw(tree, botw, game, keys, logs, shared_fonts=shared_fonts, update=update)
+        step_data_botw(tree, botw, game, keys, logs, firmware=firmware, shared_fonts=shared_fonts, update=update)
         step_shaders_botw(tree, botw, logs)
         step_shader_libs(tree, logs, version='botw160')
-        step_binary(tree, game, keys, {**env, 'SHADER_LIST': str(BOTW_LIST)}, logs, version='botw160', title='01007ef00011e000')
+        # The work folder's copy of games/botw (prepare_work), relative: make splits a path with spaces into several targets
+        step_binary(tree, game, keys, {**env, 'SHADER_LIST': '../botw/assets/shader_list.tsv'}, logs, version='botw160', title='01007ef00011e000')
         say(f'4/4 app: assembling {out}')
         step_app(tree, out, logs, version='botw160', game='botw')
         run([LSREGISTER, '-f', out], logs / 'register-app.log')
