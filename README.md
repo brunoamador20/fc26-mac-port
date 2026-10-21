@@ -36,7 +36,9 @@ Update history:
 |---|---|---|
 | Oct 21 | Mac | `TOTK_FIXED_RES=1` holds 1.4.3's dynamic resolution at 100 % (#122); the mouse cursor hides after 1.5 s idle in native full screen (#121); 16:10 UI layouts with `make_romfs_patches.py --aspect` (#123); a translation mod's UI archive is merged with the build's quick-menu edit instead of refusing to start (#134, #73) |
 | Oct 21 | Mac, iPhone, iPad | Vertex shaders with a custom sampler border colour get their own pipeline per colour, and a sampler that repeats on one axis no longer returns the border there (#148); Breath of the Wild's Magnesis and Stasis pick targets are written back to the CPU (#140); macOS 27 start-up reserves the guest regions separately when no single gap is left (#138); 4,648 new variants in the shared shader list |
-| Oct 20 | Mac | Key 4 cycles 16:9 → fit to the window or display → 21:9. Fitting gives 16:10 on a MacBook in full screen (a little less at the sides; `TOTK_ASPECT_VERT=1` sees more above and below instead, 1.4.3, experimental: some UI effects such as the button-press effect sit off), 21:9 or 32:9 on an ultrawide; the HUD keeps its shape on all of them |
+| Oct 21 | Mac, iPhone, iPad | When the game reads or writes part of a texture, only that region is converted, on the GPU, instead of the whole level on the CPU, which was behind long hitches on the Lanayru sky islands (#143) |
+| Oct 21 | Mac | With key 5 (edge smoothing, MetalFX temporal), ground decals no longer leave purple glows on hazy cliffs and lamps no longer pulse while standing still (#157) |
+| Oct 21 | Mac | Key 4 cycles 16:9 → fit to the window or display → 21:9. Fitting gives 16:10 on a MacBook in full screen (a little less at the sides; `TOTK_ASPECT_VERT=1` sees more above and below instead, 1.4.3, experimental: some UI effects such as the button-press effect sit off), 21:9 or 32:9 on an ultrawide; the HUD keeps its shape on all of them (#120) |
 | Oct 20 | iPhone, iPad | Sound plays with the silent switch on and comes back after a call, Siri or an alarm; the game follows the system language; a fresh install reaches the title screen (#97) |
 | Oct 20 | iPhone, iPad | First launch after installing shows the game in about 7 seconds instead of about 4½ minutes: the shaders that come with the app are read where they are, without checking or copying them again (iPhone 14) |
 | Oct 20 | Mac | Breath of the Wild above 30 fps: menus and the HUD at normal speed, physics steady, movies at their own speed; docked play renders at native 1080p (`TOTK_RENDER_RES=900` keeps 1600x900) (#103) |
@@ -309,7 +311,9 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 |---|---|---|
 | 10 月 21 日 | Mac | `TOTK_FIXED_RES=1` 把 1.4.3 的动态分辨率固定在 100%（#122）；原生全屏时鼠标 1.5 秒不动就隐藏（#121）；`make_romfs_patches.py --aspect` 支持 16:10 界面布局（#123）；翻译模组的界面档案和构建自带的快捷菜单修改合并，不再拒绝启动（#134，#73） |
 | 10 月 21 日 | Mac、iPhone、iPad | 顶点着色器的自定义采样器边框色按颜色各建管线，单轴重复的采样器在该轴不再返回边框色（#148）；旷野之息磁力、静止的选取目标回写到 CPU（#140）；macOS 27 启动时没有整块空间就分开保留客体区域（#138）；公共着色器清单新增 4,648 条 |
-| 10 月 20 日 | Mac | 按 4 在 16:9 → 适配窗口或显示器 → 21:9 之间切换。适配时 MacBook 全屏是 16:10（两侧略少；`TOTK_ASPECT_VERT=1` 改为上下看到更多，1.4.3，实验性：按键特效等部分界面特效位置偏了），超宽屏是 21:9 或 32:9；HUD 在各种比例下都保持原形状 |
+| 10 月 21 日 | Mac、iPhone、iPad | 游戏读写贴图的一部分时，只在 GPU 上转换那一块，不再在 CPU 上转换整层；拉聂尔一带空岛上的长卡顿就来自这里（#143） |
+| 10 月 21 日 | Mac | 开 5 键（边缘平滑，MetalFX 时间性）时，地面贴花不再在雾蒙蒙的山崖上留下紫色光斑，站着不动时灯也不再忽明忽暗（#157） |
+| 10 月 21 日 | Mac | 按 4 在 16:9 → 适配窗口或显示器 → 21:9 之间切换。适配时 MacBook 全屏是 16:10（两侧略少；`TOTK_ASPECT_VERT=1` 改为上下看到更多，1.4.3，实验性：按键特效等部分界面特效位置偏了），超宽屏是 21:9 或 32:9；HUD 在各种比例下都保持原形状（#120） |
 | 10 月 20 日 | iPhone、iPad | 打开静音键也有声音，来电、Siri、闹钟之后声音会恢复；游戏跟随系统语言；全新安装能进标题画面（#97） |
 | 10 月 20 日 | iPhone、iPad | 安装后第一次启动约 7 秒出画面，原来要约 4 分半：随 App 的着色器直接原地读取，不再校验和复制（iPhone 14） |
 | 10 月 20 日 | Mac | 旷野之息 30 帧以上：菜单和 HUD 速度正常、物理稳定、过场动画按原速播放；底座模式按原生 1080p 渲染（`TOTK_RENDER_RES=900` 保持 1600x900）（#103） |
