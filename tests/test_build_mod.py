@@ -149,6 +149,9 @@ class ModInstall(unittest.TestCase):
         self.assertEqual(entries['New/C.dat'][3], '-')                 # a file the RomFS lacks
         self.assertNotEqual(entries['Pack/A.pack.zs'][3], '-')         # the original's hash is bound
         self.assertIn('2 files (1 replaced, 1 added)', installed.manifest[-1])
+        # what is printed names the player's folder, not the copy it was written in
+        self.assertIn(str(installed.folder/'manifest.tsv'), installed.manifest[-1])
+        self.assertNotIn('.new', '\n'.join(installed.manifest))
 
     def test_what_the_folder_held_is_gone_since_the_flag_agreed_to_it(self):
         dest = self.mods/'v143'

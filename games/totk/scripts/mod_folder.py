@@ -142,6 +142,8 @@ def install(mod, version, app, py, tree, *, say=print):
         staged.mkdir()
         copied = copy_tree(source, staged)
         manifest = _manifest(py, tree, staged, app, version, check=False)   # writes manifest.tsv inside the staged copy
+        # the tool names the folder it wrote into; that is the player's folder once the swap below is done, so name that
+        manifest = [line.replace(str(staged), str(folder)) for line in manifest]
         if not (staged/'manifest.tsv').is_file():
             raise InstallError(f'{staged} holds no manifest.tsv after make_mod_manifest.py ran, so nothing was swapped in',
                                '\n'.join(manifest))

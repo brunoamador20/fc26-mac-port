@@ -72,6 +72,11 @@ by hand; the steps below are the manual route either way.
    and its original, leaves out files that are identical to the original, and writes `manifest.tsv`.
    It prints a line such as `...: 12 files (10 replaced, 2 added)`.
 
+   `--check`, `--exclude` and `--version` belong to this script, not to `build_app.py` (which only takes
+   `--mod` and `--install-mod-romfs` and runs the script itself, `--check` included, whatever flags you did or
+   did not pass): `--check` reports what the manifest would hold and writes nothing, `--exclude` leaves a path to the
+   app's own version of it.
+
 4. Start the game and check the log:
 
    ```bash
@@ -353,6 +358,10 @@ never checks and Metal refuses to build; the app caps the chain at what the dime
    脚本会读取 App 里的 `Contents/Resources/totk/extracted/<version>/romfs`，计算每个文件和原版
    文件的哈希，跳过与原始完全相同的文件，然后写入 `manifest.tsv`。成功时会打印类似
    `...: 12 files (10 replaced, 2 added)` 的一行。
+
+   `--check`、`--exclude`、`--version` 都是**这个脚本**的选项，不是 `build_app.py` 的（构建只有 `--mod` 和
+   `--install-mod-romfs`，无论你传不传这些参数，它都会自己带 `--check` 跑这个脚本）：`--check` 只报告清单会
+   包含什么、不写任何文件；`--exclude` 把某个路径留给 App 自己的版本。
 
 4. 启动游戏，确认日志：
 
