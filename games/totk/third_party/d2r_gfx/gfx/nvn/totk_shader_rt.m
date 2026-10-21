@@ -486,6 +486,25 @@ NSArray<NSString *> *totk_rt_known_variants(NSString *shader) {
     return out;
 }
 
+/* Pipeline prediction (nvn_mtl.m prog_prediction_unseen): the variant variant_lookup (totk_rt_variant) would return for
+   these answers when the cache index already names one, else nil. Nothing is translated, read, written or noted; a lock
+   held elsewhere answers nil instead of waiting. variant_lookup also reads a variant's MSL the first time and drops the
+   variant when it is missing or cannot compile; such a variant is never loaded, and the caller takes loaded shaders only,
+   so the answer is the same without that read. */
+NSString *totk_rt_variant_cached(NSString *shader, NSDictionary *answers) {
+    if (pthread_mutex_trylock(&g_rt_lock)) return nil;
+    NSString *found = nil;
+    for (NSDictionary *v in variants_of(shader)) if (deps_match(v[@"deps"], answers)) { found = v[@"variant"]; break; }
+    pthread_mutex_unlock(&g_rt_lock);
+    return found;
+}
+void totk_rt_probe_index(NSString *shader, NSArray<NSDictionary *> *rows) {   // probe-gfx: a variant index without cache files
+    pthread_mutex_lock(&g_rt_lock);
+    if (!g_variants) g_variants = [NSMutableDictionary dictionary];
+    g_variants[shader] = rows ? [rows mutableCopy] : nil;
+    pthread_mutex_unlock(&g_rt_lock);
+}
+
 void totk_rt_counts(uint64_t *fresh, int64_t *total, uint64_t *last_new_ns) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
