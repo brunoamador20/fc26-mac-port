@@ -69,7 +69,7 @@ def ips_rle(offset, count, value, *, magic=b'PATCH', offset_size=3):
 
 
 def pchtxt(records, *, build_id=BUILD_ID.hex(), enabled=True, stop=True):
-    lines = [f'@nsobid-{build_id}']
+    lines = [f'@nsobid-{build_id}', '@flag offset_shift 0x100']
     if enabled:
         lines.append('@enabled')
     lines += [f'{address:x} {payload.hex()}' for address, payload in records]
@@ -137,7 +137,7 @@ class Case(unittest.TestCase):
 
     def test_pchtxt_stops_at_stop_and_needs_enabled(self):
         self.retail()
-        text = f'@nsobid-{BUILD_ID.hex()}\n@enabled\n40 aabbccdd\n@stop\n44 eeff\n'
+        text = f'@nsobid-{BUILD_ID.hex()}\n@flag offset_shift 0x100\n@enabled\n40 aabbccdd\n@stop\n44 eeff\n'
         self.patch(text)
         self.apply()
         image = image_of(self.output.read_bytes())
@@ -146,7 +146,7 @@ class Case(unittest.TestCase):
 
     def test_pchtxt_disabled_section_is_not_applied(self):
         self.retail()
-        text = f'@nsobid-{BUILD_ID.hex()}\n@enabled\n40 aabbccdd\n@disabled\n44 eeff\n@stop\n'
+        text = f'@nsobid-{BUILD_ID.hex()}\n@flag offset_shift 0x100\n@enabled\n40 aabbccdd\n@disabled\n44 eeff\n@stop\n'
         self.patch(text)
         self.apply()
         image = image_of(self.output.read_bytes())
@@ -155,7 +155,7 @@ class Case(unittest.TestCase):
 
     def test_pchtxt_enabled_after_disabled_applies_again(self):
         self.retail()
-        text = (f'@nsobid-{BUILD_ID.hex()}\n@enabled\n40 aabbccdd\n@disabled\n44 eeff\n@enabled\n4a 0102\n@stop\n')
+        text = (f'@nsobid-{BUILD_ID.hex()}\n@flag offset_shift 0x100\n@enabled\n40 aabbccdd\n@disabled\n44 eeff\n@enabled\n4a 0102\n@stop\n')
         self.patch(text)
         self.apply()
         image = image_of(self.output.read_bytes())
@@ -169,6 +169,21 @@ class Case(unittest.TestCase):
         self.patch(text)
         self.apply()
         self.assertEqual(image_of(self.output.read_bytes())[0x40:0x44], b'\xaa\xbb\xcc\xdd')
+
+    def test_pchtxt_print_values_flag_is_accepted(self):
+        # the header community pchtxt files ship with (the 20/30/60 fps and quality patches all start this way)
+        self.retail()
+        text = (f'@nsobid-{BUILD_ID.hex()}\n\n// a comment\n\n@flag print_values\n@flag offset_shift 0x100\n\n'
+                f'// a section\n@enabled\n40 aabbccdd\n@stop\n')
+        self.patch(text)
+        self.apply()
+        self.assertEqual(image_of(self.output.read_bytes())[0x40:0x44], b'\xaa\xbb\xcc\xdd')
+
+    def test_pchtxt_without_offset_shift_is_refused(self):
+        self.retail()
+        self.patch(f'@nsobid-{BUILD_ID.hex()}\n@flag print_values\n@enabled\n40 aabbccdd\n@stop\n')
+        with self.assertRaisesRegex(mod_exefs.ModError, r'no "@flag offset_shift 0x100" before the first patch line'):
+            self.apply()
 
     def test_pchtxt_another_offset_shift_is_refused(self):
         self.retail()

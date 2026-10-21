@@ -9,9 +9,10 @@ build_app.py --install-mod-romfs says that folder may be replaced. Nothing here 
 The replacement is built first, in a folder next to the player's (<folder>.new): the mod's romfs/ is copied there and
 scripts/make_mod_manifest.py writes the manifest there against the app the build just made, so the paths the app replaces
 itself are left out (the heap table included: the 2K overlay carries the mod's heap sizes). Only then is the player's
-folder moved aside (<folder>.old) and the new one renamed into place, so the folder holds either what it held before or
-the complete new copy - never a half-copied one. The old content is deleted last, and the build says what it is about to
-do before it starts.
+folder moved aside and the new one renamed into place, so the folder holds either what it held before or the complete new
+copy - never a half-copied one. What the folder held is kept, not deleted: it stays next to it as
+<folder>.backup-<date>-<time> (another mod, files copied by hand), and the build names that folder; the game never loads
+it. The build says what it is about to do before it starts.
 
 Two checks run before anything of the player's is touched: make_mod_manifest.py --check on the mod folder itself (a
 misspelt path stops the build there), and a look at what that manifest would hold. A mod whose files would all be left
@@ -26,6 +27,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import time
 
 
 def mods_folder(version):
@@ -43,31 +45,18 @@ class InstallError(RuntimeError):
         self.output = output
 
 
-Installed = namedtuple('Installed', 'folder copied removed manifest')
+Installed = namedtuple('Installed', 'folder copied backup manifest')
 Installed.__doc__ = """What one install did.
 
     folder     the player's mod folder that was replaced
     copied     how many files were copied out of the mod's romfs/
-    removed    how many entries the folder held before and no longer does
+    backup     where what the folder held before was kept (<folder>.backup-<date>-<time>), or None when it held nothing
     manifest   the manifest tool's output lines"""
 
 
 def files_below(folder):
     """Every file under `folder` (symlinks to files included, symlinks to folders not followed)."""
     return sorted(p for p in folder.rglob('*') if p.is_file())
-
-
-def empty(folder):
-    """Delete everything inside `folder` and keep the folder itself; nothing outside it is followed or removed.
-    Returns how many entries went."""
-    removed = 0
-    for child in sorted(folder.iterdir()):
-        if child.is_symlink() or not child.is_dir():
-            child.unlink()            # a symlink goes itself, not what it points at
-        else:
-            shutil.rmtree(child)
-        removed += 1
-    return removed
 
 
 def copy_tree(source, dest):
@@ -79,6 +68,16 @@ def copy_tree(source, dest):
         shutil.copy2(file, target)
         copied += 1
     return copied
+
+
+def backup_name(folder):
+    """<folder>.backup-<date>-<time> next to the folder, with -2, -3, ... when that name is taken (never an existing one)."""
+    base = folder.with_name(f'{folder.name}.backup-{time.strftime("%Y%m%d-%H%M%S")}')
+    candidate, n = base, 1
+    while candidate.exists() or candidate.is_symlink():
+        n += 1
+        candidate = base.with_name(f'{base.name}-{n}')
+    return candidate
 
 
 def _manifest(py, tree, folder, app, version, check):
@@ -130,7 +129,7 @@ def install(mod, version, app, py, tree, *, say=print):
             f'replaces itself), so {folder} is left as it is and no manifest is written')
         return None
 
-    staged, backup = folder.with_name(f'{folder.name}.new'), folder.with_name(f'{folder.name}.old')
+    staged, backup = folder.with_name(f'{folder.name}.new'), backup_name(folder)
     try:
         if folder.exists() and not folder.is_dir():
             raise InstallError(f'{folder} is not a folder')
@@ -147,27 +146,25 @@ def install(mod, version, app, py, tree, *, say=print):
         if not (staged/'manifest.tsv').is_file():
             raise InstallError(f'{staged} holds no manifest.tsv after make_mod_manifest.py ran, so nothing was swapped in',
                                '\n'.join(manifest))
-        say(f'{folder}: emptied, then filled with {mod.name}/romfs and its manifest.tsv (--install-mod-romfs)')
-        removed = 0
+        kept = None
         if folder.exists():
-            if backup.exists():
-                shutil.rmtree(backup)      # left over from an interrupted build, not the player's files
-            folder.rename(backup)
-            removed = len(list(backup.iterdir()))
+            folder.rename(backup)          # kept: what the player had there (another mod, files copied by hand)
             try:
                 staged.rename(folder)
             except OSError:
                 backup.rename(folder)      # put the player's folder back exactly as it was
                 raise
-            try:
-                shutil.rmtree(backup)
-            except OSError:
-                say(f'   {backup} could not be removed; it holds the files that were there before, delete it yourself')
+            if any(backup.iterdir()):
+                kept = backup
+            else:
+                backup.rmdir()             # it held nothing: no backup to keep
         else:
             staged.rename(folder)
+        say(f'{folder}: replaced by {mod.name}/romfs and its manifest.tsv (--install-mod-romfs)'
+            + (f'; what it held before is kept in {kept}' if kept else ''))
     except InstallError:
         raise
     except OSError as error:
         raise InstallError(f'{error.filename or folder}: {error.strerror or error}; {folder} holds what it held before',
                            '') from None
-    return Installed(folder, copied, removed, manifest)
+    return Installed(folder, copied, kept, manifest)

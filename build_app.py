@@ -29,7 +29,8 @@ signature, or signed again by a dump tool once all four code modules match, shar
      first start does not compile them in the background (games/totk/tools/warm_metal_cache.m); with --mod
      --install-mod-romfs the player's mod folder for this version is replaced by the mod's RomFS files and its manifest
      (games/totk/scripts/mod_folder.py, games/totk/scripts/make_mod_manifest.py), so the build is playable with the mod as
-     it stands - the flag is required because that folder may hold files of the player's own
+     it stands - the flag is required because that folder may hold files of the player's own (they are kept next to it
+     as <version>.backup-<date>-<time>)
 
 Every intermediate file is in the work folder (default: "<game file folder>/TOTK_build"); a second run reuses
 what is already done and correct. Mac saves, shader cache and logs go to the user's Library folders; iOS keeps saves
@@ -622,7 +623,8 @@ def install_mod_romfs(mod, tree, version, out, py, logs):
     """--mod --install-mod-romfs: replace the player's mod folder for this version with the mod's RomFS files, and write
     its manifest against the app just built (games/totk/scripts/mod_folder.py). The replacement is copied and given its
     manifest in a folder next to the player's first, so the player's files are only moved aside for a copy that is
-    complete - and not at all when the mod would replace nothing the game loads. The manifest leaves out the paths the
+    complete - and not at all when the mod would replace nothing the game loads. They are kept as a backup next to the
+    folder, never deleted. The manifest leaves out the paths the
     app replaces itself, the heap table included: mod_heapdef (see above) folded its sizes into the 2K overlay."""
     log = logs / f'mod-manifest-{version}.log'
     try:
@@ -637,8 +639,9 @@ def install_mod_romfs(mod, tree, version, out, py, logs):
     if installed is None:
         return None
     log.write_text('\n'.join(installed.manifest) + '\n')
-    say(f'4/4 app: {installed.folder} holds {installed.copied} files from {mod.name}/romfs now '
-        f'({installed.removed} entries it held before are gone)')
+    say(f'4/4 app: {installed.folder} holds {installed.copied} files from {mod.name}/romfs now'
+        + (f' (what it held before: {installed.backup}; delete that folder once you no longer need it)'
+           if installed.backup else ''))
     for line in installed.manifest:                 # the notes and the summary; a mod's notes are a handful
         say(f'   {line}')
     return installed.folder
@@ -652,7 +655,7 @@ def say_mod_copy_steps(mod, tree, version, out):
         return
     folder = mod_folder.mods_folder(version)
     say(f'4/4 app: {mod.name}/romfs was not installed: {folder} is your folder, and a build only replaces it when you '
-        f'pass --install-mod-romfs (which empties it first). To do it by hand:')
+        f'pass --install-mod-romfs (which keeps what it held as a backup next to it). To do it by hand:')
     say(f'   rsync -a --exclude=\'.DS_Store\' --exclude=\'manifest.tsv\' "{mod}/romfs/" "{folder}/"')
     say(f'   "{sys.executable}" "{tree}/scripts/make_mod_manifest.py" "{folder}" --app "{out}" --version {version}')
 
@@ -1439,10 +1442,10 @@ def parse_args(argv):
                          'module are merged into the code before it is rewritten (its romfs/ goes in with '
                          '--install-mod-romfs; docs/mods.md)')
     ap.add_argument('--install-mod-romfs', action='store_true',
-                    help='with --mod: at the end of the build, empty <data>/mods/<version> and fill it with the mod\'s '
-                         'romfs/ and its manifest.tsv, so the app plays with the mod. That folder is the player\'s: '
-                         'files you put there yourself are deleted. Without this flag the build leaves the folder '
-                         'alone and prints the two commands that fill it by hand')
+                    help='with --mod: at the end of the build, replace <data>/mods/<version> with the mod\'s romfs/ '
+                         'and its manifest.tsv, so the app plays with the mod. That folder is the player\'s: what it '
+                         'held is moved next to it as <version>.backup-<date>-<time>, not deleted. Without this flag '
+                         'the build leaves the folder alone and prints the two commands that fill it by hand')
     ap.add_argument('--shader-cache', type=Path, help=argparse.SUPPRESS)   # removed: the seed comes from the game data and the shared list
     ap.add_argument('--no-shader-reminder', action='store_true', help='iOS: do not install the Mac agent that asks, while an iPhone / iPad with the game is connected, to send the shaders the shared list lacks')
     fonts = ap.add_mutually_exclusive_group()
@@ -1568,9 +1571,9 @@ def main(argv):
         if free<25 and not base_cached:
             raise BuildError('needs about 25 GB free for the work folder (the app itself is an APFS clone of it when on the same volume)')
     if mod and args.install_mod_romfs:      # said before the long steps, so a mistake can still be stopped with Ctrl-C
-        say(f'--install-mod-romfs: the player\'s mod folder for the version this build makes will be EMPTIED and filled '
-            f'with {mod.name}/romfs (and its manifest.tsv) when the build ends: anything you put in that folder yourself '
-            f'is deleted. Without the flag the build leaves the folder alone.')
+        say(f'--install-mod-romfs: the player\'s mod folder for the version this build makes will be REPLACED by '
+            f'{mod.name}/romfs (and its manifest.tsv) when the build ends; what it holds now is moved next to it as '
+            f'<folder>.backup-<date>-<time>, not deleted. Without the flag the build leaves the folder alone.')
     if update:
         version, update = identify_update(tree, update, keys, logs)
     step_code(tree, game, keys, env, logs, mod=None if update else code_mod)

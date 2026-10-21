@@ -153,18 +153,39 @@ class ModInstall(unittest.TestCase):
         self.assertIn(str(installed.folder/'manifest.tsv'), installed.manifest[-1])
         self.assertNotIn('.new', '\n'.join(installed.manifest))
 
-    def test_what_the_folder_held_is_gone_since_the_flag_agreed_to_it(self):
+    def test_what_the_folder_held_is_kept_in_a_backup_next_to_it(self):
         dest = self.mods/'v143'
         (dest/'Old').mkdir(parents=True)
         (dest/'Old/Gone.zs').write_bytes(b'old')
-        (dest/'notes.txt').write_bytes(b'mine')                        # the player's own file: gone with the rest
+        (dest/'notes.txt').write_bytes(b'mine')                        # the player's own file: kept with the rest
         (dest/'manifest.tsv').write_text('# path\tsize\tsha256\toriginal_sha256\nOld/Gone.zs\t3\t00\t01\n')
         self.add('Pack/A.pack.zs', b'replaced a')
         installed = self.install()
-        self.assertFalse((dest/'Old').exists())
-        self.assertFalse((dest/'notes.txt').exists())
-        self.assertEqual(installed.removed, 3)                         # Old/, Old/Gone.zs, notes.txt, manifest.tsv minus one
         self.assertEqual(sorted(p.name for p in dest.iterdir()), ['Pack', 'manifest.tsv'])
+        backup = installed.backup
+        self.assertEqual(backup.parent, self.mods)
+        self.assertTrue(backup.name.startswith('v143.backup-'), backup.name)
+        self.assertEqual((backup/'Old/Gone.zs').read_bytes(), b'old')
+        self.assertEqual((backup/'notes.txt').read_bytes(), b'mine')
+        self.assertIn('Old/Gone.zs', (backup/'manifest.tsv').read_text())
+        self.assertTrue(any(str(backup) in line for line in self.said), self.said)
+
+    def test_a_second_install_keeps_the_first_backup(self):
+        dest = self.mods/'v143'
+        dest.mkdir(parents=True)
+        (dest/'notes.txt').write_bytes(b'mine')
+        self.add('Pack/A.pack.zs', b'replaced a')
+        first = self.install().backup
+        second = self.install().backup                                  # within the same second: another name
+        self.assertNotEqual(first, second)
+        self.assertEqual((first/'notes.txt').read_bytes(), b'mine')
+        self.assertEqual(self.manifest(second).keys(), {'Pack/A.pack.zs'})   # the first install's folder, kept too
+
+    def test_an_empty_folder_leaves_no_backup(self):
+        (self.mods/'v143').mkdir(parents=True)
+        self.add('Pack/A.pack.zs', b'replaced a')
+        self.assertIsNone(self.install().backup)
+        self.assertEqual(sorted(p.name for p in self.mods.iterdir()), ['v143'])
 
     def test_a_misspelt_path_stops_before_the_folder_is_touched(self):
         dest = self.mods/'v143'
@@ -189,16 +210,17 @@ class ModInstall(unittest.TestCase):
         self.assertIn('is a symlink', str(raised.exception))
         self.assertTrue((real/'keep.txt').exists())
 
-    def test_a_symlink_inside_the_folder_is_removed_not_its_target(self):
+    def test_a_symlink_inside_the_folder_moves_to_the_backup_and_its_target_stays(self):
         dest = self.mods/'v143'
         dest.mkdir(parents=True)
         outside = self.root/'outside.txt'
         outside.write_bytes(b'x')
         (dest/'link.txt').symlink_to(outside)
         self.add('Pack/A.pack.zs', b'replaced a')
-        self.install()
+        installed = self.install()
         self.assertTrue(outside.exists())
         self.assertFalse((dest/'link.txt').exists())
+        self.assertTrue((installed.backup/'link.txt').is_symlink())
 
     def test_a_mod_file_the_app_replaces_is_copied_but_left_out_of_the_manifest(self):
         overlays = self.app/'Contents/Resources/totk/extracted/v143/romfs-patches'

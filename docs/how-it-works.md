@@ -16,7 +16,7 @@ The rewrites are what makes the code the app's own: it is bound by SHA-256, so a
 runs. A player mod that changes the code therefore merges its main-module patches *before* that step
 (`--mod <mod folder>`, `games/totk/scripts/mod_exefs.py`): an IPS / IPS32 / pchtxt patch is applied to the verified
 retail main (a `.pchtxt` says in `@nsobid-` which build of main it is for, with `@enabled` / `@disabled` switching the
-sections on and off and `@flag offset_shift 0x100` the only shift accepted; an `.ips` carries no id, so it counts as a
+sections on and off and `@flag offset_shift 0x100` required before the first patch line; an `.ips` carries no id, so it counts as a
 main patch only when it is named `main` or after main's build id), refused if it lands on a site the app patches itself (the 60 FPS, resolution, ultrawide and cloth sites,
 and the rewriter's registered cuts - `games/totk/scripts/patch_sites.py` reads them out of the C sources, and the signed
 jump tables out of `patch_nso.py`), and the

@@ -48,7 +48,8 @@ used. In detail:
 ### Install a mod
 
 A build can perform steps 2 and 3 with `--mod <mod folder> --install-mod-romfs`. That flag replaces the version
-folder whole (it is emptied first - see [the mod's RomFS files](#data)); without it the build leaves the folder alone
+folder whole (what it held is kept next to it as a backup - see [the mod's RomFS files](#data)); without it the build
+leaves the folder alone
 and prints the two commands that fill it by hand. The steps below are the manual route either way.
 
 1. Quit the game completely.
@@ -129,31 +130,33 @@ python3.14 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.ke
 
 Then, at the very end, the build:
 
-- **empties** `~/Library/Application Support/MacNativeGames/TOTK/mods/<version>` and copies the mod's
-  `romfs/` into it, so after the build the folder holds exactly this mod's RomFS and nothing else - a file
-  another mod put there, or one copied by hand, is gone (a mod whose files the game would all take from
-  the app instead replaces nothing, and then the folder is left alone: see below);
+- **replaces** `~/Library/Application Support/MacNativeGames/TOTK/mods/<version>` with a copy of the mod's
+  `romfs/`, so after the build the folder holds exactly this mod's RomFS and nothing else. What it held
+  before - another mod's files, files copied by hand - is not deleted: it is moved next to it as
+  `<version>.backup-<date>-<time>` (the game never loads that folder; delete it yourself once you no longer
+  need it). A mod whose files the game would all take from the app instead replaces nothing, and then the
+  folder is left alone: see below;
 - writes `manifest.tsv` with `scripts/make_mod_manifest.py` against the app just built, so a path the app
   replaces itself is left out (the heap table included: the 2K overlay carries the mod's heap sizes; the UI
   archive is merged instead, which leaves the mod's own copy next to it as `<name>.mod-original` - the game
   ignores it), and a misspelt path stops the build at its last step - the app is already written by then - with
   the reason instead of stopping the game later.
 
-The folder is not emptied until a complete replacement exists: the build copies the mod's `romfs/` into a folder
-next to it, writes the manifest there, and moves the new copy into place only when it is complete (the old copy
-is deleted after that). Before any of it, the manifest tool runs with `--check` on the mod's own folder, so a
+The folder is not touched until a complete replacement exists: the build copies the mod's `romfs/` into a folder
+next to it, writes the manifest there, and moves the new copy into place only when it is complete (the old folder
+becomes the backup). Before any of it, the manifest tool runs with `--check` on the mod's own folder, so a
 misspelt path stops the build while the version folder still holds what it held; and a mod whose files the game
 would all take from the app instead (every one identical to the original, or one the app replaces itself) replaces
-nothing the game loads - the build says so and leaves the folder alone rather than emptying it for a folder with no
+nothing the game loads - the build says so and leaves the folder alone rather than swapping in a folder with no
 manifest. The build warns when it starts and again right before the copy:
 
 ```text
---install-mod-romfs: the player's mod folder for the version this build makes will be EMPTIED and filled with
-The Second Quest 1.4.3/romfs (and its manifest.tsv) when the build ends: anything you put in that folder yourself
-is deleted. Without the flag the build leaves the folder alone.
+--install-mod-romfs: the player's mod folder for the version this build makes will be REPLACED by The Second Quest
+1.4.3/romfs (and its manifest.tsv) when the build ends; what it holds now is moved next to it as
+<folder>.backup-<date>-<time>, not deleted. Without the flag the build leaves the folder alone.
 ...
-.../mods/v143: emptied, then filled with The Second Quest 1.4.3/romfs and its manifest.tsv (--install-mod-romfs)
-4/4 app: .../mods/v143 holds 5250 files from The Second Quest 1.4.3/romfs now (3 entries it held before are gone)
+.../mods/v143: replaced by The Second Quest 1.4.3/romfs and its manifest.tsv (--install-mod-romfs); what it held before is kept in .../mods/v143.backup-20261021-213000
+4/4 app: .../mods/v143 holds 5250 files from The Second Quest 1.4.3/romfs now (what it held before: .../mods/v143.backup-20261021-213000; delete that folder once you no longer need it)
    left out (the app replaces it, and the 2K overlay already carries these heap sizes): System/HeapSize/Product.Nin_NX_NVN.HeapDef.byml.zs
    .../mods/v143/manifest.tsv: 5229 files (4200 replaced, 1029 added)
 ```
@@ -178,9 +181,11 @@ What the build does, in order:
      runtime compares (40 hex digits; the runtime's own `TOTK_PCHTXT` experiment takes only that longer
      form). Patch lines `<hex main address> <hex bytes>` follow, and only lines after `@enabled` count:
      `@disabled` switches the following section off again (a file that keeps an edit around without applying
-     it), `@enabled` switches it back on, and `@stop` ends the file. A `@flag offset_shift 0x100` line is
-     accepted - it names the 0x100-byte NSO header an IPS form counts, which these addresses already leave
-     out; any other shift, or another flag, is refused by file and line. The `@nsobid-` line identifies
+     it), `@enabled` switches it back on, and `@stop` ends the file. A `@flag offset_shift 0x100` line must
+     come before the first patch line - it says the addresses leave out the 0x100-byte NSO header an IPS form
+     counts, which is how they are applied; a file without it, or with another shift, is refused by file and
+     line rather than patched 0x100 bytes off. `@flag print_values` (a display option of the patching tools,
+     in every community pchtxt we have seen) is accepted; any other flag is refused. The `@nsobid-` line identifies
      the target build, so the file name does not matter.
    - `.ips` / `.ips32`: applied as emulators apply them, whose offsets count the 0x100-byte NSO header,
      so the build subtracts 0x100. A record below 0x100, a truncated file or a missing `EOF` is an error.
@@ -352,8 +357,8 @@ never checks and Metal refuses to build; the app caps the chain at what the dime
 
 ### 安装步骤
 
-构建可以用 `--mod <mod 目录> --install-mod-romfs` 完成第 2、3 步。这个参数会把版本目录整个替换掉（先清空，
-见下文[模组的 RomFS 文件](#data-zh)）；不带它时构建不会碰这个目录，只在结束时打印手动执行的两条命令。下面是
+构建可以用 `--mod <mod 目录> --install-mod-romfs` 完成第 2、3 步。这个参数会把版本目录整个替换掉（原来的内容
+作为备份留在旁边，见下文[模组的 RomFS 文件](#data-zh)）；不带它时构建不会碰这个目录，只在结束时打印手动执行的两条命令。下面是
 手动流程（构建做的是同一件事，只是先在旁边的目录里做好再整体换进来）。
 
 1. 先完全退出游戏。
@@ -430,26 +435,27 @@ python3.14 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.ke
 
 这时构建最后会：
 
-- **清空** `~/Library/Application Support/MacNativeGames/TOTK/mods/<version>`，再把 mod 的 `romfs/` 复制进去，
-  所以构建结束后这个目录里就是这一个 mod 的 RomFS，没有别的——另一个 mod 放在那里的文件、手动复制进去的
-  文件都会被删掉（如果这个 mod 的文件最终一个都不会被游戏加载，那就什么都没替换，目录保持不动，见下文）；
+- 用 mod 的 `romfs/` 的副本**替换** `~/Library/Application Support/MacNativeGames/TOTK/mods/<version>`，
+  所以构建结束后这个目录里就是这一个 mod 的 RomFS，没有别的。原来的内容（另一个 mod 的文件、手动复制进去的
+  文件）不会删除，而是挪到旁边的 `<version>.backup-<日期>-<时间>`（游戏不读这个目录，不需要了自己删掉）。如果
+  这个 mod 的文件最终一个都不会被游戏加载，那就什么都没替换，目录保持不动，见下文；
 - 用 `scripts/make_mod_manifest.py` 对着刚构建好的 App 生成 `manifest.tsv`，所以 App 自己替换的路径会被排除
   （包括堆表：2K 覆盖文件已经带着 mod 的堆大小；UI 归档则是合并，模组原文件会以 `<name>.mod-original` 留在旁边，
   游戏不会读它）；路径大小写写错的会终止构建并给出原因，而不是等到启动时才停止。
 
-版本目录在完整副本就绪之前不会被清空：构建先把 mod 的 `romfs/` 复制到它旁边的一个目录里、在那里写好清单，确认完整
-之后才把新的一份换进来（旧的一份随后删除）。在此之前还会用 `--check` 在 mod 自己的目录上跑一遍清单工具，所以路径写错
+版本目录在完整副本就绪之前不会被动：构建先把 mod 的 `romfs/` 复制到它旁边的一个目录里、在那里写好清单，确认完整
+之后才把新的一份换进来（旧的目录变成备份）。在此之前还会用 `--check` 在 mod 自己的目录上跑一遍清单工具，所以路径写错
 的 mod 会在版本目录还没被碰过时就停下；另外，如果这个 mod 的文件最终一个都不会被游戏加载（全部与原版相同，或者全是
-App 自己会替换的文件），它其实什么都没替换——这时构建会说明并保持版本目录不动，而不是清空成一个没有清单的空目录。
+App 自己会替换的文件），它其实什么都没替换——这时构建会说明并保持版本目录不动，而不是换成一个没有清单的目录。
 构建开始时和复制前各提示一次：
 
 ```text
---install-mod-romfs: the player's mod folder for the version this build makes will be EMPTIED and filled with
-The Second Quest 1.4.3/romfs (and its manifest.tsv) when the build ends: anything you put in that folder yourself
-is deleted. Without the flag the build leaves the folder alone.
+--install-mod-romfs: the player's mod folder for the version this build makes will be REPLACED by The Second Quest
+1.4.3/romfs (and its manifest.tsv) when the build ends; what it holds now is moved next to it as
+<folder>.backup-<date>-<time>, not deleted. Without the flag the build leaves the folder alone.
 ...
-.../mods/v143: emptied, then filled with The Second Quest 1.4.3/romfs and its manifest.tsv (--install-mod-romfs)
-4/4 app: .../mods/v143 holds 5250 files from The Second Quest 1.4.3/romfs now (3 entries it held before are gone)
+.../mods/v143: replaced by The Second Quest 1.4.3/romfs and its manifest.tsv (--install-mod-romfs); what it held before is kept in .../mods/v143.backup-20261021-213000
+4/4 app: .../mods/v143 holds 5250 files from The Second Quest 1.4.3/romfs now (what it held before: .../mods/v143.backup-20261021-213000; delete that folder once you no longer need it)
    left out (the app replaces it, and the 2K overlay already carries these heap sizes): System/HeapSize/Product.Nin_NX_NVN.HeapDef.byml.zs
    .../mods/v143/manifest.tsv: 5229 files (4200 replaced, 1029 added)
 ```
@@ -467,9 +473,10 @@ is deleted. Without the flag the build leaves the folder alone.
    - `.pchtxt`：社区文本格式，读取规则和运行时一致。第一行必须是 `@nsobid-<build id>`：改写器表里用的
      16 字节（32 位十六进制）或运行时比较的 20 字节（40 位十六进制；运行时自己的 `TOTK_PCHTXT` 实验只认长
      的这种）。后面是 `<十六进制主地址> <十六进制字节>` 行，只有 `@enabled` 之后的行生效：`@disabled` 把后面的
-     段落重新关掉（作者留着但不启用某段改动的写法），`@enabled` 再打开，`@stop` 结束整个文件。`@flag
-     offset_shift 0x100` 这种行可以出现（它指的是 IPS 那种算法里的 0x100 字节 NSO 头，这里的地址本来就不含
-     它）；其它位移值或其它 flag 会按文件和行号拒绝。`@nsobid-` 那一行决定目标 build，所以文件名任意。
+     段落重新关掉（作者留着但不启用某段改动的写法），`@enabled` 再打开，`@stop` 结束整个文件。第一条补丁行之前
+     必须有 `@flag offset_shift 0x100`（说明这些地址不含 IPS 算法里的 0x100 字节 NSO 头，构建正是这样打的）；
+     没有这一行、或者是别的位移值，都按文件和行号拒绝，而不是打偏 0x100 字节。`@flag print_values`（补丁工具的
+     显示选项，我们见过的社区 pchtxt 都带）可以出现；其它 flag 会拒绝。`@nsobid-` 那一行决定目标 build，所以文件名任意。
    - `.ips` / `.ips32`：按模拟器的用法应用，其偏移量包含 0x100 字节的 NSO 头，构建时会减掉 0x100。
      偏移小于 0x100、文件截断、缺少 `EOF` 都算错误。这种文件本身不写模块名和 build id，所以只有名字是
      `main`，或者是 main 的 build id（`exefs/<build id>.ips`，Atmosphere 和模组管理器的约定）时才会

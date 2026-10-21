@@ -18,8 +18,10 @@ What is merged (v1): the code patches for **main** only, read from `<mod>/exefs/
                     switches it does not read yet - see the next line); the format is:
                     "@nsobid-<build id>" must name this version's main, then "<main address> <hex bytes>" lines
                     between "@enabled" and "@stop", with "@disabled" switching a section back off (a mod author who
-                    keeps an edit around without applying it) and "@flag offset_shift 0x100" accepted - any other
-                    shift is refused, since these addresses already leave the 0x100-byte NSO header out. The build id
+                    keeps an edit around without applying it). "@flag offset_shift 0x100" must come before the first
+                    patch line - it says the addresses leave the 0x100-byte NSO header out, which is how they are
+                    applied; a file without it, or with another shift, is refused rather than put 0x100 bytes off.
+                    "@flag print_values" (a display option of the patching tools) is accepted. The build id
                     may be the 16-byte one (32 hex digits, as the rewriter's tables use it) or the 20 bytes the
                     runtime compares.
   main.npdm         ignored with a note: the native loader never reads a module's npdm (the module metadata comes
@@ -225,12 +227,13 @@ def parse_pchtxt(text, identity, path):
 
     @enabled and @disabled switch the lines that follow on and off, so a file that turns a section off (the usual way a
     mod author keeps an edit around without applying it) applies only the sections it enabled; @stop ends the file.
-    @flag offset_shift is read and checked: 0x100 is the shift an IPS form counts (the NSO header), which is what these
-    addresses already leave out, so any other shift is refused instead of putting every edit 0x100 or so elsewhere.
+    @flag offset_shift 0x100 is required before the first patch line: 0x100 is the shift an IPS form counts (the NSO
+    header), which is what these addresses leave out; without it (or with another shift) the tools that read the file
+    would put every edit elsewhere, so it is refused. @flag print_values only changes what those tools print: accepted.
 
     identity: the NSO header's build ID bytes (0x40, 20 bytes) as hex; the runtime compares 20 bytes and the
     rewriter's tables key on the first 16, and a mod may name either."""
-    records, enabled, matched = [], False, False
+    records, enabled, matched, shifted = [], False, False, False
     wanted, wanted16 = identity.lower(), identity.lower()[:32]
     for number, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
@@ -248,7 +251,7 @@ def parse_pchtxt(text, identity, path):
             enabled = False
             continue
         if line.startswith('@flag'):
-            _check_pchtxt_flag(line.split(), path, number)
+            shifted = _check_pchtxt_flag(line.split(), path, number) or shifted
             continue
         if line.startswith('@stop'):
             break
@@ -269,6 +272,9 @@ def parse_pchtxt(text, identity, path):
             raise ModError(f'{path}:{number}: an empty patch line')
         if not matched:
             raise ModError(f'{path}:{number}: patches before the @nsobid line')
+        if not shifted:
+            raise ModError(f'{path}:{number}: no "@flag offset_shift 0x100" before the first patch line, so it is not '
+                           f'certain the addresses leave the 0x100-byte NSO header out')
         records.append((address, payload))
     if not matched:
         raise ModError(f'{path}: no @nsobid line, so the patch cannot be checked against this build of main '
@@ -277,15 +283,18 @@ def parse_pchtxt(text, identity, path):
 
 
 def _check_pchtxt_flag(fields, path, number):
-    """One "@flag <name> <value>" line of a pchtxt: only offset_shift 0x100 is honoured, anything else is refused.
+    """One "@flag <name> <value>" line of a pchtxt: True for offset_shift 0x100, False for print_values (it changes only
+    what the patching tools print), anything else is refused.
 
     These patches are applied at main addresses - the 0x100-byte NSO header is not counted, which is exactly what an
     IPS form's offsets leave out (IPS_HEADER) - so 0x100 is the one shift that describes what is done here. A file that
     asks for another shift is not applied: it would put every edit somewhere else."""
     name = fields[1] if len(fields) > 1 else ''
     value = fields[2] if len(fields) > 2 else ''
+    if name == 'print_values':
+        return False
     if name != 'offset_shift':
-        raise ModError(f'{path}:{number}: @flag {name or "(none)"} is not supported (only offset_shift 0x100 is)')
+        raise ModError(f'{path}:{number}: @flag {name or "(none)"} is not supported (offset_shift 0x100 and print_values are)')
     if not value:
         raise ModError(f'{path}:{number}: @flag offset_shift needs a value (0x100)')
     try:
@@ -295,6 +304,7 @@ def _check_pchtxt_flag(fields, path, number):
     if shift != HEADER_SIZE:
         raise ModError(f'{path}:{number}: @flag offset_shift {value} is not supported: these patches are applied at '
                        f'main addresses, so only 0x100 (the NSO header an IPS form counts) holds here')
+    return True
 
 
 # ---- the merge ----
