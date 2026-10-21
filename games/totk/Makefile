@@ -131,7 +131,7 @@ build/gfx/%.o: % $(GFX_HEADERS) Makefile
 	@mkdir -p "$(dir $@)"
 	xcrun clang $(NATIVE_OPT) -g -Wall -Wextra $(GFX_FLAGS) -c "$<" -o "$@"
 
-.PHONY: graphics-assets shader-inventory verify-shaders probe-thread
+.PHONY: graphics-assets shader-inventory verify-shaders probe-thread probe-system-event
 graphics-assets:
 	"$(PY)" scripts/prepare_graphics_assets.py
 
@@ -148,6 +148,14 @@ build/thread-probe: scripts/thread_probe.c runtime/threads.c runtime/thread_comp
 probe-thread: build/thread-probe
 	build/thread-probe > analysis/thread-probe.json
 	@cat analysis/thread-probe.json
+
+# CPU only, against the real threads.c: SystemEvent bindings end with their write handle, a signal wakes only the waiters of
+# the signalled object, SignalToAddress writes mesosphère's value (tests/system_event_bind/probe.c; GAME_BOTW=1 for BotW's build)
+build/system-event-probe: tests/system_event_bind/probe.c runtime/threads.c runtime/thread_enter.S
+	xcrun clang -std=c11 -O1 -g -Wall -Wextra -Werror $(if $(GAME_BOTW),-DGAME_BOTW=1) -Ithird_party/d2r_gfx/gfx/nvn/include tests/system_event_bind/probe.c runtime/threads.c runtime/thread_enter.S -o "$@"
+
+probe-system-event: build/system-event-probe
+	build/system-event-probe | tee analysis/system-event-probe.log
 
 .PHONY: probe-account probe-gfx
 probe-account:
