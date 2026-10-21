@@ -58,13 +58,25 @@ class ModOverlays(unittest.TestCase):
         build_app.check_mod_overlays(self.tree, self.mod, 'v143')      # no exception
 
     def test_a_mod_file_the_app_replaces_is_named_not_refused(self):
-        self.mod_romfs('UI/LayoutArchive/Common.Product.140.Nin_NX_NVN.blarc.zs')
-        self.overlay('romfs-patches', 'UI/LayoutArchive/Common.Product.140.Nin_NX_NVN.blarc.zs')
+        # the game-over flow is one of the app's own overlays that cannot be merged: the manifest leaves it out
+        self.mod_romfs('Event/EventFlow/DmF_SY_GameOver.bfevfl.zs')
+        self.overlay('romfs-patches', 'Event/EventFlow/DmF_SY_GameOver.bfevfl.zs')
         sayings = []
         build_app.say = sayings.append
         clashes = build_app.check_mod_overlays(self.tree, self.mod, 'v143')
-        self.assertEqual(clashes, ['UI/LayoutArchive/Common.Product.140.Nin_NX_NVN.blarc.zs'])
+        self.assertEqual(clashes, ['Event/EventFlow/DmF_SY_GameOver.bfevfl.zs'])
         self.assertIn('a player\'s manifest leaves it out', sayings[0])
+
+    def test_the_ui_archive_is_merged_rather_than_left_out(self):
+        # #73: the build's quick-menu edit goes into the mod's own archive, so the build says merged, not left out
+        archive = 'UI/LayoutArchive/Common.Product.140.Nin_NX_NVN.blarc.zs'
+        self.mod_romfs(archive)
+        self.overlay('romfs-patches', archive)
+        sayings = []
+        build_app.say = sayings.append
+        self.assertEqual(build_app.check_mod_overlays(self.tree, self.mod, 'v143'), [])
+        self.assertIn("merged into the mod's copy", sayings[0])
+        self.assertIn('#73', sayings[0])
 
     def test_a_mod_without_romfs_is_not_checked(self):
         build_app.check_mod_overlays(self.tree, None, 'v143')

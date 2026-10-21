@@ -135,7 +135,8 @@ Then, at the very end, the build:
   another mod put there, or one you copied yourself, is gone (a mod whose files the game would all take from
   the app instead replaces nothing, and then the folder is left alone: see below);
 - writes `manifest.tsv` with `scripts/make_mod_manifest.py` against the app just built, so a path the app
-  replaces itself is left out (the heap table included: the 2K overlay carries the mod's heap sizes), and a
+  replaces itself is left out (the heap table included: the 2K overlay carries the mod's heap sizes; the UI archive is
+  merged instead, which leaves the mod's own copy next to it as `<name>.mod-original` - the game ignores it), and a
   misspelt path stops the build at its last step - the app is already written by then - with the reason instead of
   stopping the game later.
 
@@ -240,21 +241,26 @@ rebuilds the overlay from the retail table instead of keeping the mod's heap siz
   choose one file.
 - The build replaces a few RomFS files itself: `UI/LayoutArchive/Common.Product.<n>.Nin_NX_NVN.blarc.zs` (quick-menu
   timing; `<n>` is 100, 110 or 140 depending on the version), `Event/EventFlow/DmF_SY_GameOver.bfevfl.zs`, and with the
-  2K output `System/HeapSize/Product.Nin_NX_NVN.HeapDef.byml.zs`. A mod replacing one of them cannot be loaded next to
-  the app's own version (the start would stop with "two overlays replace the same file"), so the manifest leaves those
-  paths to the app and says which file it left out (UI translation mods hit this, #73).
-- `make_mod_manifest.py` handles all of them itself: a mod file whose path the app replaces is left out of the manifest
-  (with a line saying so), because both overlays cannot be loaded. The heap table is the exception the build can fold in:
-  with `--mod` the 2K overlay is built *on top of* the mod's table, so the mod's own heap sizes and the 2K texture heaps
-  both hold, and the manifest line says whether the app's table carries them (`already carries these heap sizes`) or
-  tells you to build with `--mod`.
+  2K output `System/HeapSize/Product.Nin_NX_NVN.HeapDef.byml.zs`. Two overlays cannot replace one path (the start would
+  stop with "two overlays replace the same file"), so:
+  - the **UI archive** is *merged*: a translation's archive keeps its textures and takes the build's quick-menu edit - the
+    tool writes the merged archive in the mod folder, keeps the mod's own copy next to it as
+    `<name>.mod-original`, and the merged file replaces the build's overlay (#73). It refuses when the mod changed the
+    members the build patches (the capture animations) rather than silently dropping one side;
+  - the **heap table** is folded in by the build: with `--mod` the 2K overlay is built on top of the mod's table;
+  - any other one (the game-over flow) is left to the app, with a line saying which file it left out.
+- `make_mod_manifest.py` handles all of them itself: the UI archive is merged as above, and any other mod file whose
+  path the app replaces is left out of the manifest (with a line saying so), because both overlays cannot be loaded. For
+  the heap table the line says whether the app's 2K overlay carries the mod's sizes (`already carries these heap sizes`,
+  which the build arranges with `--mod`) or tells you to build with `--mod`.
 - A mod manager (TKMM, or Ryujinx's `mods/contents/<title id>/<name>`) hands you `exefs/` and `romfs/` in one folder:
   pass that folder to `--mod` - its `exefs` patches are merged, and a manager's merged `.ips` may hold several mods'
   records in one file - and add `--install-mod-romfs` to have the build replace the version folder with its `romfs/`
   and write the manifest itself (no `--exclude` needed: the manager's heap table and the app's 2K overlay are
   reconciled for you). Re-merge in the manager and build again after every change: the game checks every file's hash
   at start. This is also how several mods with code patches are
-  combined: merge them in the manager first, then build with `--mod <the manager's output folder>`; the build refuses
+  combined: merge them in the manager first, then build with `--mod <the manager's output folder>
+  --install-mod-romfs`; the build refuses
   two patch files that change the same bytes and names both of them.
 - A mod with a code patch also needs its `exefs/` patch to match the game version the app is built from.
   The build checks what the file itself says: a `.pchtxt` is refused when its `@nsobid-` names another
@@ -267,7 +273,8 @@ The game closes the window and writes one line to `~/Library/Logs/MacNativeGames
 it cannot trust. The line above it names the file.
 
 - `two overlays replace the same file` - the manifest lists a path the app replaces itself: a manifest written by hand
-  or by another tool, since `make_mod_manifest.py` leaves those paths out by itself. Regenerate it with that script.
+  or by another tool, since `make_mod_manifest.py` leaves those paths out by itself (the UI archive it merges instead).
+  Regenerate it with that script.
 - `two overlays add the same file` - two overlays (the app's, or two mod folders) add one path the RomFS lacks.
 - `RomFS overlay integrity mismatch` - a file in the mods folder differs from the SHA-256 in the manifest: files were
   copied in after the manifest was written. Regenerate it (`make_mod_manifest.py` writes nothing for a mismatching dump).
@@ -404,8 +411,8 @@ python3.14 build_app.py "/path/to/Tears of the Kingdom.xci" -k "/path/to/prod.ke
   所以构建结束后这个目录里就是这一个 mod 的 RomFS，没有别的——另一个 mod 放在那里的文件、你自己复制进去的
   文件都会被删掉（如果这个 mod 的文件最终一个都不会被游戏加载，那就什么都没替换，目录保持不动，见下文）；
 - 用 `scripts/make_mod_manifest.py` 对着刚构建好的 App 生成 `manifest.tsv`，所以 App 自己替换的路径会被排除
-  （包括堆表：2K 覆盖文件已经带着 mod 的堆大小）；路径大小写写错的会当场终止构建并给出原因，而不是等到启动时
-  才停止。
+  （包括堆表：2K 覆盖文件已经带着 mod 的堆大小；UI 归档则是合并，模组原文件会以 `<name>.mod-original` 留在旁边，
+  游戏不会读它）；路径大小写写错的会终止构建并给出原因，而不是等到启动时才停止。
 
 不会拿你的目录去试错：构建先把 mod 的 `romfs/` 复制到它旁边的一个目录里、在那里写好清单，确认完整之后才把新的一份
 换进来（旧的一份随后删除）。在此之前还会用 `--check` 在 mod 自己的目录上跑一遍清单工具，所以路径写错的 mod 会在你的
@@ -487,18 +494,21 @@ mod 的 `exefs/` 里可能还有这些文件，构建这样处理：
   文件夹嵌套进去。两个 mod 改同一个路径时，只能选一个文件。
 - 构建本身也会替换几个 RomFS 文件：`UI/LayoutArchive/Common.Product.<n>.Nin_NX_NVN.blarc.zs`（快捷菜单时机，`<n>`
   按版本是 100、110 或 140）、`Event/EventFlow/DmF_SY_GameOver.bfevfl.zs`，开 2K 输出时还有
-  `System/HeapSize/Product.Nin_NX_NVN.HeapDef.byml.zs`。模组如果也替换其中一个，就无法和 App 自己的版本同时加载
-  （启动会报“two overlays replace the same file”），所以清单会把这些路径留给 App，并说明排除了哪个文件
-  （界面翻译模组会碰到，见 #73）。
-- 这些文件由 `make_mod_manifest.py` 自己处理：路径与 App 自身替换项相同的模组文件不会写进清单（并打印一行说明），
-  因为两份覆盖无法同时加载。堆表是构建能合并的例外：带 `--mod` 时 2K 覆盖文件是**在模组那份堆表之上**生成的，模组自己的
-  堆大小和 2K 贴图堆同时成立；清单那一行会告诉你 App 是否已经带着这些堆大小（`already carries these heap sizes`），
+  `System/HeapSize/Product.Nin_NX_NVN.HeapDef.byml.zs`。两份覆盖无法替换同一个路径（启动会报“two overlays replace the
+  same file”），所以：
+  - **UI 归档**是**合并**的：翻译模组的归档保留自己的贴图，同时接受构建对快捷菜单的改动——工具把合并后的归档写进模组
+    目录，模组原文件保留为旁边的 `<name>.mod-original`，合并后的文件取代构建的覆盖层（#73）。如果模组改动了构建也会
+    修改的成员（那些 capture 动画），工具会拒绝，而不是悄悄丢掉一侧；
+  - **堆表**由构建叠加：带 `--mod` 时 2K 覆盖文件是在模组那份堆表之上生成的；
+  - 其余路径（比如 game-over 流程）留给 App，并打印说明排除了哪个文件。
+- 这些文件由 `make_mod_manifest.py` 自己处理：UI 归档按上面的方式合并，其它与 App 自身替换项相同的模组文件不会写进
+  清单（并打印一行说明），因为两份覆盖无法同时加载。堆表那一行会告诉你 App 是否已经带着这些堆大小
   否则提示你用 `--mod` 重新构建。
 - 模组管理器（TKMM，或 Ryujinx 的 `mods/contents/<title id>/<name>`）给出的是同一个文件夹里的 `exefs/` 和 `romfs/`：
   把这个文件夹交给 `--mod`（里面的 `exefs` 补丁会合并，管理器合并出来的 `.ips` 可能一个文件里装着好几个模组的记录），
   再加上 `--install-mod-romfs` 让构建把对应版本的 mods 目录整个换成它的 `romfs/` 并生成清单（不需要再手动
   `--exclude`：管理器的堆表和 App 的 2K 覆盖文件会自动协调）。每次在管理器里重新合并后都要重新构建，因为游戏启动时会逐个校验文件哈希。多个带代码
-  补丁的 mod 也是这样合的：先在管理器里合并，再用 `--mod <管理器的输出文件夹>` 构建；两个补丁文件改到同一批字节
+  补丁的 mod 也是这样合的：先在管理器里合并，再用 `--mod <管理器的输出文件夹> --install-mod-romfs` 构建；两个补丁文件改到同一批字节
   时构建会拒绝，并同时报出这两个文件。
 - 带代码补丁的 mod，其 `exefs/` 补丁也要和构建所用的游戏版本一致。构建按文件自己写的东西核对：`.pchtxt` 的
   `@nsobid-` 不是这个 main 就拒绝；按 build id 命名的 `.ips` / `.ips32`，id 不是这个 main 就留出并提示。
@@ -508,7 +518,8 @@ mod 的 `exefs/` 里可能还有这些文件，构建这样处理：
 
 游戏会关掉窗口，并在 `~/Library/Logs/MacNativeGames/totk.log` 写下最后一行原因，它上面一行就是出问题的文件。
 
-- `two overlays replace the same file`：清单里列了 App 自己也会替换的路径——通常是手工写的清单或别的工具写的清单，
+- `two overlays replace the same file`：清单里列了 App 自己也会替换的路径——通常是手工写的清单或别的工具写的清单（UI 归档
+  的情况会改成合并而不是排除），
   因为 `make_mod_manifest.py` 自己就会把这类路径排除。用那个脚本重新生成即可。
 - `two overlays add the same file`：两个覆盖（App 的或两个模组目录）新增了同一个 RomFS 里没有的路径。
 - `RomFS overlay integrity mismatch`：模组目录里的文件和清单里的 SHA-256 不一致，也就是生成清单之后又拷了文件进去。

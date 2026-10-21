@@ -550,6 +550,16 @@ def mod_heapdef(mod):
     return path if path and path.is_file() else None
 
 
+def mergeable_overlays(version):
+    """The app's own overlay files a mod's copy is merged with instead of being left out (scripts/make_mod_manifest.py,
+    merge_build_patch): the UI archive whose quick-menu edit the build applies to the mod's own copy (#73)."""
+    try:
+        from make_romfs_patches import common_archive
+        return {common_archive(version)}
+    except (ImportError, KeyError):
+        return set()
+
+
 def check_mod_overlays(tree, mod, version):
     """A mod folder may hold files the app replaces itself. They are not a build problem - the player's manifest leaves
     such paths out by itself (games/totk/scripts/make_mod_manifest.py), so the app's version is the one loaded - but say
@@ -567,7 +577,13 @@ def check_mod_overlays(tree, mod, version):
                 name = line.split('\t', 1)[0]
                 if name and not name.startswith('#'):
                     replaced.add(name)
-    clashes = sorted(name for name in replaced if name != HEAPDEF and (mod / 'romfs' / name).is_file())
+    mergeable = mergeable_overlays(version)
+    clashes = sorted(name for name in replaced
+                     if name != HEAPDEF and name not in mergeable and (mod / 'romfs' / name).is_file())
+    folded = sorted(name for name in replaced if name in mergeable and (mod / 'romfs' / name).is_file())
+    if folded:
+        say(f"1/4 code: {mod.name}/romfs also holds {folded[0]}, which the app replaces itself: the build's edit is "
+            f"merged into the mod's copy, so both apply (#73)")
     if clashes:
         say(f"1/4 code: {mod.name}/romfs also holds {clashes[0]}, which the app replaces itself; a player's manifest "
             f"leaves it out, so the app's version of it is the one loaded")
