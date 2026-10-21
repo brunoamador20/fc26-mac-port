@@ -1258,7 +1258,8 @@ def main(argv):
         step_data_botw(tree, botw, game, keys, logs, shared_fonts=shared_fonts, update=update)
         step_shaders_botw(tree, botw, logs)
         step_shader_libs(tree, logs, version='botw160')
-        step_binary(tree, game, keys, {**env, 'SHADER_LIST': str(BOTW_LIST)}, logs, version='botw160', title='01007ef00011e000')
+        # The work folder's copy of games/botw (prepare_work), relative: make splits a path with spaces into several targets
+        step_binary(tree, game, keys, {**env, 'SHADER_LIST': '../botw/assets/shader_list.tsv'}, logs, version='botw160', title='01007ef00011e000')
         say(f'4/4 app: assembling {out}')
         step_app(tree, out, logs, version='botw160', game='botw')
         run([LSREGISTER, '-f', out], logs / 'register-app.log')
