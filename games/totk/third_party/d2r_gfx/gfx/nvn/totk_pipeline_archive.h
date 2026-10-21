@@ -4,7 +4,7 @@
 // iPhone 14, whose limit is 4 GB), because a pipeline met for the first time in play compiles on the device (50-700 ms
 // hitches), and the system's own shader cache is cleared by reboots and updates. With valid archives the full warm-up
 // is skipped (the pipeline lists are made, quickly, from the archives) and the rest is made when first drawn.
-// - Off on the Mac unless TOTK_PIPELINE_ARCHIVE=1; on iOS unless TOTK_PIPELINE_ARCHIVE=0.
+// - On everywhere; TOTK_PIPELINE_ARCHIVE=0 turns it off.
 // - Folder pipelines/ in the cache: every written archive is a file of its own and is never written again; new pipelines
 //   of a run go into a fresh archive that becomes the next file. (An archive opened from a file and serialized again
 //   kept only what was added after opening it: 2,291 pipelines added in batches came back as 208, 2026-10-20.)
@@ -29,16 +29,13 @@ static _Atomic int g_par_saving;
    flatbuffer in -[_MTLBinaryArchive getScriptsWithAIRNTObject:]). Many small files keep it near 1 MB per 32 pipelines. */
 enum { PAR_SAVE_EVERY = 32 };
 static _Atomic int par_filling;   // the background fill writes its own files (warm_fill_archive)
+static __thread int par_on_fill_thread;   // set on that fill's own thread: it adds in place
 
 static int par_enabled(void) {
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("TOTK_PIPELINE_ARCHIVE");
-#if TARGET_OS_IPHONE
         on = !(e && !strcmp(e, "0"));
-#else
-        on = e && !strcmp(e, "1");
-#endif
     }
     return on;
 }
@@ -150,22 +147,56 @@ static void par_added(id<MTLDevice> dev) {
     g_par_added++; g_par_unsaved++;
     if (g_par_unsaved >= PAR_SAVE_EVERY && !par_filling) par_save(dev, "游戏中新编的管线");
 }
-// Called for a pipeline the archives did not have (pso_new / cs_new in nvn_mtl.m), after it was compiled.
-static void par_add_render(id<MTLDevice> dev, MTLRenderPipelineDescriptor *d) {
-    if (!g_par_new) return;
+// Called for a pipeline the archives did not have (pso_new / cs_new in nvn_mtl.m), after it was compiled. Adding it
+// compiles it once more for the archive, through the same Metal compiler service the game's own compiles use: added at
+// once (even on a background queue) it made a world entry with 102 new pipelines take 1.7 s instead of 0.4 s on the
+// Mac (2026-10-21). So additions wait in a list and are made one at a time only while the game is idle (in the world,
+// no pipeline compiled for PAR_IDLE_NS; par_game_idle in nvn_mtl.m). The background fill adds in place (its own thread).
+enum { PAR_IDLE_NS = 3000000000u };
+static _Atomic uint64_t g_par_last_compile_ns;   // set by pso_new / cs_new when they compiled
+static int par_game_idle(void);                  // nvn_mtl.m: in the world, warm-up done, no compile for PAR_IDLE_NS
+static NSMutableArray *g_par_pending;             // MTLRenderPipelineDescriptor / MTLComputePipelineDescriptor copies
+static _Atomic int g_par_draining;
+static dispatch_queue_t par_queue(void) {
+    static dispatch_queue_t q; static dispatch_once_t once;
+    dispatch_once(&once, ^{ q = dispatch_queue_create("dm.nvn.pipeline-archive", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_BACKGROUND, 0)); });
+    return q;
+}
+static void par_add_now(id<MTLDevice> dev, id desc) {
     NSError *e = nil;
     pthread_mutex_lock(&g_par_mu);
-    BOOL ok = [g_par_new addRenderPipelineFunctionsWithDescriptor:d error:&e];
+    BOOL ok = [desc isKindOfClass:MTLRenderPipelineDescriptor.class] ? [g_par_new addRenderPipelineFunctionsWithDescriptor:desc error:&e]
+                                                                      : [g_par_new addComputePipelineFunctionsWithDescriptor:desc error:&e];
     if (ok) par_added(dev);
     pthread_mutex_unlock(&g_par_mu);
     if (!ok) par_note_failure(e);
 }
+// Every second while additions wait: when the game is idle, add one, then look again at once.
+static void par_drain(id<MTLDevice> dev) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)NSEC_PER_SEC), par_queue(), ^{
+        for (;;) {
+            if (!par_game_idle()) { par_drain(dev); return; }
+            id desc = nil;
+            pthread_mutex_lock(&g_par_mu);
+            if (g_par_pending.count) { desc = g_par_pending.firstObject; [g_par_pending removeObjectAtIndex:0]; }
+            pthread_mutex_unlock(&g_par_mu);
+            if (!desc) { atomic_store(&g_par_draining, 0); return; }
+            @autoreleasepool { par_add_now(dev, desc); }
+        }
+    });
+}
+static void par_enqueue(id<MTLDevice> dev, id desc) {
+    pthread_mutex_lock(&g_par_mu);
+    if (!g_par_pending) g_par_pending = [NSMutableArray array];
+    [g_par_pending addObject:desc];
+    pthread_mutex_unlock(&g_par_mu);
+    if (!atomic_exchange(&g_par_draining, 1)) par_drain(dev);
+}
+static void par_add_render(id<MTLDevice> dev, MTLRenderPipelineDescriptor *d) {
+    if (!g_par_new) return;
+    if (par_on_fill_thread) par_add_now(dev, d); else par_enqueue(dev, [d copy]);
+}
 static void par_add_compute(id<MTLDevice> dev, MTLComputePipelineDescriptor *d) {
     if (!g_par_new) return;
-    NSError *e = nil;
-    pthread_mutex_lock(&g_par_mu);
-    BOOL ok = [g_par_new addComputePipelineFunctionsWithDescriptor:d error:&e];
-    if (ok) par_added(dev);
-    pthread_mutex_unlock(&g_par_mu);
-    if (!ok) par_note_failure(e);
+    if (par_on_fill_thread) par_add_now(dev, d); else par_enqueue(dev, [d copy]);
 }

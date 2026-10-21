@@ -6124,7 +6124,10 @@ static void nan_trace_bind(id<MTL4RenderCommandEncoder> en) {
    pipeline the archive to take its code from; warming: built by the warm-up (always added to the archive). */
 /* A pipeline is first asked of the archives alone (MTLPipelineOptionFailOnBinaryArchiveMiss). Found: done. Not found: it
    is compiled as usual and added, so the archives come to hold what this device draws. (Guessing "compiled" from the
-   time it took missed most of them on the Mac, where the warm system shader cache makes a compile quick too.) */
+   time it took missed most of them on the Mac, where the warm system shader cache makes a compile quick too.) On the
+   first run (no valid archive yet) the archives are not given to the pipelines at all: Metal looks a pipeline up in
+   every attached archive, and the files written during that run made each creation slower (a world entry with 102 new
+   pipelines took 1.6-3.1 s instead of 0.41 s on the Mac). It compiles as before and is added in the background. */
 static _Atomic uint64_t g_par_hits, g_par_misses;
 static NSArray<NSString *> *g_par_fill_lists;   // the first run's pipeline lists for the background fill (warm_fill_archive)
 static void par_count(int hit) {
@@ -6139,13 +6142,15 @@ static id<MTLRenderPipelineState> pso_new(MTLRenderPipelineDescriptor *d, NSErro
         if (ps) return ps;
     }
     ps = [g_dev newRenderPipelineStateWithDescriptor:d error:e];
-    if (ps && d.binaryArchives.count) par_add_render(g_dev, d);
+    atomic_store(&g_par_last_compile_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+    if (ps) par_add_render(g_dev, d);
     return ps;
 }
 static id<MTLComputePipelineState> cs_new(id<MTLFunction> fn, NSError **e) {
     if (!fn) return nil;
     MTLComputePipelineDescriptor *d = [MTLComputePipelineDescriptor new];
-    d.computeFunction = fn; d.binaryArchives = par_list(g_dev);
+    NSArray *archives = par_list(g_dev);
+    d.computeFunction = fn; d.binaryArchives = g_par_valid ? archives : nil;
     id<MTLComputePipelineState> ps = nil;
     if (d.binaryArchives.count) {
         ps = [g_dev newComputePipelineStateWithDescriptor:d options:MTLPipelineOptionFailOnBinaryArchiveMiss reflection:nil error:nil];
@@ -6153,7 +6158,8 @@ static id<MTLComputePipelineState> cs_new(id<MTLFunction> fn, NSError **e) {
         if (ps) return ps;
     }
     ps = [g_dev newComputePipelineStateWithDescriptor:d options:MTLPipelineOptionNone reflection:nil error:e];
-    if (ps && d.binaryArchives.count) par_add_compute(g_dev, d);
+    atomic_store(&g_par_last_compile_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+    if (ps) par_add_compute(g_dev, d);
     return ps;
 }
 static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvShader *fs, id<MTLFunction> fsfn, int merged) {
@@ -6252,7 +6258,8 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
         vd.layouts[16 + st].stepRate = k->stream[st].stride == 0 ? 0 : k->stream[st].divisor ? k->stream[st].divisor : 1;
     }
     d.vertexDescriptor = vd;
-    d.binaryArchives = par_list(g_dev);
+    NSArray *archives = par_list(g_dev);   // opens them; given to the pipeline only once valid (see pso_new)
+    d.binaryArchives = g_par_valid ? archives : nil;
     return d;
 }
 // 管线键：当前状态 S + 通道格式（普通通道；合并通道另带 lmap / 特化函数，由 pso_get 填）
@@ -6705,6 +6712,10 @@ static void warm_filled(void) {
    cache take a few ms each. TOTK_WARM_LIGHT=0 turns it off. */
 static _Atomic int g_world_on;   // set at the first world frame (hle_nvn.c, nvnQueuePresentTexture)
 void mtl_note_world(void) { atomic_store(&g_world_on, 1); }
+static int par_game_idle(void) {   // totk_pipeline_archive.h: additions to the archive wait for this
+    return atomic_load(&g_world_on) && !atomic_load(&g_warm_running) &&
+           clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - atomic_load(&g_par_last_compile_ns) > PAR_IDLE_NS;
+}
 static void warm_light(void) {
 #if TARGET_OS_IPHONE
     const char *e = getenv("TOTK_WARM_LIGHT"); if (e && !atoi(e)) return;
@@ -6750,7 +6761,7 @@ static void warm_light(void) {
 static void warm_fill_archive(NSArray<NSString *> *paths) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{
         uint64_t t0 = bp_now(), nr = 0, nc = 0, nfail = 0; NSMutableSet<NSString *> *seen = [NSMutableSet set];
-        atomic_store(&par_filling, 1);
+        atomic_store(&par_filling, 1); par_on_fill_thread = 1;
         NSMutableDictionary<NSString *, NvShader *> *dict = [NSMutableDictionary dictionary];
         MLOG("管线存档：后台填充开始（%lu 份管线清单，建完收进存档就丢，每 %d 条写一次盘）", (unsigned long)paths.count, PAR_SAVE_EVERY);
         for (NSString *path in paths) {
@@ -6778,7 +6789,7 @@ static void warm_fill_archive(NSArray<NSString *> *paths) {
         }
         [dict removeAllObjects];
         par_save_now(g_dev, "后台填充完成", NULL);
-        atomic_store(&par_filling, 0);
+        atomic_store(&par_filling, 0); par_on_fill_thread = 0;
         MLOG("管线存档：后台填充完成，渲染管线 %llu 条、计算管线 %llu 条，失败 / 缺着色器 %llu，用时 %.1f s；下次启动从存档取",
              nr, nc, nfail, (bp_now() - t0) / 1e9);
     });
