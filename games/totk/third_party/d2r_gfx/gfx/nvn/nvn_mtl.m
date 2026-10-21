@@ -10165,9 +10165,17 @@ frz_plain:;
     }
     /* TOTK_TAA: sub-pixel jitter of the scene geometry in the passes on the G-buffer depth. All geometry moves together
        (foliage is drawn twice, the second time against the first one's depth with an equal test); full-screen
-       triangles and quads (lighting, post) stay put, a moved one leaves lines of stale pixels. */
+       triangles and quads (lighting, post) stay put, a moved one leaves lines of stale pixels.
+       Not the draws that sample an attachment of their own pass (the ground decals, e.g. c9b4efe2): they read the pixel
+       under them at a position projected without the jitter, so a moved draw sampled between texels and blended in its
+       neighbours; next to cliff edges that brought Inf / NaN into the scene's red and blue, which bloom spread into purple
+       glows on hazy rocks (2026-10-21, found with DM_NVN_NANDRAW). Unmoved, each decal reads and writes its own pixel.
+       Nor the draws counted by an occlusion query (g_vis_counting: the sphere proxies of lamps and other lights): moved by
+       a sub-pixel, a small sphere covers a few more or fewer samples each frame (338 / 345 for an egg lamp), and the game
+       scales the light by that count, so lamps and what they light pulsed while standing still. */
     double jx = 0, jy = 0; unsigned nv = di ? di->count : dw ? dw->count : 0;
-    if (taa_jittered() && nv > 6 && vo == 0 && vs == 1 && ux == 1) taa_jitter(&jx, &jy);
+    if (taa_jittered() && nv > 6 && vo == 0 && vs == 1 && ux == 1 && !g_vis_counting && !att_n && !(!att_store_on() && draw_att_reads(pr, att_rs)))
+        taa_jitter(&jx, &jy);
     if (S.has_vp) enc_r_viewport(en, (MTLViewport){vx + jx, S.vp[0][1] + vo + jy, vw, S.vp[0][3] * vs, S.dr[0], S.dr[1]});
     else enc_r_viewport(en, (MTLViewport){vx + jx, vo + jy, vw, th * vs, 0, 1});
     MTLScissorRect sc = {0, 0, tw, th};
