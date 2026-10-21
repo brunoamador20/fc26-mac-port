@@ -34,6 +34,8 @@ Update history:
 
 | Date | Platform | Update |
 |---|---|---|
+| Oct 21 | Mac | `TOTK_FIXED_RES=1` holds 1.4.3's dynamic resolution at 100 % (#122); the mouse cursor hides after 1.5 s idle in native full screen (#121); 16:10 UI layouts with `make_romfs_patches.py --aspect` (#123); a translation mod's UI archive is merged with the build's quick-menu edit instead of refusing to start (#134, #73) |
+| Oct 21 | Mac, iPhone, iPad | Vertex shaders with a custom sampler border colour get their own pipeline per colour, and a sampler that repeats on one axis no longer returns the border there (#148); Breath of the Wild's Magnesis and Stasis pick targets are written back to the CPU (#140); macOS 27 start-up reserves the guest regions separately when no single gap is left (#138); 4,648 new variants in the shared shader list |
 | Oct 20 | iPhone, iPad | Sound plays with the silent switch on and comes back after a call, Siri or an alarm; the game follows the system language; a fresh install reaches the title screen (#97) |
 | Oct 20 | iPhone, iPad | First launch after installing shows the game in about 7 seconds instead of about 4½ minutes: the shaders that come with the app are read where they are, without checking or copying them again (iPhone 14) |
 | Oct 20 | Mac | Breath of the Wild above 30 fps: menus and the HUD at normal speed, physics steady, movies at their own speed; docked play renders at native 1080p (`TOTK_RENDER_RES=900` keeps 1600x900) (#103) |
@@ -302,6 +304,8 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 
 | 日期 | 平台 | 更新 |
 |---|---|---|
+| 10 月 21 日 | Mac | `TOTK_FIXED_RES=1` 把 1.4.3 的动态分辨率固定在 100%（#122）；原生全屏时鼠标 1.5 秒不动就隐藏（#121）；`make_romfs_patches.py --aspect` 支持 16:10 界面布局（#123）；翻译模组的界面档案和构建自带的快捷菜单修改合并，不再拒绝启动（#134，#73） |
+| 10 月 21 日 | Mac、iPhone、iPad | 顶点着色器的自定义采样器边框色按颜色各建管线，单轴重复的采样器在该轴不再返回边框色（#148）；旷野之息磁力、静止的选取目标回写到 CPU（#140）；macOS 27 启动时没有整块空间就分开保留客体区域（#138）；公共着色器清单新增 4,648 条 |
 | 10 月 20 日 | iPhone、iPad | 打开静音键也有声音，来电、Siri、闹钟之后声音会恢复；游戏跟随系统语言；全新安装能进标题画面（#97） |
 | 10 月 20 日 | iPhone、iPad | 安装后第一次启动约 7 秒出画面，原来要约 4 分半：随 App 的着色器直接原地读取，不再校验和复制（iPhone 14） |
 | 10 月 20 日 | Mac | 旷野之息 30 帧以上：菜单和 HUD 速度正常、物理稳定、过场动画按原速播放；底座模式按原生 1080p 渲染（`TOTK_RENDER_RES=900` 保持 1600x900）（#103） |
