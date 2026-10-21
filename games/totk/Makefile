@@ -424,3 +424,7 @@ test-opus-codec:
 	"$(OPUS_TEST_WORK)/probe"
 	@probe_status=0; "$(OPUS_TEST_WORK)/probe" --bad-range > "$(OPUS_TEST_WORK)/negative-range.log" 2>&1 || probe_status=$$?; test "$$probe_status" -eq 1
 	@grep -q 'Opus stream integrity' "$(OPUS_TEST_WORK)/negative-range.log"
+
+.PHONY: probe-gpu-sampler-border
+probe-gpu-sampler-border: runtime-v143
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; TOTK_PROFILE_DIR="$$tmp/profile" TOTK_SHADER_CACHE="$$tmp/cache" DM_PSO_RECORD="$$tmp/pso.tsv" $(GAME_SLOT_RUN) build/totk-native-v143 rewritten/v143 probe-gpu-sampler-border
