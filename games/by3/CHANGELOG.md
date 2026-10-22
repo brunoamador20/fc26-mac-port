@@ -420,5 +420,8 @@ current render pass once). Replay CPU 2.3 -> 3.1 ms per frame, because the draws
 as on the Switch) are now encoded too. Frame pacing is unchanged within the noise of a windowed test run (frames over
 16.7 ms: 125 / 300 before, 120 / 300 after); GPU time per frame about 3.4 ms in both.
 
+Verified in play (2026-10-22): the installed app (`make install`) on the user's own save, camera moving: no ghosts and
+no trails.
+
 Still open: the stencil-as-depth variant answer for `cd871b70` (see 2026-10-19); the hand-edited cached MSL is still
 on this machine.
