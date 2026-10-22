@@ -260,7 +260,7 @@ cache v6, both DLC packs and window output, and exited with code 0 and no abort.
   `610d735`), the warm-up builds only the pipeline lists, from the archive (4418 pipelines). At 4000 pipelines, all
   4000 came from the archive, and none was compiled. Title about 120 fps (3591 frames in 30.0 s). The save loads, and
   Link stands on the plateau with the HUD. Still view: 69.1 to 71.6 fps in the 30-second real-time lines.
-- The branch tip: CI passes (187 tests and the two UBSan tests). TOTK identity against `ab4c9d2`: 60 of 60.
+- The branch tip: CI passes (187 tests and the two UBSan tests). TOTK identity against `ab4c9d2`: 68 of 68.
 - `29bc388` (origin/main `f08266c` merged, with #120, #140, #143 and #157): title about 120 fps (3592 frames in 30.0 s),
   and the save loads. The log shows "docked render size 1920x1080" and the real-time line with the UI step and six
   physics substeps. Key 2 at 30+30: 296 of 300 game frames interpolated, the game at 28.7 fps. Key 3: the game's
@@ -312,8 +312,10 @@ Every file under `games/totk` that this port changes (`git diff --stat ab4c9d2 H
 | `scripts/test_exclusive_windows.py` | `'botw190': []` in `WINDOWS` | additive |
 | `scripts/verify_rewrites.py` | `botw190` in `--version`; an empty window list passes for it, as for `botw160` | new choice; TOTK checks unchanged |
 | `third_party/d2r_gfx/gfx/nvn/hle_nvn.c` | 1.9.0 reports the TOTK NVN version; `BOTW_FAST_DISPLAY_*` hooks at the ends of three lines | `#if defined(GAME_BOTW) && !defined(GAME_BOTW190)`; the hooks are empty for TOTK |
-| `third_party/d2r_gfx/gfx/nvn/nvn_mtl.m` | `BOTW_WB_*` hooks at the ends of existing lines, the staging bodies at the end of the file (their stage read inside an `@autoreleasepool`, `5ab49a2`), `BOTW_MFXUP_KEY` in the scene test; `TAA_COMPOSE(fs)` in key 5's compose test; `UW_UI_BEGINS` and `UW_NOT_UI_DRAW` in key 4's two UI tests; `BOTW_MFX_NO_UI_SCENE` at the end of key 4's UI line (key 2 in frames with no UI); `BOTW_WB_ENT_FIELDS`, `BOTW_WB_STAGE_FREE` and `BOTW_WB_NOTED` next to upstream's small-target copy (`snap`, #140) | bodies in `#ifdef GAME_BOTW`; for TOTK the hooks are empty, `WB_WAIT_GPU` is `mtl_finish_gpu()`, the call it replaces, and `TAA_COMPOSE` is the old `0ac9a549` test |
-| `third_party/d2r_gfx/gfx/nvn/nvn_obj.h` | the `BOTW_WB_*` and `BOTW_FAST_DISPLAY_*` macros; `BOTW_MFXUP_KEY` and `TAA_COMPOSE` for each version; `UW_UI_BEGINS` and `UW_NOT_UI_DRAW` (for TOTK, the old expressions); `BOTW_MFX_NO_UI_SCENE` | inside the existing `#ifdef GAME_BOTW` / `#else`, empty in the `#else`; `TAA_COMPOSE` has its own `#if` block |
+| `third_party/d2r_gfx/gfx/nvn/nvn_dirty.c` | pools that share a host page with another pool get ranges for their own pages; lookups walk range by range; a pool removes only its own ranges (the 30 fps after the map's Hero's Path playback) | `#if defined(GAME_BOTW)` / `#if !defined(GAME_BOTW)` around whole functions |
+| `third_party/d2r_gfx/gfx/nvn/nvn_mtl.m` | `BOTW_REUP_TRACKED` and `BOTW_WB_*` hooks at the ends of existing lines, the staging bodies at the end of the file (their stage read inside an `@autoreleasepool`, `5ab49a2`), `BOTW_MFXUP_KEY` in the scene test; `TAA_COMPOSE(fs)` in key 5's compose test; `UW_UI_BEGINS` and `UW_NOT_UI_DRAW` in key 4's two UI tests; `BOTW_MFX_NO_UI_SCENE` at the end of key 4's UI line (key 2 in frames with no UI); `BOTW_WB_ENT_FIELDS`, `BOTW_WB_STAGE_FREE` and `BOTW_WB_NOTED` next to upstream's small-target copy (`snap`, #140) | bodies in `#ifdef GAME_BOTW`; for TOTK the hooks are empty, `WB_WAIT_GPU` is `mtl_finish_gpu()`, the call it replaces, and `TAA_COMPOSE` is the old `0ac9a549` test |
+| `third_party/d2r_gfx/gfx/nvn/nvn_obj.h` | the `BOTW_REUP_TRACKED`, `BOTW_WB_*` and `BOTW_FAST_DISPLAY_*` macros; `BOTW_MFXUP_KEY` and `TAA_COMPOSE` for each version; `UW_UI_BEGINS` and `UW_NOT_UI_DRAW` (for TOTK, the old expressions); `BOTW_MFX_NO_UI_SCENE` | inside the existing `#ifdef GAME_BOTW` / `#else`, empty in the `#else`; `TAA_COMPOSE` has its own `#if` block |
+| `tests/dirty_race/probe.c` | 12 overlap checks for the BOTW tracker | `#if defined(GAME_BOTW)` |
 
 Outside `games/totk`, `build_app.py` adds the 1.9.0 branch, `--dlc` and the package checks (`check_package`, BOTW
 only). The font functions are upstream's (#170): a 1.9.0 build checks its fonts against the TOTK pins, as TOTK does
@@ -327,7 +329,7 @@ with fonts of another firmware. A TOTK build sees these changes:
   is identified, before any long step.
 
 For TOTK 1.0.0, 1.1.2, 1.2.1 and 1.4.3, the preprocessed code (`clang -E -P`) of every changed C, Objective-C and
-header file is identical to origin/main `ab4c9d2` (60 of 60 checks: 11 changed files and the 15 sources that compile
+header file is identical to origin/main `ab4c9d2` (68 of 68 checks: 13 changed files and the 17 sources that compile
 them, 4 versions). The Python scripts keep the TOTK defaults, and the Makefile only adds rules. TOTK itself was not re-tested in game on this branch.
 
 ## Long run and the sinking legs
@@ -363,7 +365,7 @@ moving try on the field route is void, because Link died before 245 s and the ru
 - A card image as the game file with a 1.9.0 `--update`: not tested. The build takes the DLC packs from `--dlc` only.
 - BOTW 1.6.0 and the iPhone and iPad builds: not built. The write-back staging and the 120 Hz rule also act on 1.6.0.
 - Keys 4 and 5 do nothing on 1.6.0. No 1.6.0 game files were at hand for a test.
-- TOTK: not played on this branch. The evidence is the 60 of 60 preprocessed identity.
+- TOTK: not played on this branch. The evidence is the 68 of 68 preprocessed identity.
 - Upstream's `[dead-keep]` set grows linearly (30k to 397k entries in 25 minutes, from `e0ad452`): not changed here,
   because it is upstream's shared code, and a change to it changes TOTK.
 - Key 3 native 2K: above 1080p the game fails to make its heaps. It needs a memory patch of its own, and upstream's
