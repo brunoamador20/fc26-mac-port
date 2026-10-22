@@ -6,6 +6,10 @@ with the same team and bundle identifier keeps the saves and the shader cache (t
 
   python3 games/totk/ios/tools/install_device.py "Tears of the Kingdom.ipa" --device "Jack iPhone"
 
+An IPA built with --ios-game-data documents carries no 17 GB game image: pass --game-data <work>/totk/extracted/v143/
+romfs/romfs.bin and it is copied once into the app's Documents/GameData in 1 GiB parts (devicectl drops the connection on
+one file that size); a later install skips it while the device holds the same image (romfs.sha256 there).
+
 Xcode needs your Apple ID (Xcode > Settings > Accounts). The provisioning profile comes from a throwaway Xcode project
 built with the same bundle identifier and entitlements (-allowProvisioningUpdates registers the device and the App ID).
 """
@@ -81,12 +85,48 @@ def identity_of(signed_app):
         der = Path(d+'/cert0').read_bytes()
     return hashlib.sha1(der).hexdigest().upper()
 
+PART = 1 << 30
+def device_files(dev, bundle_id, sub):
+    """{name: size} of the app's Documents/<sub> on the device, {} when there is none."""
+    with tempfile.NamedTemporaryFile(suffix='.json') as f:
+        r = subprocess.run(['xcrun','devicectl','device','info','files','--device',dev,'--domain-type','appDataContainer',
+                            '--domain-identifier',bundle_id,'--subdirectory',sub,'--json-output',f.name], capture_output=True)
+        if r.returncode: return {}
+        files = json.load(open(f.name)).get('result', {}).get('files', [])
+    return {Path(x.get('relativePath', x.get('name', ''))).name: x.get('metadata', {}).get('size', 0) for x in files}   # devicectl's JSON
+
+def push_game_data(dev, bundle_id, image):
+    """The RomFS image into Documents/GameData as romfs.bin.000, .001, ... (ios/Sources/main.m reads it there), then
+    romfs.sha256 naming it, so the next install skips it."""
+    sha = json.loads((image.parent/'index.json').read_text())['romfs_sha256']
+    size = image.stat().st_size; parts = (size + PART - 1) // PART
+    have = device_files(dev, bundle_id, 'Documents/GameData')
+    if have.get('romfs.sha256') == 64 + 1 and all(f'romfs.bin.{i:03d}' in have for i in range(parts)):
+        with tempfile.TemporaryDirectory() as d:
+            got = Path(d)/'romfs.sha256'
+            r = subprocess.run(['xcrun','devicectl','device','copy','from','--device',dev,'--domain-type','appDataContainer',
+                                '--domain-identifier',bundle_id,'--source','Documents/GameData/romfs.sha256','--destination',got], capture_output=True)
+            if r.returncode == 0 and got.read_text().strip() == sha:
+                print('game data: the device already has this image'); return
+    print(f'game data: copying {size / 2**30:.1f} GiB in {parts} parts (once; later installs keep it)')
+    with tempfile.TemporaryDirectory() as d, open(image, 'rb') as src:
+        def copy(local, name):
+            run(['xcrun','devicectl','device','copy','to','--device',dev,'--domain-type','appDataContainer','--domain-identifier',
+                 bundle_id,'--source',local,'--destination',f'Documents/GameData/{name}'], capture_output=True)
+        (Path(d)/'romfs.sha256').write_text('stale\n'); copy(Path(d)/'romfs.sha256', 'romfs.sha256')   # until every part is there
+        for i in range(parts):
+            part = Path(d)/f'romfs.bin.{i:03d}'
+            part.write_bytes(src.read(PART)); copy(part, part.name); part.unlink()
+            print(f'  part {i + 1}/{parts}', flush=True)
+        (Path(d)/'romfs.sha256').write_text(sha + '\n'); copy(Path(d)/'romfs.sha256', 'romfs.sha256')
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('ipa', type=Path, help='the unsigned IPA from build_app.py --platform ios')
+    ap.add_argument('ipa', type=Path, help='the unsigned IPA (or .app folder) from build_app.py --platform ios')
     ap.add_argument('--device', help='device name (as in Finder) or identifier; needed when several are paired')
     ap.add_argument('--team', help='Apple team ID (default: the only team with an Apple Development certificate)')
     ap.add_argument('--bundle-id', help='default: org.macnativegames.totk.<team>, so it is free to register on your team')
+    ap.add_argument('--game-data', type=Path, help='romfs.bin (index.json beside it) for an IPA built with --ios-game-data documents')
     a = ap.parse_args()
     team = a.team or (lambda t: t[0] if len(t) == 1 else sys.exit(
         f'choose the team with --team: {", ".join(t)}' if t else 'no Apple Development certificate: add your Apple ID in Xcode > Settings > Accounts'))(teams())
@@ -107,7 +147,14 @@ def main():
     # Unpack once per IPA; later runs only re-sign. 16 GiB of game data is signed in place.
     work = a.ipa.with_suffix('.signed'); stamp = work/'.ipa-mtime'
     app = work/'Payload/TOTK.app'
-    if not stamp.is_file() or stamp.read_text() != str(a.ipa.stat().st_mtime_ns):
+    if a.ipa.is_dir():   # an unsigned .app (build_app.py -o X.app): cloned, nothing to unpack
+        print(f'cloning {a.ipa.name}')
+        shutil.rmtree(work, ignore_errors=True); app.parent.mkdir(parents=True)
+        import ctypes   # one APFS clone of the whole folder (~100,000 files), as build_app.py copy_tree
+        libc = ctypes.CDLL(None); libc.clonefile.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32]
+        if libc.clonefile(os.fsencode(a.ipa), os.fsencode(app), 0) and subprocess.run(['/bin/cp', '-cR', a.ipa, app]).returncode:
+            sys.exit(f'cannot copy {a.ipa}')
+    elif not stamp.is_file() or stamp.read_text() != str(a.ipa.stat().st_mtime_ns):
         print(f'unpacking {a.ipa.name}')
         shutil.rmtree(work, ignore_errors=True); work.mkdir()
         run(['ditto','-x','-k',a.ipa,work])
@@ -123,6 +170,7 @@ def main():
     run(['codesign','--force','--sign',identity_of(signed),'--entitlements',entfile,'--generate-entitlement-der',app])
     print('installing (a few minutes over the cable)')
     run(['xcrun','devicectl','device','install','app','--device',dev['identifier'],app])
+    if a.game_data: push_game_data(dev['identifier'], bundle_id, a.game_data)
     print('installed. First time on this device: Settings > General > VPN & Device Management > trust your Apple ID.')
 
 if __name__ == '__main__': main()

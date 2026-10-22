@@ -14,6 +14,7 @@
 int totk_host_main(int argc, char **argv);
 void runtime_ios_attach_layer(CAMetalLayer *layer, UIView *host);
 static char *host_argv[3];
+static NSString *g_no_game_data;   // set when there is no RomFS image to play from (didFinishLaunching)
 static void *run_host(void *unused) { (void)unused; return (void *)(intptr_t)totk_host_main(3, host_argv); }
 /* The desktop keyboard-overlay shortcut has no counterpart on iOS. */
 void runtime_shortcut_help_toggle(void) {}
@@ -37,6 +38,13 @@ void runtime_shortcut_help_toggle(void) {}
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     static BOOL started; if (started) return; started = YES;
+    if (g_no_game_data) {
+        UILabel *say = [[UILabel alloc] initWithFrame:CGRectInset(self.view.bounds, 40, 40)];
+        say.autoresizingMask = UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
+        say.text = g_no_game_data; say.textColor = UIColor.whiteColor; say.numberOfLines = 0; say.textAlignment = NSTextAlignmentCenter;
+        [self.view addSubview:say];
+        return;
+    }
     /* Playback category (PR #97): plays with the ring / silent switch off and routes to the speaker. Without an active
        session the game's CoreAudio output stays on a null sink on iOS 27 ("no device sink in use"); activating it in
        didFinishLaunching blocked the main thread before the log file was opened. Interruptions: audio_observe. */
@@ -117,6 +125,28 @@ static void audio_observe(void) {
     NSString *log = [docs stringByAppendingPathComponent:@"log.txt"];
     if (freopen(log.fileSystemRepresentation,"w",stderr)) setvbuf(stderr,NULL,_IOLBF,0);
     setenv("TOTK_ROMFS",[res stringByAppendingPathComponent:@"romfs"].fileSystemRepresentation,1);
+    /* The 17 GB image may live in Documents/GameData instead of the app (romfs.bin or romfs.bin.000, ...; ios/tools/
+       install_device.py --game-data puts it there): a new build then installs without it, and reinstalling keeps it.
+       Excluded from iCloud backups. The runtime still hashes it once against the build's pin (TOTK_ROMFS_PROOF_DIR). */
+    NSString *gameData = [docs stringByAppendingPathComponent:@"GameData"];
+    BOOL image = [fm fileExistsAtPath:[gameData stringByAppendingPathComponent:@"romfs.bin"]] ||
+                 [fm fileExistsAtPath:[gameData stringByAppendingPathComponent:@"romfs.bin.000"]];
+    NSString *mark = [NSString stringWithContentsOfFile:[gameData stringByAppendingPathComponent:@"romfs.sha256"] encoding:NSUTF8StringEncoding error:nil];
+    BOOL copying = mark && [mark stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].length != 64;   // install_device.py writes the hash last
+    if (image && !copying) {
+        [[NSURL fileURLWithPath:gameData isDirectory:YES] setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+        setenv("TOTK_ROMFS_DATA",gameData.fileSystemRepresentation,1);
+    } else if (![fm fileExistsAtPath:[res stringByAppendingPathComponent:@"romfs/romfs.bin"]]) {
+        /* No image to play from: said on the screen instead of the game ending at once (runtime_fail exits). */
+        BOOL zh = [NSLocale.preferredLanguages.firstObject hasPrefix:@"zh"];
+        NSString *app = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: @"TOTK";   // the Files app's folder name
+        g_no_game_data = copying || image
+            ? [NSString stringWithFormat:(zh ? @"游戏数据还在复制到“文件 › 我的 iPhone › %@ › GameData”，复制完再打开游戏。"
+                                             : @"The game data is still being copied to Files › On My iPhone › %@ › GameData. Open the game again when it is done."), app]
+            : [NSString stringWithFormat:(zh ? @"没有游戏数据。请在 Mac 上用 ios/tools/install_device.py --game-data 把它复制到“文件 › 我的 iPhone › %@ › GameData”。"
+                                             : @"No game data. On the Mac, copy it to Files › On My iPhone › %@ › GameData with ios/tools/install_device.py --game-data."), app];
+        fprintf(stderr, "[totk] no game image: %s\n", g_no_game_data.UTF8String);
+    }
     setenv("TOTK_OPERATION_MODE","handheld",1);
     // Game language: the Settings app (Settings.bundle › TOTK_LANG) stores the choice in our defaults; empty means the
     // system language, which is what the runtime already follows. iOS 27 does not honour Info.plist LSEnvironment, so

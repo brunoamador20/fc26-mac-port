@@ -37,7 +37,7 @@ def main():
   for name,digest in results: manifest['files'][name]=digest
   manifest['ios_metallibs']=len(results)
   manifest['ios_metal_flags']=' '.join(METAL_FLAGS)   # build_ipa.py reuses the libraries only when these match
-  manifest['files']={n:hashlib.sha256((seed/n).read_bytes()).hexdigest() for n in sorted(manifest['files'])}
+  # the seed's own files keep the hashes checked when it was prepared; the metallibs were hashed above
   (seed/'seed-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
   print(f'compiled {len(results)} iOS metallibs ({reused[0]} from {cache.name})')
 
