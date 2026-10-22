@@ -48,7 +48,11 @@ VARIANT = re.compile(r'^[0-9a-f]{64}-[0-9a-f]{12}_b$')
 PIPELINE = re.compile(r'^(?:[0-9a-f]{2})+$')
 HEX = re.compile(r'^[0-9a-f]{1,10}$')
 _HEXFLOAT = r'-?0x[0-9a-f]+(?:\.[0-9a-f]*)?p[-+]\d+'
-BORDER = re.compile(rf'^(?:-|(?:\d+:[0-7]:{_HEXFLOAT},{_HEXFLOAT},{_HEXFLOAT},{_HEXFLOAT};){{1,8}})$')
+# nvn_mtl.m border_key: per sampler "<argument id>:<axes>:<r>,<g>,<b>,<a>", a filtering sampler adding
+# ":f<ws>,<wt>,<wr>,<magf>,<minf>,<aniso>,<lod min>,<lod max>" before ';' (the runtime has written it so for a while: without
+# it every B row a player sent was dropped, 51 of 51 on 2026-10-22)
+_FILTER = rf':f\d+,\d+,\d+,\d+,\d+,{_HEXFLOAT},{_HEXFLOAT},(?:{_HEXFLOAT}|inf)'
+BORDER = re.compile(rf'^(?:-|(?:\d+:[0-7]:{_HEXFLOAT},{_HEXFLOAT},{_HEXFLOAT},{_HEXFLOAT}(?:{_FILTER})?;){{1,8}})$')
 SOURCE = re.compile(r'^(?:module:[a-z0-9]+|[A-Za-z0-9_.()+-]+(?:/[A-Za-z0-9_.()+-]+)*)$')
 DEPS_FIELDS = {'tex', 'img', 'attr', 'fout'}
 

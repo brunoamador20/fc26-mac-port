@@ -83,7 +83,8 @@ class ShaderList(unittest.TestCase):
     def test_border_recipes_travel_with_their_pipeline(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder); out = root/'list.tsv'
-            fs = '3:7:0x1p-1,0x1p-1,0x1p-1,0x1p-1;'; vs = '8:3:0x1p-2,0x1.99999ap-2,0x1.8p-1,0x1.ccccccp-1;9:7:0x0p+0,-0x1p+0,0x1p+0,0x1p+0;'
+            fs = '3:7:0x1p-1,0x1p-1,0x1p-1,0x1p-1;'
+            vs = '8:3:0x1p-2,0x1.99999ap-2,0x1.8p-1,0x1.ccccccp-1;9:7:0x0p+0,-0x1p+0,0x1p+0,0x1p+0:f5,5,5,1,3,0x1p+0,0x0p+0,0x1.ep+3;'   # a filtering sampler
             later = root/'pso_user.tsv'
             later.write_text(f'R\t{PIPELINE}\nB\t{PIPELINE}\t-\t{fs}\nB\t{PIPELINE}\t{vs}\t-\n'
                              f'B\t{PIPELINE}\t-\t-\nB\t{PIPELINE}\t-\t3:9:0x1p-1,0x1p-1,0x1p-1,0x1p-1;\nB\t{PIPELINE}\t-\t3:7:0.5,0.5,0.5,0.5;\n')
