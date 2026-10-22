@@ -237,6 +237,9 @@ void botw_wb_stage_encode(void);
         if ((list)[i_]->stage_fence > need_) need_ = (list)[i_]->stage_fence; } if (need_) mtl_wait(need_, UINT64_MAX); while (atomic_load(&g_up_pending)) usleep(1000); }
 int botw_wb_from_stage(void *e);   /* 1 written back from the stage, 0 failed, -1 not staged */
 #define BOTW_WB_FROM_STAGE(e, ok, layers) { int s_ = botw_wb_from_stage(e); if (s_ >= 0) { (ok) = s_; (layers) = 0; } }
+/* BOTW (nvn_mtl.m, after a re-upload): the range that tracked the texture can be gone by now (a neighbour pool destroyed,
+   nvn_dirty.c); its protect then did nothing, and a kept "tracked" would let the replay's shortcut call it clean next time */
+#define BOTW_REUP_TRACKED(pk, t) (pk)->tracked = nvn_dirty_tracked((t)->mem, (t)->L.size);
 #else
 #define MFX_CANVAS_FMT_OK(f) pf_is_float(f)
 #define MFX_UI_DRAW(pr) mfx_ui_vs(pr->sh[0]->key)
@@ -273,6 +276,7 @@ int botw_wb_from_stage(void *e);   /* 1 written back from the stage, 0 failed, -
 #define BOTW_RT_DUP_PREDICT(r, cf)
 #define BOTW_RT_DUP_CLEAR_TO_FIRST(c)
 #define BOTW_ASHOT_POLL(t, cur)
+#define BOTW_REUP_TRACKED(pk, t)
 #endif
 /* Key 5 (MetalFX temporal anti-aliasing, totk_taa.m): the compose draw that samples the linear HDR scene at fragment
    texture slot 0 before tone mapping. TOTK: 0ac9a549 (tone mapping and bloom). Breath of the Wild 1.9.0: f7ee6fe1 (two
