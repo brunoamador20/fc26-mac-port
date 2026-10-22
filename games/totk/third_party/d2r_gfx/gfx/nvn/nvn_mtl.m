@@ -8375,7 +8375,7 @@ static void shader_predict_rest(void) {
     fz_cursor cur = {.p = g_exec_next};
     uint64_t started = bp_now(), progs = 0, urgent = 0, queued = 0; int guard = 0, stop = 0;
     for (; ; guard++) {
-        if (guard >= max_ops || bp_now() - started > (uint64_t)max_us * 1000ull) { stop = 1; break; }
+        if (guard >= max_ops || (!(guard & 63) && bp_now() - started > (uint64_t)max_us * 1000ull)) { stop = 1; break; }   // the clock every 64 commands
         const uint8_t *q; op_hdr hq; const void *aq;
         if (!fz_next(&cur, &q, &hq, &aq)) break;
         if (hq.op == OP_SET_RT) { R.rt = *(const p_set_rt *)aq; R.has_rt = 1; continue; }   // the fragment outputs' types are answered from the targets
@@ -8443,7 +8443,7 @@ static void pso_predict_rest(void) {
     for (; ; guard++) {
         if (guard >= max_ops) { stop = 1; break; }
         if (na >= max_keys) { stop = 2; break; }
-        if (bp_now() - started > (uint64_t)max_us * 1000ull) { stop = 3; break; }
+        if (!(guard & 63) && bp_now() - started > (uint64_t)max_us * 1000ull) { stop = 3; break; }   // the clock every 64 commands
         const uint8_t *q; op_hdr hq; const void *aq;
         if (!fz_next(&cur, &q, &hq, &aq)) break;
         if (hq.op == OP_SET_RT) {

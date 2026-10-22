@@ -284,9 +284,11 @@ static NSString *variant_lookup(NSString *shader, NSDictionary *answers) {
     return nil;
 }
 static NSString *stage_name(int stage) { return stage == 0 ? @"vs" : stage == 1 ? @"ps" : stage == 5 ? @"cs" : nil; }
-/* The translation request for these answers; the guest code is written to <variant>.code (the translator reads it there). */
+/* The translation request for these answers; the guest code is written to <variant>.code (the translator reads it there).
+   code_out: the code is handed back instead, to be written by the job that translates it (rt_job_run): an atomic file
+   write on the submit thread took 10-30 ms, 0.42 s of the long frames of a session that met 1,670 new variants. */
 static NSMutableDictionary *variant_request(NSString *shader, int stage, const uint8_t *control, const uint8_t *code,
-                                            NSDictionary *answers, NSArray *local) {
+                                            NSDictionary *answers, NSArray *local, NSData **code_out) {
     uint32_t c1o, c1t; memcpy(&c1o, control + 0x700, 4); memcpy(&c1t, control + 0x704, 4);
     if (!c1t || c1t > 16u << 20 || c1o > c1t || (stage != 5 && c1o < 0x30)) die("shader %s: code area %#x / c1 %#x", shader.UTF8String, c1t, c1o);
     if (!stage_name(stage)) die("shader %s: NVN stage %d has no translation chain (tessellation/geometry)", shader.UTF8String, stage);
@@ -295,7 +297,9 @@ static NSMutableDictionary *variant_request(NSString *shader, int stage, const u
     NSString *code_path = [totk_rt_dir() stringByAppendingFormat:@"/%@.code", variant];
     // Graphics code drops the 0x30-byte NVN header (the translator wants SPH + instructions); compute keeps it, as in D2R's build.
     size_t skip = stage == 5 ? 0 : 0x30;
-    if (![[NSData dataWithBytes:code + skip length:c1t - skip] writeToFile:code_path atomically:YES]) die("write shader code %s", code_path.UTF8String);
+    NSData *bytes = [NSData dataWithBytes:code + skip length:c1t - skip];
+    if (code_out) *code_out = bytes;
+    else if (![bytes writeToFile:code_path atomically:YES]) die("write shader code %s", code_path.UTF8String);
     NSMutableDictionary *rq = [NSMutableDictionary dictionaryWithDictionary:@{@"variant": variant, @"stage": stage_name(stage), @"code": code_path, @"c1": hex(code + c1o, c1t - c1o)}];
     [rq addEntriesFromDictionary:answers];
     if (local) rq[@"local"] = local;
@@ -386,7 +390,7 @@ static int rt_urgent_workers(void) {
 }
 static _Atomic int g_rt_urgent_busy;   // urgent jobs queued or running: the background line does not start new jobs meanwhile
 enum { RT_JOB_QUEUED, RT_JOB_RUNNING, RT_JOB_TAKEN };
-static NSMutableDictionary<NSString *, NSMutableArray *> *g_rt_pending;   // shader -> its job: @[@RT_JOB_*, request, @stage, @existed] (g_rt_lock)
+static NSMutableDictionary<NSString *, NSMutableArray *> *g_rt_pending;   // shader -> its job: @[@RT_JOB_*, request, @stage, @existed, code] (g_rt_lock)
 static _Atomic uint64_t g_rt_urgent_n, g_rt_urgent_ns;
 static pthread_cond_t g_rt_done = PTHREAD_COND_INITIALIZER;
 static _Atomic uint64_t g_rt_gen;
@@ -395,7 +399,8 @@ void totk_rt_set_ready_hook(void (*hook)(NSString *variant, int stage)) { g_rt_r
 uint64_t totk_rt_ready_gen(void) { return atomic_load(&g_rt_gen); }
 /* One job: translate on svc, compile its Metal library (the ready hook), record it and wake the waiters. */
 static void rt_job_run(NSString *shader, NSMutableArray *job, rt_svc *svc, uint64_t queued) {
-    NSDictionary *rq = job[1]; int stage = [job[2] intValue]; BOOL existed = [job[3] boolValue];
+    NSDictionary *rq = job[1]; int stage = [job[2] intValue]; BOOL existed = [job[3] boolValue]; NSData *code = job[4];
+    if (![code writeToFile:rq[@"code"] atomically:YES]) die("write shader code %s", [rq[@"code"] UTF8String]);
     uint64_t started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     NSDictionary *refl = translate(svc, rq, started);
     if (g_rt_ready_hook) g_rt_ready_hook(rq[@"variant"], stage);   // the Metal library too, off the submit thread
@@ -406,17 +411,17 @@ static void rt_job_run(NSString *shader, NSMutableArray *job, rt_svc *svc, uint6
     pthread_cond_broadcast(&g_rt_done);
     pthread_mutex_unlock(&g_rt_lock);
 }
-static NSMutableArray *rt_job_new(NSString *shader, int stage, NSDictionary *rq, BOOL existed) {   // g_rt_lock held
+static NSMutableArray *rt_job_new(NSString *shader, int stage, NSDictionary *rq, BOOL existed, NSData *code) {   // g_rt_lock held
     if (!g_rt_pending) g_rt_pending = [NSMutableDictionary dictionary];
-    NSMutableArray *job = [NSMutableArray arrayWithObjects:@(RT_JOB_QUEUED), rq, @(stage), @(existed), nil];
+    NSMutableArray *job = [NSMutableArray arrayWithObjects:@(RT_JOB_QUEUED), rq, @(stage), @(existed), code, nil];
     g_rt_pending[shader] = job;
     return job;
 }
-static void bg_translate(NSString *shader, int stage, NSDictionary *rq, BOOL existed) {   // g_rt_lock held
+static void bg_translate(NSString *shader, int stage, NSDictionary *rq, BOOL existed, NSData *code) {   // g_rt_lock held
     static rt_svc svc[RT_BG_MAX]; static dispatch_queue_t queue[RT_BG_MAX]; static unsigned next; int workers = rt_bg_workers();
     if (!queue[0]) for (int i = 0; i < workers; i++)
         queue[i] = dispatch_queue_create("totk.shader.background", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
-    NSMutableArray *job = rt_job_new(shader, stage, rq, existed);
+    NSMutableArray *job = rt_job_new(shader, stage, rq, existed, code);
     rt_svc *own = &svc[next % workers]; dispatch_queue_t q = queue[next++ % workers];
     uint64_t queued = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     dispatch_async(q, ^{ @autoreleasepool {
@@ -434,6 +439,8 @@ static void urgent_translate(NSString *shader, NSMutableArray *job) {
     static rt_svc svc[RT_URGENT_MAX]; static int busy[RT_URGENT_MAX]; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     static dispatch_semaphore_t free_svc; static dispatch_queue_t q;
     if (!q) { free_svc = dispatch_semaphore_create(rt_urgent_workers());
+              // At the game's own level (user interactive, threads.c): one below, the jobs draws were waiting for took 30-49 ms
+              // instead of 26 ms and the long frames did not get shorter (2026-10-22).
               q = dispatch_queue_create("totk.shader.urgent", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT, QOS_CLASS_USER_INTERACTIVE, 0)); }
     job[0] = @(RT_JOB_RUNNING);
     uint64_t queued = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
@@ -467,11 +474,12 @@ NSString *totk_rt_variant(NSString *shader, int stage, const uint8_t *control, c
         pthread_mutex_unlock(&g_rt_lock); return nil;
     }
     if (found || g_rt_pending[shader]) { pthread_mutex_unlock(&g_rt_lock); return found; }
-    NSMutableDictionary *rq = variant_request(shader, stage, control, code, answers, local);
+    NSData *code_bytes = nil;   // written by the job when it is not translated here
+    NSMutableDictionary *rq = variant_request(shader, stage, control, code, answers, local, may_defer && !no_translator() ? &code_bytes : NULL);
     if (no_translator()) { record_miss(shader, rq, answers); pthread_mutex_unlock(&g_rt_lock); return nil; }
     BOOL existed = [NSFileManager.defaultManager fileExistsAtPath:[totk_rt_dir() stringByAppendingFormat:@"/%@_b.metal", rq[@"variant"]]];   // a re-translation of a broken variant is not a new one
-    if (may_defer == 2) { urgent_translate(shader, rt_job_new(shader, stage, rq, existed)); pthread_mutex_unlock(&g_rt_lock); return nil; }
-    if (may_defer) { bg_translate(shader, stage, rq, existed); pthread_mutex_unlock(&g_rt_lock); return nil; }
+    if (may_defer == 2) { urgent_translate(shader, rt_job_new(shader, stage, rq, existed, code_bytes)); pthread_mutex_unlock(&g_rt_lock); return nil; }
+    if (may_defer) { bg_translate(shader, stage, rq, existed, code_bytes); pthread_mutex_unlock(&g_rt_lock); return nil; }
     variant_record(shader, rq, translate(&g_svc, rq, started), existed, started, 0);
     pthread_mutex_unlock(&g_rt_lock);
     return rq[@"variant"];
