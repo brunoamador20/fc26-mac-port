@@ -119,6 +119,44 @@ Earlier runs of the same route on older bases, before the shared list had 1.4.3 
 (native 4K, one run each: 13.1 s → 9.5 s); on d92f463 without PR #166, where one scan per submission stops at its
 budget early in a world entry, 11.1 s → 9.8-10.1 s.
 
+## Libraries of unseen variants
+
+A variant the scan finds in the translation cache's index whose Metal library nothing has compiled yet (the warm-up
+has not reached it, it is off, or Metal's cache lost the library) was skipped, and its draw compiled the library on
+the submission thread, then the next draw the next library, one after another. Now the scan starts that library's
+compile on a background thread (`plib_kick`; as many side by side as the warm-up uses before the world: the cores less
+two, at most 8), and `shader_get` at the draw waits for that compile instead of starting its own (`plib_take`). Draws
+still wait for their shaders and pipelines; only the compiles run side by side and earlier. Once a library is
+compiled, a later scan of the submission (PR #166) predicts the pipelines that use it. Only the variant the draw will
+use is compiled, not every variant of the shader. The Mac only: iOS loads prebuilt libraries.
+`TOTK_PSO_PREDICT_LIBS=0` turns it off; the statistics line counts the libraries started, taken by draws and the time
+draws waited for them.
+
+1.4.3, Apple M4 Max, main at 30a1b93 with the change above, the same route with Metal's caches moved aside and the
+warm-up lists off (`DM_PSO_MANIFEST=off TOTK_PIPELINE_ARCHIVE=0`, the player's translation cache),
+`TOTK_ASYNC_SHADERS=0`; frames after the title screen whose long-frame entry has pipeline or library creation:
+
+| build | stall in those frames | pipeline and library creation | libraries compiled on the submission thread | longest frame |
+|---|---|---|---|---|
+| before | 41.5 / 39.7 s | 39.2 / 37.9 s | 548 / 565, 30.6 / 29.8 s | 13.2 / 10.3 s |
+| this change | 17.7 / 18.1 s | 15.8 / 16.2 s | 545 / 570, 10.3 / 10.4 s (draws waited 3.4 s of it for background compiles) | 2.9 / 3.3 s |
+| before, with `TOTK_SHADER_PREFETCH=1` | 45.7 / 46.6 s | 43.8 / 44.8 s | | 37.6 / 39.0 s |
+
+593 libraries were started for prediction in a run and draws took 590 of them. The number of frames over 100 ms stayed
+the same (34-36): the frames that meet new libraries remain, they get shorter. Draws took 705-740 pipelines from the
+background instead of 309-312, because the scans could now predict the pipelines of the compiled libraries. The shader
+prefetch of #186 compiles every cached variant of a shader when the game sets it (5,335 libraries queued in such a
+run), which kept the system's compiler busy while draws waited for their own libraries behind it. Steady frame
+unchanged (frame p50 6.06 ms; GPU p50 2.49-2.72 ms).
+
+A first launch that loads the save without waiting for the warm-up showed no difference: the first world load waits up
+to 15 s for the warm-up, after which 30-78 libraries were left for the world (1.9-3.0 s before, 2.2-2.8 s with the
+change; pipeline and library creation 3.6-4.6 s against 3.7-4.9 s, two runs each). Neither did a player's own setup
+with Metal's caches cleared (their profile and its collected list, the pipeline archive, native 4K): the warm-up
+builds the listed pipelines and their libraries (9,429 pipelines in 65 s in the background), so 4 libraries were left
+for this route's world (0.3-0.5 s of stall in both builds, GPU p50 6.6-6.8 ms). The change matters where no list
+reaches, with a cold Metal cache, as in the table above.
+
 ## Still done on the submission thread
 
 - `pso_desc` for each guess, but no longer the patched functions it needs: a vertex function patched for varyings the
@@ -128,24 +166,24 @@ budget early in a world entry, 11.1 s → 9.8-10.1 s.
   building the guesses' descriptors took 571 ms on the submission thread, with a 2.0 s frame.
 - `ds_scan` at the start of each pass calls `prog_ps_writes_depth` → `prog_get`, which can translate and compile a
   program of that pass. This is the path the pass needs anyway.
-- A new program, or a new binding variant, whose shader is not loaded yet: at its draw, translation (when the
-  translation cache does not have the variant), library compile and its pipeline compile, one after the other. With
-  the warm-up finished this is rare in the world (3-4 libraries in the runs above); before it finishes, or with
-  `DM_PSO_MANIFEST=off`, it is most of the stall.
+- A new program, or a new binding variant, whose variant is not in the translation cache: translation at its draw
+  (with async shaders off), then its library and pipeline. A library whose variant is cached but which a scan did not
+  reach in time is still compiled at the draw.
 
 ## Checks
 
-`scripts/verify_gfx.py` (`make probe-gfx`, no GPU drawing): prediction leaves the active scissor, conditional
-counters and bindings untouched; an unresolved future program is skipped without translation or compilation; a
-cached alternate variant is used without being selected; a missing variant is skipped; a program with an
-untranslated stage is skipped; a depth-exporting fragment gets no depth-less guess; old completed slots are freed,
-recent ones and unfinished ones are kept; an unseen program and an unseen binding variant of a drawn program are
-predicted from loaded shaders through the variant index, with the variant of the draw's bound state, without loading a
-library, creating the program or adding to its variants, and a variant the index names but no shader is loaded for is
-not predicted. `TOTK_PROBE_NEGATIVE=24` (take the active variant whatever the state), `25` (free every slot), `26`
-(ignore untranslated stages), `27` (guess depth-less pipelines for depth export), `28` (look the unseen variant up
-without the draw's bound state), `29` (record it in the program) and `30` (create the program) each make the probe
-fail at its own check.
+`scripts/verify_gfx.py` (`make probe-gfx`, no GPU drawing): prediction leaves the active scissor, conditional counters
+and bindings untouched; an unresolved future program is skipped without translation or compilation; a cached alternate
+variant is used without being selected; a missing variant is skipped; a program with an untranslated stage is skipped;
+a depth-exporting fragment gets no depth-less guess; old completed slots are freed, recent ones and unfinished ones
+are kept; an unseen program and an unseen binding variant of a drawn program are predicted from loaded shaders through
+the variant index, with the variant of the draw's bound state, without loading a library, creating the program or
+adding to its variants, and a variant the index names but no shader is loaded for is not predicted; its library is
+requested for the variant of the draw (recorded, not compiled, in the probe), a scan uses it once compiled, and a draw
+takes it, waiting while it compiles. `TOTK_PROBE_NEGATIVE=24` (take the active variant whatever the state), `25` (free
+every slot), `26` (ignore untranslated stages), `27` (guess depth-less pipelines for depth export), `28` (look the
+unseen variant up without the draw's bound state), `29` (record it in the program), `30` (create the program) and `31`
+(the draw does not wait for a library compiling for prediction) each make the probe fail at its own check.
 
 ## In-game comparison (1.2.1, Apple M4, 2026-10-19)
 
