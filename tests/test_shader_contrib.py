@@ -31,6 +31,10 @@ class ContributionFileTests(unittest.TestCase):
             shared.add_rows(contrib, 'm')
             self.assertEqual(len(shared.variants), 1600)
             self.assertFalse(shared.warm)
+            noseed = subprocess.run([str(probe), str(contrib), 'noseed'], capture_output=True, text=True)
+            self.assertEqual(noseed.returncode, 0, noseed.stderr)
+            self.assertEqual(json.loads(noseed.stdout)['status'], 'pass')
+            self.assertFalse(contrib.exists(), 'a run without the seed writes no contribution file')
 
 
 if __name__ == '__main__':

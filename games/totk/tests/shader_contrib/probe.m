@@ -1,4 +1,5 @@
-// totk_shader_contrib.h: the contribution file and its reminder. Usage: probe <file>; writes the file, prints JSON.
+// totk_shader_contrib.h: the contribution file and its reminder. Usage: probe <file> [noseed]; writes the file, prints JSON.
+// noseed: with TOTK_SHADER_SEED=off nothing is written (a process of its own: totk_contrib_add keeps its file once opened).
 #import <Foundation/Foundation.h>
 #include "totk_shader_contrib.h"
 
@@ -8,11 +9,18 @@ static NSString *key(unsigned i) { return [NSString stringWithFormat:@"%064x", i
 
 int main(int argc, char **argv) {
     @autoreleasepool {
-        if (argc != 2) return 2;
+        if (argc != 2 && !(argc == 3 && !strcmp(argv[2], "noseed"))) return 2;
         NSString *path = @(argv[1]);
         [NSFileManager.defaultManager removeItemAtPath:path error:nil];
         [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".reminded"] error:nil];
         setenv("TOTK_SHADER_CONTRIB", argv[1], 1);
+        if (argc == 3) {
+            setenv("TOTK_SHADER_SEED", "off", 1);
+            totk_contrib_add(key(1), @{@"tex": @{@"9": @"2d"}});
+            check(![NSFileManager.defaultManager fileExistsAtPath:path] && !totk_contrib_path(), "without the seed: no file");
+            printf("{\"status\":\"%s\",\"probe\":\"shader-contrib-noseed\",\"checked\":%d,\"failures\":%d}\n", failures ? "fail" : "pass", checked, failures);
+            return failures != 0;
+        }
         NSDictionary *deps = @{@"tex": @{@"9": @"2d", @"10": @"3d"}, @"attr": @{@"0": @"float"}, @"fout": @{}, @"img": @{@"1": @{@"type": @"2d", @"fmt": @"r32f"}}, @"local": @[@1]};
         totk_contrib_add(key(1), deps);
         totk_contrib_add(key(1), deps);                    // the same shader and state: once

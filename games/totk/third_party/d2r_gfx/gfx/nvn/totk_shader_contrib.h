@@ -20,8 +20,11 @@
 #define TOTK_CONTRIB_REPO "ly05010419/MacNativeGames"   // the Mac reminder's "Submit automatically" (gh issue create)
 #define TOTK_CONTRIB_ISSUE_URL "https://github.com/ly05010419/MacNativeGames/issues/new?template=" GAME_CONTRIB_TEMPLATE
 
+/* Nothing is written without the seed (TOTK_SHADER_SEED=off, a test of a first run): every variant is translated in play
+   then, so each would look new to the list (one such session wrote 1,670 false rows and set off the reminder). */
 static inline NSString *totk_contrib_path(void) {
-    const char *e = getenv("TOTK_SHADER_CONTRIB");
+    const char *e = getenv("TOTK_SHADER_CONTRIB"), *seed = getenv("TOTK_SHADER_SEED");
+    if (seed && !strcmp(seed, "off")) return nil;
     return e && *e ? @(e) : nil;
 }
 
