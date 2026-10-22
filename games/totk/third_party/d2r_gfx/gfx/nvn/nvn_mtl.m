@@ -5232,6 +5232,70 @@ static NvShader *async_take(NSString *pc) {
     os_unfair_lock_unlock(&g_async_lock);
     return sh;
 }
+/* TOTK (Mac): libraries the prediction scan needs before any draw has loaded them (loaded_variant: the variant is in the
+   translation cache, its Metal library not compiled yet). The scan starts the compile on a background thread, several
+   side by side (as many as the warm-up uses before the world); shader_get, at the draw, waits for that compile instead of
+   compiling the library again, and the draw is drawn as before. A world entry's new libraries were compiled one after
+   another on the submission thread. Once compiled, a later scan predicts the pipelines that use it. iOS loads prebuilt
+   libraries and is left as it was. TOTK_PSO_PREDICT_LIBS=0 turns it off. Negative 31: the draw does not wait. */
+static int pred_negative(void);
+static int plib_on(void) {
+#if TARGET_OS_IPHONE
+    return 0;
+#else
+    static int v = -1; if (v < 0) { const char *e = getenv("TOTK_PSO_PREDICT_LIBS"); v = !e || atoi(e); } return v;
+#endif
+}
+static NSMutableDictionary<NSString *, id> *g_plib;   // variant key -> NSNull while it compiles, its NvShader once compiled (a failed one is removed)
+static pthread_mutex_t g_plib_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_plib_cv = PTHREAD_COND_INITIALIZER;
+static uint64_t g_plib_kicked, g_plib_taken, g_plib_waits, g_plib_wait_ns;   // statistics line of pso_predict_rest
+static int g_plib_probe; static NSString *g_plib_probe_key; static int g_plib_probe_stage;   // probe-gfx: record the request instead of compiling
+static void plib_kick(NSString *pc, int stage) {   // submission thread
+    if (!plib_on()) return;
+    if (g_plib_probe) { g_plib_probe_key = pc; g_plib_probe_stage = stage; return; }
+    pthread_mutex_lock(&g_plib_mu);
+    if (!g_plib) g_plib = [NSMutableDictionary dictionary];
+    if (g_plib.count >= 4096) {   // compiled ones no draw took (another program's draw loaded the shader first): forget them
+        for (NSString *k in g_plib.allKeys) if (g_plib[k] != NSNull.null) [g_plib removeObjectForKey:k];
+    }
+    int fresh = !g_plib[pc]; if (fresh) g_plib[pc] = NSNull.null;
+    pthread_mutex_unlock(&g_plib_mu);
+    if (!fresh) return;
+    g_plib_kicked++;
+    static dispatch_queue_t q; static dispatch_semaphore_t slots; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        long n = (long)NSProcessInfo.processInfo.activeProcessorCount - 2; if (n > 8) n = 8; if (n < 1) n = 1;   // warm_threads()
+        slots = dispatch_semaphore_create(n);
+        q = dispatch_queue_create("totk.predicted-libraries", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT, QOS_CLASS_USER_INITIATED, 0));
+    });
+    dispatch_async(q, ^{ @autoreleasepool {
+        dispatch_semaphore_wait(slots, DISPATCH_TIME_FOREVER);
+        // the check variant_lookup makes before the draw takes a variant: a source that cannot compile is translated again there
+        NSString *msl = [NSString stringWithContentsOfFile:totk_rt_file([pc stringByAppendingString:@".metal"]) encoding:NSUTF8StringEncoding error:nil];
+        NvShader *sh = msl && ![msl containsString:@"double "] && ![msl containsString:@"unsupported_GLSLstd450"] ? shader_load(pc, stage) : nil;
+        dispatch_semaphore_signal(slots);
+        pthread_mutex_lock(&g_plib_mu);
+        if (sh) g_plib[pc] = sh; else [g_plib removeObjectForKey:pc];
+        pthread_cond_broadcast(&g_plib_cv);
+        pthread_mutex_unlock(&g_plib_mu);
+    } });
+}
+/* The library compiled for pc; nil when none was started, it failed, or it is still compiling and wait is 0. With wait
+   (the draw, shader_get) a compile in progress is waited for and the library handed over. */
+static NvShader *plib_take(NSString *pc, int wait) {
+    if (!g_plib) return nil;
+    pthread_mutex_lock(&g_plib_mu);
+    id j = g_plib[pc];
+    if (wait && j == NSNull.null && pred_negative() != 31) {
+        uint64_t t0 = bp_now();
+        while ((j = g_plib[pc]) == NSNull.null) pthread_cond_wait(&g_plib_cv, &g_plib_mu);
+        g_plib_waits++; g_plib_wait_ns += bp_now() - t0;
+    }
+    NvShader *sh = [j isKindOfClass:NvShader.class] ? j : nil;
+    if (sh && wait) { [g_plib removeObjectForKey:pc]; g_plib_taken++; }
+    pthread_mutex_unlock(&g_plib_mu);
+    return sh;
+}
 /* Async shaders (Mac default, user 2026-10-21; TOTK_ASYNC_SHADERS=0 turns them off): a new shader variant or pipeline is
    prepared in the background and the draws that need it are skipped until it is ready, the way games that stream their
    content show it a few frames later, instead of stopping the frame. Work whose result outlives the draw is never
@@ -5266,13 +5330,14 @@ static NvShader *shader_get(NSString *pc, int stage) {
     NvShader *o = g_shcache[pc];
     if (o) return o;
     uint64_t bt = bp_now(); o = async_take(pc); int taken = o != nil;   // compiled in the background (logged with its translation)
+    int predicted = !o && (o = plib_take(pc, 1)) != nil;   // compiled for prediction, waited for here while it compiled
     if (!o) o = shader_load(pc, stage);
     if (!o) { if (survey_shader_log()) MLOG("[survey-shader] frame %llu Metal library FAILED stage %d %s after %.2f ms", (unsigned long long)atomic_load(&g_cur_frame), stage, pc.UTF8String, (bp_now() - bt) / 1e6); return nil; }
     g_shcache[pc] = o;
     pso_record("S\t%s\t%d\n", pc.UTF8String, stage);
     pso_user_record("S\t%s\t%d\n", pc.UTF8String, stage);
     g_bp_lib_n++; g_bp_lib_ns += bp_now() - bt;
-    if (survey_shader_log() && !taken) MLOG("[survey-shader] frame %llu Metal library stage %d %s in %.2f ms", (unsigned long long)atomic_load(&g_cur_frame), stage, pc.UTF8String, (bp_now() - bt) / 1e6);
+    if (survey_shader_log() && !taken) MLOG("[survey-shader] frame %llu Metal library stage %d %s in %.2f ms%s", (unsigned long long)atomic_load(&g_cur_frame), stage, pc.UTF8String, (bp_now() - bt) / 1e6, predicted ? " (compiled for prediction; waited)" : "");
     return o;
 }
 static NSDictionary *rt_answers(int st);
@@ -6042,7 +6107,7 @@ static int prog_fit(NvProg *pr) {
     }
     return changed;
 }
-// TOTK_PROBE_NEGATIVE for the prediction checks of probe-gfx (24-30: each breaks one rule below; the probe must fail).
+// TOTK_PROBE_NEGATIVE for the prediction checks of probe-gfx (24-31: each breaks one rule below; the probe must fail).
 static int pred_negative(void) { static int neg = -1; if (neg < 0) { const char *e = getenv("TOTK_PROBE_NEGATIVE"); neg = e ? atoi(e) : 0; } return neg; }
 // Prediction must not translate/compile, or mutate a program's active binding.
 // Only the exact already-resolved variant is predicted here. Unknown variants
@@ -6076,8 +6141,12 @@ static int prog_prediction_stages(const prog_t *p, NvShader **vs, NvShader **fs)
 static int pred_unseen_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("TOTK_PSO_PREDICT_UNSEEN"); v = !e || atoi(e); } return v; }
 static uint64_t g_pp_unseen, g_pp_unseen_hit, g_pp_unseen_ns, g_pp_desc_ns, g_pp_vdefer;   // draws scanned whose program / variant was not resolved; of them, predicted from loaded shaders; time looking them up; time building the predicted pipelines' descriptors (pso_pend_kick); guesses left while a patched function compiles in the background
 static NvShader *loaded_variant(NSString *key, int st) {
-    NSString *v = key && g_shcache.count ? totk_rt_variant_cached(key, pred_negative() == 28 ? @{} : rt_answers(st)) : nil;
-    return v ? g_shcache[[v stringByAppendingString:@"_b"]] : nil;
+    NSString *v = key && (g_shcache.count || plib_on()) ? totk_rt_variant_cached(key, pred_negative() == 28 ? @{} : rt_answers(st)) : nil;
+    if (!v) return nil;
+    NSString *pc = [v stringByAppendingString:@"_b"];
+    NvShader *sh = g_shcache[pc];
+    if (!sh && !(sh = plib_take(pc, 0))) plib_kick(pc, st);   // not loaded: compiled in the background for its draw (plib_kick)
+    return sh;
 }
 static int prog_prediction_unseen(const prog_t *p, NvShader **vs, NvShader **fs) {
     if (!p || !pred_unseen_on()) return 0;
@@ -8582,14 +8651,16 @@ static void pso_predict_rest(void) {
              (unsigned long long)g_pp_stop[0], (unsigned long long)g_pp_stop[1], (unsigned long long)g_pp_stop[2],
              (unsigned long long)g_pp_kicked, (unsigned long long)g_pp_taken, (unsigned long long)waits, wait_ns / 1e6,
              (unsigned long long)g_pp_sync, (unsigned long long)full, (unsigned long long)freed, busy);
-        MLOG("并行预编 至提交 %llu：扫描到程序或绑定变体还没解析的绘制 %llu 次，其中用已加载的着色器预测 %llu 次（查找共 %.1f ms）；为后台建管线描述符共 %.1f ms，缺补丁函数先交给后台编的猜测 %llu 条",
-             (unsigned long long)g_sub_serial, (unsigned long long)g_pp_unseen, (unsigned long long)g_pp_unseen_hit, g_pp_unseen_ns / 1e6, g_pp_desc_ns / 1e6, (unsigned long long)g_pp_vdefer);
+        MLOG("并行预编 至提交 %llu：扫描到程序或绑定变体还没解析的绘制 %llu 次，其中用已加载的着色器预测 %llu 次（查找共 %.1f ms）；为后台建管线描述符共 %.1f ms，缺补丁函数先交给后台编的猜测 %llu 条；后台为预测开编着色器库 %llu 个，绘制领用 %llu 个（等它编完 %llu 次共 %.1f ms）",
+             (unsigned long long)g_sub_serial, (unsigned long long)g_pp_unseen, (unsigned long long)g_pp_unseen_hit, g_pp_unseen_ns / 1e6, g_pp_desc_ns / 1e6, (unsigned long long)g_pp_vdefer,
+             (unsigned long long)g_plib_kicked, (unsigned long long)g_plib_taken, (unsigned long long)g_plib_waits, g_plib_wait_ns / 1e6);
     }
 }
 
 /* Prediction visits later scissor commands but must leave the active draw's state untouched. */
 void dm_nvn_probe_prediction(void) {
     typeof(R) saved = R; const uint8_t *next = g_exec_next;
+    g_plib_probe = 1;   // libraries prediction asks for are recorded, not compiled (the probe's shaders have no files)
     struct { op_hdr sc; p_scissor rect; op_hdr end; } ops = {
         {OP_SCISSOR, 8 + sizeof(p_scissor)}, {101, 202, 303, 404}, {OP_END, 8}
     };
@@ -8601,7 +8672,7 @@ void dm_nvn_probe_prediction(void) {
     struct {op_hdr h;p_render_cond c;op_hdr end;} cond={{OP_RENDER_COND,8+sizeof(p_render_cond)},{0},{OP_END,8}};
     const void *op=&cond;unsigned slot=((uintptr_t)op>>3)&1023;cond_cache_ent cache=g_cond_cache[slot];uint64_t unknown=g_draw_skip[14];
     g_exec_next=(const uint8_t *)&cond;pso_predict_rest();
-    if(pred_negative()>0&&pred_negative()<24)state_op(OP_RENDER_COND,&cond.c);   // older negative numbers; 24-30 are the checks below
+    if(pred_negative()>0&&pred_negative()<24)state_op(OP_RENDER_COND,&cond.c);   // older negative numbers; 24-31 are the checks below
     if(memcmp(&cache,&g_cond_cache[slot],sizeof cache)||g_draw_skip[14]!=unknown)MDIE("pipeline prediction evaluated a future conditional counter");
     // A speculative future program need not be resolved. Calling prog_get here
     // would try to translate its absent bytes (or compile real future shaders).
@@ -8670,6 +8741,21 @@ void dm_nvn_probe_prediction(void) {
         if (prog_prediction_unseen(&unseen, &vs, &fs) || prog_prediction_unseen(&seen, &vs, &fs))
             MDIE("pipeline prediction predicted a variant no shader is loaded for");
         if (g_bp_lib_n != libs || g_shcache.count != loaded - 1) MDIE("pipeline prediction loaded a shader library");
+        // ... its library is compiled in the background instead (plib_kick; recorded here, not compiled), a scan uses it once
+        // compiled, and the draw's shader_get takes that compile, waiting for it while it runs.
+        if (plib_on()) {
+            if (![g_plib_probe_key isEqualToString:names[1]] || g_plib_probe_stage != 0) MDIE("pipeline prediction did not ask for the library of the variant it needs");
+            if (!g_plib) g_plib = [NSMutableDictionary dictionary];
+            NvShader *built = [NvShader new], *late = [NvShader new];
+            pthread_mutex_lock(&g_plib_mu); g_plib[names[1]] = built; pthread_mutex_unlock(&g_plib_mu);
+            if (!prog_prediction_unseen(&unseen, &vs, &fs) || vs != built) MDIE("pipeline prediction did not use the library compiled for it");
+            if (plib_take(names[1], 1) != built || plib_take(names[1], 1)) MDIE("the draw did not take the library compiled for prediction");
+            pthread_mutex_lock(&g_plib_mu); g_plib[names[1]] = NSNull.null; pthread_mutex_unlock(&g_plib_mu);
+            NSString *pc = names[1];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                pthread_mutex_lock(&g_plib_mu); g_plib[pc] = late; pthread_cond_broadcast(&g_plib_cv); pthread_mutex_unlock(&g_plib_mu); });
+            if (plib_take(names[1], 1) != late) MDIE("the draw did not wait for the library compiling for prediction");
+        }
         serial_del(seen.serial); if (serial_ptr(unseen.serial)) serial_del(unseen.serial);
         [g_shcache removeObjectsForKeys:names]; totk_rt_probe_index(ukey[0], nil); totk_rt_probe_index(ukey[1], nil);
         memcpy(&S, &keep, sizeof S);
@@ -8697,7 +8783,7 @@ void dm_nvn_probe_prediction(void) {
     g_pp[2].done = 1; pso_pend_reclaim(13);
     if (g_pp[1].used || g_pp[2].used) MDIE("pipeline prediction retained completed stale guesses");
     pthread_mutex_unlock(&g_pp_mu);
-    R = saved; g_exec_next = next;
+    R = saved; g_exec_next = next; g_plib_probe = 0; g_plib_probe_key = nil;
 }
 
 static void fz_probe_cov2(const p_set_rt *r2, const uint8_t *first, const int8_t *p2map, const uint8_t *clr, int n1, int n) {
