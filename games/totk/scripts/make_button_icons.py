@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Make a RomFS mod that draws keyboard keys or Xbox controller buttons in place of the Switch button icons.
+"""Make a RomFS mod that draws keyboard keys, Xbox or PlayStation controller buttons in place of the Switch button icons.
 
 The A/B/X/Y, L/R, ZL/ZR, +/- and d-pad icons the game shows in its prompts are glyphs of one font,
 scft/External.bfotf in Font/Font.Nin_NX_NVN.bfarc.zs (private-use code points U+E040 to U+E068). This script reads that
@@ -13,6 +13,10 @@ Styles:
             + - = Enter Tab, left stick = W A S D, right stick = arrow keys, stick presses = Z C, d-pad = T F G H.
   xbox      the buttons in the place a controller presses them (controllers follow the Switch's physical layout):
             A B X Y = B A Y X, L R = LB RB, ZL ZR = LT RT, + - = Menu and View, the d-pad as a cross.
+  playstation  DualSense / DualShock symbols by position like xbox: A B X Y = Circle Cross Triangle Square,
+            L R = L1 R1, ZL ZR = L2 R2, + - = Options and Create, the d-pad as a cross.
+  playstation-label  the same, but A B X Y = Cross Circle Square Triangle, for TOTK_FACE_BUTTONS=label or a
+            controls.txt with south = a, east = b, west = x, north = y.
 Prompts drawn as fixed images (some tutorial animations) keep the Switch icons: they are not glyphs of this font.
 
 Format notes (checked on 1.0.0 and 1.2.1): a .bfotf is an OpenType (CFF) font with an 8-byte header, XOR-ed with a
@@ -279,7 +283,71 @@ def xbox_style(g):
     }
 
 
-STYLES = {'keyboard': keyboard_style, 'xbox': xbox_style}
+def oriented(pen, points, hole):
+    """A polygon counter-clockwise (filled) or clockwise (a hole), whatever order the points come in."""
+    area = sum(x0 * y1 - x1 * y0 for (x0, y0), (x1, y1) in zip(points, points[1:] + points[:1]))
+    polygon(pen, points if (area > 0) != hole else points[::-1])
+
+
+def playstation_style(g, by_label=False):
+    """DualSense / DualShock symbols. By position (the default mapping): A B X Y = Circle Cross Triangle Square.
+    by_label (TOTK_FACE_BUTTONS=label, or controls.txt south = a, east = b, west = x, north = y): Cross Circle Square Triangle."""
+    def face(symbol, advance=640):
+        def draw(pen):
+            cx, s = advance / 2, R * 0.50   # symbol half size
+            circle(pen, cx, CY, R)
+            if symbol == 'circle':
+                circle(ReverseContourPen(pen), cx, CY, s); circle(pen, cx, CY, s * 0.70)
+            elif symbol == 'square':
+                oriented(pen, [(cx - s, CY - s), (cx + s, CY - s), (cx + s, CY + s), (cx - s, CY + s)], hole=True)
+                t = s * 0.70
+                oriented(pen, [(cx - t, CY - t), (cx + t, CY - t), (cx + t, CY + t), (cx - t, CY + t)], hole=False)
+            elif symbol == 'triangle':
+                pts = [(cx, CY + s * 1.10), (cx - s * 1.10, CY - s * 0.75), (cx + s * 1.10, CY - s * 0.75)]
+                gx, gy = cx, sum(y for _, y in pts) / 3
+                oriented(pen, pts, hole=True)
+                oriented(pen, [(gx + (x - gx) * 0.62, gy + (y - gy) * 0.62) for x, y in pts], hole=False)
+            else:   # cross: one 12-point outline, so the two strokes do not overlap as separate holes
+                a, w = s * 1.05, s * 0.22 * 2 ** 0.5   # arm reach along the diagonal, half stroke width
+                pts = [(cx, CY + w), (cx + a - w, CY + a), (cx + a, CY + a - w), (cx + w, CY),
+                       (cx + a, CY - a + w), (cx + a - w, CY - a), (cx, CY - w), (cx - a + w, CY - a),
+                       (cx - a, CY - a + w), (cx - w, CY), (cx - a, CY + a - w), (cx - a + w, CY + a)]
+                oriented(pen, pts, hole=True)
+        return advance, draw
+    def bumper(label, advance=820):
+        def draw(pen):
+            rounded(pen, 40, Y0 + 70, advance - 40, Y1 - 70, 70, 150); g.hole(pen, label, advance / 2, CY, 230, advance - 200)
+        return advance, draw
+    def trigger(label, advance=760):
+        def draw(pen):
+            rounded(pen, 60, Y0, advance - 60, Y1, 60, 230); g.hole(pen, label, advance / 2, CY - 20, 230, advance - 220)
+        return advance, draw
+    def options(advance=640):   # three bars, as on the DualSense Options button
+        def draw(pen):
+            circle(pen, advance / 2, CY, R); reverse = ReverseContourPen(pen)
+            for dy in (-115, 0, 115):
+                rounded(reverse, advance / 2 - 150, CY + dy - 38, advance / 2 + 150, CY + dy + 38, 38)
+        return advance, draw
+    def create(advance=640):   # three short strokes rising to the right, as on the Create button
+        def draw(pen):
+            circle(pen, advance / 2, CY, R); cx = advance / 2
+            for dx in (-110, 0, 110):
+                oriented(pen, [(cx + dx - 30, CY - 150), (cx + dx + 30, CY - 150), (cx + dx + 30, CY + 150), (cx + dx - 30, CY + 150)], hole=True)
+        return advance, draw
+    dpad_style = xbox_style(g)
+    a, b, x, y = ('cross', 'circle', 'square', 'triangle') if by_label else ('circle', 'cross', 'triangle', 'square')
+    icons = {
+        0xE040: face(a), 0xE041: face(b), 0xE042: face(x), 0xE043: face(y),
+        0xE044: bumper('L1'), 0xE045: bumper('R1'), 0xE046: trigger('L2'), 0xE047: trigger('R2'),
+        0xE04B: options(), 0xE04C: create(),
+    }
+    for cp in (0xE049, 0xE060, 0xE061, 0xE062, 0xE063, 0xE064, 0xE065):   # the d-pad is drawn as for Xbox
+        icons[cp] = dpad_style[cp]
+    return icons
+
+
+STYLES = {'keyboard': keyboard_style, 'xbox': xbox_style, 'playstation': playstation_style,
+          'playstation-label': lambda g: playstation_style(g, by_label=True)}
 
 
 def redraw(otf, text_fonts, style):
