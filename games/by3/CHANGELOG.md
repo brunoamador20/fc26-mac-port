@@ -425,3 +425,17 @@ no trails.
 
 Still open: the stencil-as-depth variant answer for `cd871b70` (see 2026-10-19); the hand-edited cached MSL is still
 on this machine.
+
+### 2026-10-22: "Improved LOD v2" works now; where the picture's softness comes from
+
+- **LOD v2.** Scripted deck run with `60fps,res-1600x900,improved-lod-v2` on the build with `07bba12`: clean geometry,
+  no blocks or smears (`BY3_build/debug/lod2-fixed.png`). The 2026-10-19 breakage was the indirect-draw bug. With
+  every object at LOD 0, more objects come into view between frames, so more of them were dropped. The launcher still
+  warns about the patch and leaves it off in every preset; that can go.
+- **Motion blur.** Pass dumps of a still and a turning combat frame have the same post chain: composite `58d326a2`,
+  effects (`2b6896d7`, `aad35b71`: weapon and enemy trails, part of the game's look), bloom / glow chain, exposure,
+  tone map `d616fe5d`, then the UI drawn into the same 1600x900 target. There is no full-screen motion-blur pass, and
+  `58d326a2` does not read depth.
+- **Softness.** The user's setup (log): 900p internal, MetalFX spatial 1600x900 -> 3840x2160 (x2.4) at 120 Hz full
+  screen, pacing fine (p99 about 9 ms). The softness most likely comes from that upscale, and the UI is upscaled with
+  the scene. The game has no TAA, so it has no jitter and no velocity buffer for MetalFX temporal.
