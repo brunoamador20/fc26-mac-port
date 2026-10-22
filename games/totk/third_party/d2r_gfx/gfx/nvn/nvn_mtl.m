@@ -8567,6 +8567,13 @@ static void shader_predict_rest(void) {
         const uint8_t *q; op_hdr hq; const void *aq;
         if (!fz_next(&cur, &q, &hq, &aq)) break;
         if (hq.op == OP_SET_RT) { R.rt = *(const p_set_rt *)aq; R.has_rt = 1; continue; }   // the fragment outputs' types are answered from the targets
+        if (hq.op == OP_DISPATCH) {   // a dispatch always waits for its shader (it stores): its job goes to the urgent translators too
+            const prog_t *p = S.prog; if (!p) continue;
+            NvProg *pr = p->serial ? (__bridge NvProg *)serial_ptr(p->serial) : nil;
+            if (!pr) { g_prog_prefetch = 1; pr = prog_get(p); g_prog_prefetch = 0; progs++; }
+            if (pr && pr->key[5] && (pr->missing >> 5 & 1) && !totk_rt_variant(pr->key[5], 5, pr->ctl[5], pr->code[5], rt_answers(5), rt_local(pr->ctl[5], 5), 2)) urgent++;
+            continue;
+        }
         if (hq.op == OP_DRAW || hq.op == OP_DRAW_IDX) {
             const prog_t *p = S.prog; if (!p) continue;
             NvProg *pr = p->serial ? (__bridge NvProg *)serial_ptr(p->serial) : nil;
@@ -11360,7 +11367,10 @@ static id<MTL4ComputeCommandEncoder> disp_enc(void) {
 static void dispatch(const p_dispatch *dp) {
     zskip_clear();
     if (!S.prog) { RED_ONCE(27, "派发前没有绑定程序"); return; }
-    __unsafe_unretained NvProg *cpr = prog_get(S.prog);
+    // As for a draw: a compute program met for the first time, or one still being prepared, starts the urgent scan of the
+    // rest of the submission (prog_get, shader_predict_maybe), since a dispatch is often the first thing a submission misses.
+    g_prog_for_draw = 1; __unsafe_unretained NvProg *cpr = prog_get(S.prog); g_prog_for_draw = 0;
+    if (cpr->missing && async_shaders()) { shader_predict_maybe(); prog_resolve(cpr, 0); }   // Mac: a dispatch waits for its urgent job, never skipped
     if (cpr->missing) { static uint64_t n; if (!n++) MLOG("[shader-miss] 计算着色器还没翻译：跳过这个派发（以后同类不再提示）"); return; }
     NvShader *cs = cpr->sh[5];
     if (!cs) { RED_ONCE(28, "派发的程序没有计算着色器（或未映射）"); return; }
