@@ -121,14 +121,14 @@ static void frame_step_measure(uint64_t now_ns) {
     if (atomic_load_explicit(&pinned_step_us, memory_order_relaxed)) return;
     /* The raw intervals are averaged and the average is clamped, not each interval: at about 95 fps under the 120 Hz
        clock, intervals shorter than 1/120 s alternate with longer ones, and raising each short one to 1/120 s made the
-       game run 6% fast (measured: botw.md). Averaged, the steps add up to the real time while the average stays inside
-       1/120..1/15 s; a hitch is spread over the next frames instead of being cut. */
+       game run 6% fast (measured: botw.md). Averaged, the steps add up to the real time at any frame rate (no lower bound:
+       a display above 120 Hz presents more often, and a floor of 1/120 s made the game run fast there); only an average
+       above 1/15 s is cut, and a hitch is spread over the next frames instead. */
     frame_samples[frame_sample_next++ % 5] = dt;
     if (frame_sample_count < 5) frame_sample_count++;
     double sum = 0;
     for (unsigned i = 0; i < frame_sample_count; i++) sum += frame_samples[i];
     double step = sum / frame_sample_count;
-    if (step < 1.0 / 120.0) step = 1.0 / 120.0;
     if (step > 1.0 / 15.0) step = 1.0 / 15.0;
     report_game += step;
     atomic_store_explicit(frame_step_data, frame_step_bits((float)step), memory_order_release);

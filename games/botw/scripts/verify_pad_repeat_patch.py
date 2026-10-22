@@ -125,7 +125,7 @@ def verify_190():
     check(len(ref) > 5, f"site 3 shipped at 30 fps: first repeat {ref[0]:.3f} s, then every {ref[1] - ref[0]:.4f} s, {len(ref)} in 2 s")
     fast, _ = pad_run({}, 120)
     check(len(fast) > 3 * len(ref), f"site 3 shipped at 120 fps (the bug, and the negative control): {len(fast)} repeats in 2 s")
-    for fps in (30, 60, 95, 120):
+    for fps in (30, 60, 95, 120, 144, 165, 240, 360):
         got, _ = pad_run(P3, fps)
         n = min(len(got), len(ref))
         worst = max((abs(a - b) for a, b in zip(got[:n], ref[:n])), default=float("inf"))   # no repeat at all fails
@@ -163,7 +163,7 @@ def verify_190():
         return switch_at
     t30 = countdown({}, 30)
     check(t30 is not None and abs(t30 - 61 / 30) < 1e-9, f"site 4 shipped at 30 fps: the fast switch after {t30 and round(t30, 3)} s held")
-    for fps in (60, 120):
+    for fps in (60, 120, 144, 240, 360):
         t = countdown(P1, fps)
         check(t is not None and abs(t - t30) <= 1 / 30 + 1 / fps + 1e-9,
               f"site 4 unpatched countdown with the VFR patch at {fps} fps: the fast switch after {t and round(t, 3)} s held")
@@ -265,7 +265,7 @@ check(abs(ref[0] - 0.2) < 1e-9 and all(abs(b - a - 1 / 15) < 1e-9 for a, b in zi
 fast, _ = run(shipped, 120, ticks=1)
 check(len(fast) > 3 * len(ref), f"shipped at 120 fps (the bug): {len(fast)} repeats in 2 s, first at {fast[0]:.3f} s")
 
-for fps in (30, 60, 95, 120):
+for fps in (30, 60, 95, 120, 144, 165, 240, 360):
     worst, counts = 0.0, set()
     for phase in (0.0, 0.25, 0.5, 0.75, 0.999):
         got, _ = run(ticked, fps, phase=phase)

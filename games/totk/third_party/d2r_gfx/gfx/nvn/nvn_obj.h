@@ -151,17 +151,10 @@ static inline int rt_dup_of(const p_set_rt *r, int i) {
 /* "ashot <path>" requests (end of nvn_mtl.m), taken at the game's present call with the screenshot queue lock held */
 void botw_ashot_poll(const void *t, long cur);
 #define BOTW_ASHOT_POLL(t, cur) botw_ashot_poll((t), (cur));
-/* Uncapped pacing ignores the game's present interval 2 by default (up to 120 fps; user 2026-10-19: "放开到120帧"); the
-   real-time frame step keeps the game's speed (botw.md). TOTK_UNCAPPED_INTERVAL=0 keeps the interval (up to 60 fps). */
+/* Uncapped pacing ignores the game's present interval 2 by default (user 2026-10-19: "放开到120帧", 2026-10-22: up to 240); the
+   real-time frame step keeps the game's speed (botw.md). TOTK_UNCAPPED_INTERVAL=0 keeps the interval where a clock
+   divides it (TOTK_UNCAPPED_HZ, or the display rate on a phone). */
 #define UNCAPPED_INTERVAL_FROM_ENV(e) ((e) ? atoi(e) != 0 : 1)
-/* The uncapped mode stays off on a display of 120 Hz or more (UNCAPPED_HZ: it would change nothing there), and with it the
-   rule above: on the Mac's 120 Hz built-in display the game's interval 2 held Breath of the Wild at 60 fps. There the
-   display-following path ignores interval 2 in the same cases (real time, TOTK_UNCAPPED not 0, TOTK_UNCAPPED_INTERVAL not
-   0; interpolation at half rate or 30+30 has returned before): one game frame per refresh, up to 120 fps. */
-#define BOTW_FAST_DISPLAY_DECL static int g_botw_fast_display;
-#define BOTW_FAST_DISPLAY_CFG g_botw_fast_display = !e && realtime && !(u && !strcmp(u, "0")) && !(f60 && !strcmp(f60, "0")) && g_hz >= UNCAPPED_HZ; \
-    if (g_botw_fast_display) LOG("[nvn] Breath of the Wild on a %d Hz display: one game frame per refresh, the game's present interval 2 ignored (TOTK_UNCAPPED_INTERVAL=0 keeps it)", g_hz);
-#define BOTW_OR_FAST_DISPLAY || (g_botw_fast_display && !dm_detclock_enabled() && uncapped_interval_on())
 /* TOTK_T2B_LOG=1 (diagnostics, the black save thumbnail): every texture-to-buffer copy is logged with its source
    texture and destination, and after the GPU is done with how many destination bytes are not zero (end of nvn_mtl.m) */
 void botw_t2b_note(const void *c, const void *tex, const void *mb, uint64_t mo, size_t n);
@@ -268,9 +261,6 @@ int botw_wb_from_stage(void *e);   /* 1 written back from the stage, 0 failed, -
 #define WB_WAIT_GPU(list, nl) mtl_finish_gpu();
 #define BOTW_WB_FROM_STAGE(e, ok, layers)
 #define UNCAPPED_INTERVAL_FROM_ENV(e) e && atoi(e)
-#define BOTW_FAST_DISPLAY_DECL
-#define BOTW_FAST_DISPLAY_CFG
-#define BOTW_OR_FAST_DISPLAY
 #define BOTW_RT_DUP_CLEARS()
 #define BOTW_RT_DUP_SKIP(i)
 #define BOTW_RT_DUP_PREDICT(r, cf)

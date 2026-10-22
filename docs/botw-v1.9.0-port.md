@@ -117,6 +117,9 @@ Two changes act on both BOTW versions:
   display-following path now ignores interval 2 in the same cases: real time, `DM_PRESENT_HZ` unset, `TOTK_UNCAPPED`,
   `TOTK_FPS60` and `TOTK_UNCAPPED_INTERVAL` not 0, and no deterministic clock. Interpolation at half rate or 30+30
   keeps its own pacing. The result is one game frame per refresh, up to 120 FPS. The log names the opt-out.
+  - Replaced after the merge (user 2026-10-22): the uncapped clock's ceiling is 240 and the uncapped mode applies on
+    any display, so this rule is gone. The real-time frame step lost its 1/120 s floor (TOTK and BOTW), which made a game
+    above 120 fps run fast; the Unicorn checks of both versions pass at 144, 165, 240 and 360 fps.
 
 Write-back staging A/B on `29bc388`, with upstream's #140 and #143 in the build: Kakariko, uncapped, docked 1920x1080
 render, warm shader cache v6, still view from 115 s for 20 s, then a 15 s walk. The "off" build used the TOTK hooks.
@@ -311,10 +314,10 @@ Every file under `games/totk` that this port changes (`git diff --stat ab4c9d2 H
 | `scripts/prepare_runtime.py` | `botw190`: its `main` hash check and the DT_INIT shape of 1.4.3 | new choice; TOTK branches unchanged |
 | `scripts/test_exclusive_windows.py` | `'botw190': []` in `WINDOWS` | additive |
 | `scripts/verify_rewrites.py` | `botw190` in `--version`; an empty window list passes for it, as for `botw160` | new choice; TOTK checks unchanged |
-| `third_party/d2r_gfx/gfx/nvn/hle_nvn.c` | 1.9.0 reports the TOTK NVN version; `BOTW_FAST_DISPLAY_*` hooks at the ends of three lines | `#if defined(GAME_BOTW) && !defined(GAME_BOTW190)`; the hooks are empty for TOTK |
+| `third_party/d2r_gfx/gfx/nvn/hle_nvn.c` | 1.9.0 reports the TOTK NVN version (the `BOTW_FAST_DISPLAY_*` hooks were removed after the merge) | `#if defined(GAME_BOTW) && !defined(GAME_BOTW190)`; the hooks are empty for TOTK |
 | `third_party/d2r_gfx/gfx/nvn/nvn_dirty.c` | pools that share a host page with another pool get ranges for their own pages; lookups walk range by range; a pool removes only its own ranges (the 30 fps after the map's Hero's Path playback) | `#if defined(GAME_BOTW)` / `#if !defined(GAME_BOTW)` around whole functions |
 | `third_party/d2r_gfx/gfx/nvn/nvn_mtl.m` | `BOTW_REUP_TRACKED` and `BOTW_WB_*` hooks at the ends of existing lines, the staging bodies at the end of the file (their stage read inside an `@autoreleasepool`, `5ab49a2`), `BOTW_MFXUP_KEY` in the scene test; `TAA_COMPOSE(fs)` in key 5's compose test; `UW_UI_BEGINS` and `UW_NOT_UI_DRAW` in key 4's two UI tests; `BOTW_MFX_NO_UI_SCENE` at the end of key 4's UI line (key 2 in frames with no UI); `BOTW_WB_ENT_FIELDS`, `BOTW_WB_STAGE_FREE` and `BOTW_WB_NOTED` next to upstream's small-target copy (`snap`, #140) | bodies in `#ifdef GAME_BOTW`; for TOTK the hooks are empty, `WB_WAIT_GPU` is `mtl_finish_gpu()`, the call it replaces, and `TAA_COMPOSE` is the old `0ac9a549` test |
-| `third_party/d2r_gfx/gfx/nvn/nvn_obj.h` | the `BOTW_REUP_TRACKED`, `BOTW_WB_*` and `BOTW_FAST_DISPLAY_*` macros; `BOTW_MFXUP_KEY` and `TAA_COMPOSE` for each version; `UW_UI_BEGINS` and `UW_NOT_UI_DRAW` (for TOTK, the old expressions); `BOTW_MFX_NO_UI_SCENE` | inside the existing `#ifdef GAME_BOTW` / `#else`, empty in the `#else`; `TAA_COMPOSE` has its own `#if` block |
+| `third_party/d2r_gfx/gfx/nvn/nvn_obj.h` | the `BOTW_REUP_TRACKED` and `BOTW_WB_*` macros; `BOTW_MFXUP_KEY` and `TAA_COMPOSE` for each version; `UW_UI_BEGINS` and `UW_NOT_UI_DRAW` (for TOTK, the old expressions); `BOTW_MFX_NO_UI_SCENE` | inside the existing `#ifdef GAME_BOTW` / `#else`, empty in the `#else`; `TAA_COMPOSE` has its own `#if` block |
 | `tests/dirty_race/probe.c` | 12 overlap checks for the BOTW tracker | `#if defined(GAME_BOTW)` |
 
 Outside `games/totk`, `build_app.py` adds the 1.9.0 branch, `--dlc` and the package checks (`check_package`, BOTW

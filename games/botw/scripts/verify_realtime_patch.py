@@ -113,7 +113,7 @@ def verify_190(image_path):
         return struct.unpack("<I", mu.mem_read(solver + 0x3dc, 4))[0], struct.unpack("<f", mu.mem_read(world + 0x6c, 4))[0]
 
     checks = []
-    for hz in (30, 60, 95, 120):
+    for hz in (30, 60, 95, 120, 144, 165, 240, 360):
         s = 1 / hz
         n, arg = substeps(P4, s, s * 30)
         assert n == 6 and arg == 1.0, (hz, n, arg)
@@ -228,7 +228,7 @@ def fade_step(seconds, patched, interval=2):
 
 
 checks = []
-for hz in (30, 45, 60, 90, 100, 120):
+for hz in (30, 45, 60, 90, 100, 120, 144, 165, 240, 360):
     s = 1 / hz
     ratio, df, dt, interval = run(s, True)
     assert abs(ratio - s * 30) < 1e-6, (hz, ratio)

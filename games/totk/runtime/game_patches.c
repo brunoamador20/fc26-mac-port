@@ -78,7 +78,6 @@ void runtime_frame_step_update(uint64_t now_ns) {
     double dt = (double)(now_ns - last_present_ns) * 1e-9;
     last_present_ns = now_ns;
     if (dt > 0.25 || dt < 0.001) { frame_sample_count = frame_sample_next = 0; return; }
-    if (dt < 1.0 / 120.0) dt = 1.0 / 120.0;
     if (dt > 1.0 / 15.0) dt = 1.0 / 15.0;
     frame_samples[frame_sample_next++ % 5] = dt;
     if (frame_sample_count < 5) frame_sample_count++;
