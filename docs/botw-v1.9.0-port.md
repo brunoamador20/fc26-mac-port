@@ -117,8 +117,8 @@ Two changes act on both BOTW versions:
   display-following path now ignores interval 2 in the same cases: real time, `DM_PRESENT_HZ` unset, `TOTK_UNCAPPED`,
   `TOTK_FPS60` and `TOTK_UNCAPPED_INTERVAL` not 0, and no deterministic clock. Interpolation at half rate or 30+30
   keeps its own pacing. The result is one game frame per refresh, up to 120 FPS. The log names the opt-out.
-  - Replaced after the merge (user 2026-10-22): the uncapped clock's ceiling is 240 and the uncapped mode applies on
-    any display, so this rule is gone. The real-time frame step lost its 1/120 s floor (TOTK and BOTW), which made a game
+  - Replaced after the merge (user 2026-10-22): the uncapped mode applies on any display, so this rule is gone. Its
+    clock's ceiling went to 240, then back to 120 by default the same day (user; `TOTK_UNCAPPED_HZ` still allows up to 240). The real-time frame step lost its 1/120 s floor (TOTK and BOTW), which made a game
     above 120 fps run fast; the Unicorn checks of both versions pass at 144, 165, 240 and 360 fps.
 
 Write-back staging A/B on `29bc388`, with upstream's #140 and #143 in the build: Kakariko, uncapped, docked 1920x1080
