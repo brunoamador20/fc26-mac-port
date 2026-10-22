@@ -5299,6 +5299,12 @@ static void prog_stage_set(NvProg *o, int st, NSString *variant) {   // a transl
 }
 static int g_prog_prefetch;   // prog_get called by shader_predict_rest: every stage is translated in the background
 static void shader_predict_maybe(void);
+// The shader key: SHA-256 of the control section and the code, in hex (prog_get; prediction of unseen programs).
+static void shader_key_of(const uint8_t *control, const void *code, uint32_t length, char key[65]) {
+    uint8_t md[32];CC_SHA256_CTX ctx;CC_SHA256_Init(&ctx);CC_SHA256_Update(&ctx,control,ctl_key_len(control));
+    CC_SHA256_Update(&ctx,code,length);CC_SHA256_Final(md,&ctx);
+    for(unsigned j=0;j<32;j++)snprintf(key+2*j,3,"%02x",md[j]);
+}
 static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // 只在提交线程调用 | Called only on the submit thread
     prog_t *p = (prog_t *)cp;
     static const prog_t *lp; static uint64_t lser, lgen; static NvProg *lpr;   // 上次结果：同一对象、同一序号且序号表未变即直接用 | Last result: same object, same serial and unchanged serial table means it is used directly
@@ -5321,9 +5327,7 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // 只在提�
         memcpy(&length,control+0x704,4);memcpy(&nvn_stage,control+0x714,4);
         if (!length || length>16*1024*1024) MDIE("invalid TOTK shader code length %u",length);
         // Host NVN GPU addresses are CPU addresses (MemoryPoolGetBufferAddress).
-        uint8_t md[32];CC_SHA256_CTX ctx;CC_SHA256_Init(&ctx);CC_SHA256_Update(&ctx,control,ctl_key_len(control));
-        CC_SHA256_Update(&ctx,(const void *)(uintptr_t)p->sd[i].data,length);CC_SHA256_Final(md,&ctx);
-        char key[65];for(unsigned j=0;j<32;j++)snprintf(key+2*j,3,"%02x",md[j]);
+        char key[65];shader_key_of(control,(const void *)(uintptr_t)p->sd[i].data,length,key);
         // TOTK: stage from control+0x714 (0 vertex, 1 fragment, 5 compute); translation answered from the bound state.
         int st=(int)nvn_stage;if(st!=0&&st!=1&&st!=5)MDIE("TOTK shader %s: unsupported NVN stage %u",key,nvn_stage);
         if (getenv("TOTK_CTL_DUMP")) {   // diagnostic: the control section the game hands NVN, per shader (offline shader discovery is checked against it)
@@ -6038,11 +6042,12 @@ static int prog_fit(NvProg *pr) {
     }
     return changed;
 }
-// TOTK_PROBE_NEGATIVE for the prediction checks of probe-gfx (24-27: each breaks one rule below; the probe must fail).
+// TOTK_PROBE_NEGATIVE for the prediction checks of probe-gfx (24-30: each breaks one rule below; the probe must fail).
 static int pred_negative(void) { static int neg = -1; if (neg < 0) { const char *e = getenv("TOTK_PROBE_NEGATIVE"); neg = e ? atoi(e) : 0; } return neg; }
 // Prediction must not translate/compile, or mutate a program's active binding.
-// Only the exact already-resolved variant is safe to predict. Unknown variants
-// are left for the authoritative draw path, without changing active bindings.
+// Only the exact already-resolved variant is predicted here. Unknown variants
+// are left for the authoritative draw path, without changing active bindings
+// (prog_prediction_unseen below looks them up among the loaded shaders).
 // A program with a stage not translated yet (pr->missing, iOS) is skipped too: its draws are skipped (draw_inner), and
 // its fragment stage can be absent, which would predict a pipeline without a fragment function.
 // Negative 24 takes the active variant whatever the state; 26 ignores untranslated stages.
@@ -6055,6 +6060,60 @@ static int prog_prediction_stages(const prog_t *p, NvShader **vs, NvShader **fs)
         uint64_t sig = stage_sig(st);
         stages[st] = sig == pr->sig[st] || pred_negative() == 24 ? pr->sh[st] : pr->alt[st][@(sig)];
         if (!stages[st]) return 0;
+    }
+    *vs = stages[0]; *fs = stages[1]; return 1;
+}
+/* TOTK: a program the game has not drawn yet, or a binding variant it has not drawn with, used to be skipped by prediction
+   (resolving it translates and compiles on the submission thread). In a world entry most of those pipelines were then
+   compiled one after another at their draws, although their shaders were already loaded (the warm-up's libraries, or
+   another program with the same shader). The draw resolves its variant from the translation cache's index with the bound
+   state (prog_get, prog_fit; totk_rt_variant) and then takes the shader from g_shcache; prediction does the same lookup
+   without translating (totk_rt_variant_cached) and uses the shader only when g_shcache already holds it, so the draw later
+   gets the same shader objects, the same pipeline key and the pipeline compiled in the background. No program is created
+   and no program's variants change. TOTK_PSO_PREDICT_UNSEEN=0 turns this off.
+   Negative 28 looks the variant up without the draw's bound state, 29 records the variant in the program, 30 creates the
+   program. */
+static int pred_unseen_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("TOTK_PSO_PREDICT_UNSEEN"); v = !e || atoi(e); } return v; }
+static uint64_t g_pp_unseen, g_pp_unseen_hit, g_pp_unseen_ns, g_pp_desc_ns, g_pp_vdefer;   // draws scanned whose program / variant was not resolved; of them, predicted from loaded shaders; time looking them up; time building the predicted pipelines' descriptors (pso_pend_kick); guesses left while a patched function compiles in the background
+static NvShader *loaded_variant(NSString *key, int st) {
+    NSString *v = key && g_shcache.count ? totk_rt_variant_cached(key, pred_negative() == 28 ? @{} : rt_answers(st)) : nil;
+    return v ? g_shcache[[v stringByAppendingString:@"_b"]] : nil;
+}
+static int prog_prediction_unseen(const prog_t *p, NvShader **vs, NvShader **fs) {
+    if (!p || !pred_unseen_on()) return 0;
+    NvProg *pr = p->serial ? (__bridge NvProg *)serial_ptr(p->serial) : nil;
+    if (pr && pr->missing) return 0;
+    NvShader *stages[2] = {nil, nil};
+    if (pr) for (int st = 0; st < 2; st++) {
+        if (!pr->sh[st]) { if (!st) return 0; continue; }
+        uint64_t sig = stage_sig(st);
+        stages[st] = sig == pr->sig[st] ? pr->sh[st] : pr->alt[st][@(sig)];
+        if (stages[st]) continue;
+        if (pr->miss_has[st] && sig == pr->miss_sig[st]) return 0;   // iOS: known not translated
+        if (!(stages[st] = loaded_variant(pr->key[st], st))) return 0;
+        if (pred_negative() == 29) pr->alt[st][@(sig)] = stages[st];
+    } else {
+        // The stages' shader keys, kept per program serial (a new serial at every SetShaders): hashing the code again
+        // in every scan took much of a scan's time. Empty: not a vertex / fragment program.
+        static NSMutableDictionary<NSNumber *, NSArray *> *keys;
+        NSArray *ks = p->serial ? keys[@(p->serial)] : nil;
+        if (!ks) {
+            NSMutableArray *a = [NSMutableArray array]; int have[2] = {0, 0};
+            for (unsigned i = 0; i < p->nstage && p->nstage <= 6; i++) {   // as prog_get
+                const uint8_t *control = p->sd[i].control; const void *code = (const void *)(uintptr_t)p->sd[i].data; uint32_t length = 0, st = 0;
+                if (!control || !code) { [a removeAllObjects]; break; }
+                memcpy(&length, control + 0x704, 4); memcpy(&st, control + 0x714, 4);
+                if (!length || length > 16 * 1024 * 1024 || st > 1 || have[st]) { [a removeAllObjects]; break; }
+                char key[65]; shader_key_of(control, code, length, key); have[st] = 1;
+                [a addObject:@[@(key), @(st)]];
+            }
+            if (!have[0]) [a removeAllObjects];
+            ks = a;
+            if (p->serial) { if (!keys || keys.count >= 4096) keys = [NSMutableDictionary dictionary]; keys[@(p->serial)] = ks; }
+        }
+        if (!ks.count) return 0;
+        for (NSArray *e in ks) { int st = [e[1] intValue]; if (!(stages[st] = loaded_variant(e[0], st))) return 0; }
+        if (pred_negative() == 30 && p->serial) { NvProg *o = [NvProg new]; o->sh[0] = stages[0]; o->sh[1] = stages[1]; serial_put(p->serial, o); }
     }
     *vs = stages[0]; *fs = stages[1]; return 1;
 }
@@ -6722,6 +6781,14 @@ static void pso_pend_reclaim(uint64_t submit) {
 }
 static void pso_pend_kick(const pso_key *k, NvShader *vs, NvShader *fs) {   // 提交线程调：没在缓存、没在表里才丢 | Called by the submit thread: kick only if it is neither in the cache nor in the table
     if (hm_get_id(&g_pso, k)) return;
+    // TOTK: a patched function the descriptor needs (missing varyings, no depth output) that is not compiled yet is
+    // compiled in the background (variant_defer) instead of here on the submission thread, where it took up to 225 ms
+    // cold; the guess is left to a later scan or to its draw.
+    g_vprobe = 1; g_vmissing = 0;
+    if (!(k->a2c & PSO_VBORDER)) vs_fn_for(vs, fs, (k->a2c & PSO_LAYERED) != 0, 0, NULL);
+    if (fs && !k->dfmt) fs_fn_without_depth(fs);
+    g_vprobe = 0;
+    if (g_vmissing) { g_pp_vdefer++; return; }
     pthread_mutex_lock(&g_pp_mu);
     pso_pend_reclaim(g_sub_serial);
     int at = pso_pend_find(k), slot = -1;
@@ -6730,7 +6797,7 @@ static void pso_pend_kick(const pso_key *k, NvShader *vs, NvShader *fs) {   // �
     if (at < 0 && slot < 0) g_pp_full++;
     pthread_mutex_unlock(&g_pp_mu);
     if (at >= 0 || slot < 0) return;
-    MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0); g_pp_kicked++; NSString *key = pso_archive_key(k, vs, fs, 0);
+    uint64_t t0 = bp_now(); MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0); g_pp_kicked++; NSString *key = pso_archive_key(k, vs, fs, 0); g_pp_desc_ns += bp_now() - t0;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *e = nil; id<MTLRenderPipelineState> ps = pso_new(d, key, &e);
         pthread_mutex_lock(&g_pp_mu); g_pp[slot].ps = ps; g_pp[slot].done = 1; pthread_cond_broadcast(&g_pp_cv); pthread_mutex_unlock(&g_pp_mu);
@@ -8439,6 +8506,8 @@ static void pso_predict_rest(void) {
     fz_cursor cur = {.p = g_exec_next};
     uint64_t started = bp_now();
     static struct { pso_key k; void *vs, *fs; } qa[QN], qb[QN]; int na = 0, nb = 0;
+    // unseen programs looked up in this scan (prog_prediction_unseen), a hash table whose entries of earlier scans are free
+    enum { UN = 1024 }; static struct { const prog_t *p; uint64_t serial, s0, s1, scan; void *vs, *fs; } um[UN]; static uint64_t ugen; ugen++;
     int guard = 0, stop = 0;   // which budget ended the scan: 1 commands, 2 keys, 3 time (0: end of the submission)
     for (; ; guard++) {
         if (guard >= max_ops) { stop = 1; break; }
@@ -8462,7 +8531,26 @@ static void pso_predict_rest(void) {
         if (hq.op == OP_DRAW || hq.op == OP_DRAW_IDX) {
             draws++;
             NvShader *vs = nil, *fs = nil;
-            if (!prog_prediction_stages(S.prog, &vs, &fs)) continue;
+            if (!prog_prediction_stages(S.prog, &vs, &fs)) {
+                if (!S.prog || !pred_unseen_on()) continue;
+                g_pp_unseen++;
+                // the same unseen program with the same signatures again in this scan: the answer found before
+                uint64_t s0 = stage_sig(0), s1 = stage_sig(1);
+                uint64_t h = ((uint64_t)(uintptr_t)S.prog ^ S.prog->serial * 0x9E3779B97F4A7C15ull ^ s0 * 0xC2B2AE3D27D4EB4Full ^ s1 * 0x165667B19E3779F9ull) * 0x9E3779B97F4A7C15ull;
+                typeof(um[0]) *e = NULL; int found = 0;
+                for (unsigned j = 0, i = (unsigned)(h >> 54); j < 8 && !e; j++) {   // open addressing, 8 probes
+                    typeof(um[0]) *c = &um[(i + j) & (UN - 1)];
+                    if (c->scan != ugen) e = c;
+                    else if (c->p == S.prog && c->serial == S.prog->serial && c->s0 == s0 && c->s1 == s1) e = c, found = 1;
+                }
+                if (found) { if (!e->vs) continue; vs = (__bridge NvShader *)e->vs; fs = (__bridge NvShader *)e->fs; }
+                else {
+                    uint64_t t0 = bp_now(); int ok = prog_prediction_unseen(S.prog, &vs, &fs); g_pp_unseen_ns += bp_now() - t0;
+                    if (e) *e = (typeof(um[0])){S.prog, S.prog->serial, s0, s1, ugen, ok ? (__bridge void *)vs : NULL, ok ? (__bridge void *)fs : NULL};
+                    if (!ok) continue;
+                }
+                g_pp_unseen_hit++;
+            }
             for (int v = 0; v < 4; v++) {
                 if (!pred_guess_wanted(v, dfull, sfull, fs)) continue;
                 pso_key k; pso_key_fill(&k, vs, fs, cf, PRED_DEPTH[v] ? dfull : 0, PRED_STENCIL[v] ? sfull : 0, samples, 0);
@@ -8494,6 +8582,8 @@ static void pso_predict_rest(void) {
              (unsigned long long)g_pp_stop[0], (unsigned long long)g_pp_stop[1], (unsigned long long)g_pp_stop[2],
              (unsigned long long)g_pp_kicked, (unsigned long long)g_pp_taken, (unsigned long long)waits, wait_ns / 1e6,
              (unsigned long long)g_pp_sync, (unsigned long long)full, (unsigned long long)freed, busy);
+        MLOG("并行预编 至提交 %llu：扫描到程序或绑定变体还没解析的绘制 %llu 次，其中用已加载的着色器预测 %llu 次（查找共 %.1f ms）；为后台建管线描述符共 %.1f ms，缺补丁函数先交给后台编的猜测 %llu 条",
+             (unsigned long long)g_sub_serial, (unsigned long long)g_pp_unseen, (unsigned long long)g_pp_unseen_hit, g_pp_unseen_ns / 1e6, g_pp_desc_ns / 1e6, (unsigned long long)g_pp_vdefer);
     }
 }
 
@@ -8511,7 +8601,7 @@ void dm_nvn_probe_prediction(void) {
     struct {op_hdr h;p_render_cond c;op_hdr end;} cond={{OP_RENDER_COND,8+sizeof(p_render_cond)},{0},{OP_END,8}};
     const void *op=&cond;unsigned slot=((uintptr_t)op>>3)&1023;cond_cache_ent cache=g_cond_cache[slot];uint64_t unknown=g_draw_skip[14];
     g_exec_next=(const uint8_t *)&cond;pso_predict_rest();
-    if(pred_negative()>0&&pred_negative()<24)state_op(OP_RENDER_COND,&cond.c);   // older negative numbers; 24-27 are the checks below
+    if(pred_negative()>0&&pred_negative()<24)state_op(OP_RENDER_COND,&cond.c);   // older negative numbers; 24-30 are the checks below
     if(memcmp(&cache,&g_cond_cache[slot],sizeof cache)||g_draw_skip[14]!=unknown)MDIE("pipeline prediction evaluated a future conditional counter");
     // A speculative future program need not be resolved. Calling prog_get here
     // would try to translate its absent bytes (or compile real future shaders).
@@ -8544,6 +8634,46 @@ void dm_nvn_probe_prediction(void) {
     if (prog_prediction_stages(&cached, &vs, &fs))
         MDIE("pipeline prediction predicted a program with an untranslated stage");
     serial_del(cached.serial);
+    // An unseen program, or an unseen binding variant of a drawn one, whose shaders are loaded is predicted from the cache
+    // index with the draw's bound state, without translating, loading a library, creating the program or adding to its
+    // variants; a variant the index names but no shader is loaded for is not predicted.
+    {
+        static uint8_t uctl[2][0x880], ucode[2][0x40]; NSString *ukey[2];
+        for (uint32_t s = 0; s < 2; s++) { uint32_t len = sizeof ucode[s]; char k[65];
+            memcpy(uctl[s] + 0x704, &len, 4); memcpy(uctl[s] + 0x714, &s, 4); memset(ucode[s], 0x51 + (int)s, len);
+            shader_key_of(uctl[s], ucode[s], len, k); ukey[s] = @(k); }
+        static typeof(S) keep; memcpy(&keep, &S, sizeof S);
+        S.nattr = 1; S.attr[0].fmt = 0x0B;   // this draw's attribute 0 is an unsigned integer; the index lists a float variant first
+        NSString *vf = [ukey[0] stringByAppendingString:@"-float"], *vu = [ukey[0] stringByAppendingString:@"-uint"], *pf = [ukey[1] stringByAppendingString:@"-any"];
+        totk_rt_probe_index(ukey[0], @[@{@"variant": vf, @"deps": @{@"attr": @{@"0": @"float"}}}, @{@"variant": vu, @"deps": @{@"attr": @{@"0": @"uint"}}}]);
+        totk_rt_probe_index(ukey[1], @[@{@"variant": pf, @"deps": @{}}]);
+        if (!g_shcache) g_shcache = [NSMutableDictionary dictionary];
+        NSArray<NSString *> *names = @[[vf stringByAppendingString:@"_b"], [vu stringByAppendingString:@"_b"], [pf stringByAppendingString:@"_b"]];
+        NvShader *svf = [NvShader new], *svu = [NvShader new], *spf = [NvShader new];
+        g_shcache[names[0]] = svf; g_shcache[names[1]] = svu; g_shcache[names[2]] = spf;
+        uint64_t libs = g_bp_lib_n; NSUInteger loaded = g_shcache.count;
+        prog_t unseen = {.nstage = 2, .serial = nvn_new_serial()};
+        for (int s = 0; s < 2; s++) { unseen.sd[s].control = uctl[s]; unseen.sd[s].data = (NVNbufferAddress)(uintptr_t)ucode[s]; }
+        vs = fs = nil;
+        int unseen_ok = prog_prediction_unseen(&unseen, &vs, &fs);
+        if (unseen_ok && vs == svf) MDIE("pipeline prediction took a variant of another binding state");
+        if (!unseen_ok || vs != svu || fs != spf) MDIE("pipeline prediction did not predict an unseen program from loaded shaders");
+        if (serial_ptr(unseen.serial)) MDIE("pipeline prediction created a program");
+        NvProg *drawn = [NvProg new];   // drawn with a float attribute 0
+        drawn->sh[0] = svf; drawn->sig[0] = stage_sig(0) ^ 1; drawn->key[0] = ukey[0]; drawn->alt[0] = [NSMutableDictionary dictionaryWithObject:svf forKey:@(drawn->sig[0])];
+        drawn->sh[1] = spf; drawn->sig[1] = stage_sig(1); drawn->key[1] = ukey[1]; drawn->alt[1] = [NSMutableDictionary dictionaryWithObject:spf forKey:@(drawn->sig[1])];
+        prog_t seen = {.serial = nvn_new_serial()}; serial_put(seen.serial, drawn);
+        if (!prog_prediction_unseen(&seen, &vs, &fs) || vs != svu || fs != spf)
+            MDIE("pipeline prediction did not predict an unseen binding variant from loaded shaders");
+        if (drawn->sh[0] != svf || drawn->sig[0] != (stage_sig(0) ^ 1) || drawn->alt[0].count != 1) MDIE("pipeline prediction changed a program's variants");
+        [g_shcache removeObjectForKey:names[1]];
+        if (prog_prediction_unseen(&unseen, &vs, &fs) || prog_prediction_unseen(&seen, &vs, &fs))
+            MDIE("pipeline prediction predicted a variant no shader is loaded for");
+        if (g_bp_lib_n != libs || g_shcache.count != loaded - 1) MDIE("pipeline prediction loaded a shader library");
+        serial_del(seen.serial); if (serial_ptr(unseen.serial)) serial_del(unseen.serial);
+        [g_shcache removeObjectsForKeys:names]; totk_rt_probe_index(ukey[0], nil); totk_rt_probe_index(ukey[1], nil);
+        memcpy(&S, &keep, sizeof S);
+    }
     // A depth-exporting fragment function gets the pass's depth buffer: guesses without it are never used.
     NvShader *depth_fs = [NvShader new], *color_fs = [NvShader new]; depth_fs->writes_depth = 1;
     const uint32_t d32 = MTLPixelFormatDepth32Float, ds8 = MTLPixelFormatDepth32Float_Stencil8;

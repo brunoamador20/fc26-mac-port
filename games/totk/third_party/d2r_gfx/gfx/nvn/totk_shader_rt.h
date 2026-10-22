@@ -26,6 +26,9 @@ NSString *totk_rt_variant(NSString *shader, int stage, const uint8_t *control, c
 void totk_rt_urgent_stats(uint64_t *n, uint64_t *ns);   // urgent jobs done and their time from queued to recorded
 // Called on the background worker after a translation, before the variant is recorded: compile its Metal library there.
 void totk_rt_set_ready_hook(void (*hook)(NSString *variant, int stage));
+// The variant totk_rt_variant would return when the cache index already names one; nil otherwise (never translates).
+NSString *totk_rt_variant_cached(NSString *shader, NSDictionary *answers);
+void totk_rt_probe_index(NSString *shader, NSArray<NSDictionary *> *rows);   // probe-gfx only
 #endif
 #include <stdint.h>
 /* Variants new to the translation cache this run, the variants in the cache (-1 until counted in the background) and
