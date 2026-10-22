@@ -1118,16 +1118,29 @@ def data_bundle(tree, version, logs, *, bundle_id=BUNDLE_ID):
     """The RomFS image (16 GB) as a bundle of its own, signed once and kept in the work folder (build/data-bundles). The
     app carries a clone of it in Contents/Helpers, and the app's seal records only its signature: sealing the image
     inside the app hashed all 16 GB on every packaging (88 s on an M4 Mac mini, 2026-10-20), now only when the image
-    changed (the stamp names the image file: size, mtime, inode). The game opens the image through a link at its usual
-    place, extracted/<version>/romfs/romfs.bin, and checks its SHA-256 itself as before (runtime/romfs.c)."""
+    changed (the stamp names the image: size, mtime and the SHA-256 the extraction verified, extracted/<version>/romfs/
+    index.json). Not its inode, which an APFS clone of the work folder changes: a clone signed all 16 GB again (8 min on
+    the external disk, 2026-10-22). The game opens the image through a link at its usual place,
+    extracted/<version>/romfs/romfs.bin, and checks its SHA-256 itself as before (runtime/romfs.c)."""
     image = tree / f'extracted/{version}/romfs/romfs.bin'
     bundle = tree / f'build/data-bundles/GameData-{version}.bundle'
     stamp = bundle.with_name(bundle.name + '.json')
     st = image.stat()
-    want = dict(format=1, size=st.st_size, mtime_ns=st.st_mtime_ns, inode=st.st_ino)
     try:
-        if json.loads(stamp.read_text()) == want and (bundle / 'Contents/_CodeSignature/CodeResources').is_file():
-            return bundle
+        sha = json.loads((image.parent / 'index.json').read_text()).get('romfs_sha256')
+    except (OSError, ValueError):
+        sha = None
+    want = dict(format=2, size=st.st_size, mtime_ns=st.st_mtime_ns, sha256=sha) if sha else \
+        dict(format=1, size=st.st_size, mtime_ns=st.st_mtime_ns, inode=st.st_ino)
+    try:
+        have = json.loads(stamp.read_text())
+        if (bundle / 'Contents/_CodeSignature/CodeResources').is_file():
+            if have == want:
+                return bundle
+            if (want['format'] == 2 and have.get('format') == 1 and have.get('size') == st.st_size
+                    and have.get('mtime_ns') == st.st_mtime_ns):   # an older stamp (or a clone's: other inode, same file)
+                stamp.write_text(json.dumps(want))
+                return bundle
     except (OSError, ValueError):
         pass
     say('4/4 app: signing the game data once (a minute or two; later builds reuse it)')

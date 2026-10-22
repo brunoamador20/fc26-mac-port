@@ -45,6 +45,25 @@ class DataBundle(unittest.TestCase):
         self.assertEqual((bundle / 'Contents/Resources/romfs.bin').read_bytes(), b'another image')
         self.assertFalse(bundle.with_name(bundle.name + '.partial').exists())
 
+    def test_a_cloned_work_folder_reuses_the_signature_and_a_new_image_hash_signs_again(self):
+        import json, shutil
+        index = self.image.parent / 'index.json'
+        index.write_text(json.dumps(dict(status='pass', romfs_sha256='a' * 64)))
+        bundle, signed = self.make()
+        self.assertEqual(signed, 1)
+        stamp = bundle.with_name(bundle.name + '.json')
+        st = self.image.stat()
+        stamp.write_text(json.dumps(dict(format=1, size=st.st_size, mtime_ns=st.st_mtime_ns, inode=st.st_ino + 1)))
+        self.assertEqual(self.make()[1], 0)   # an older stamp, written in the folder this one was cloned from: only its format changes
+        self.assertEqual(json.loads(stamp.read_text())['format'], 2)
+        clone = self.root / 'clone'
+        shutil.copytree(self.tree, clone, copy_function=shutil.copy2, symlinks=True)   # new inodes, same mtimes
+        self.assertNotEqual(os.stat(clone / 'extracted/v143/romfs/romfs.bin').st_ino, st.st_ino)
+        self.tree, self.image = clone, clone / 'extracted/v143/romfs/romfs.bin'
+        self.assertEqual(self.make()[1], 0)   # the clone keeps the signed bundle
+        (self.image.parent / 'index.json').write_text(json.dumps(dict(status='pass', romfs_sha256='b' * 64)))
+        self.assertEqual(self.make()[1], 1)   # another image, by the hash the extraction verified
+
     def test_app_opens_the_image_by_its_usual_path_and_its_seal_verifies(self):
         bundle, _ = self.make()
         app = self.root / 'Game.app'

@@ -15,6 +15,7 @@ them nowhere else), and the control section's own size (0x7d1, at +0x7c8) hashed
 import argparse
 import concurrent.futures
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -179,6 +180,36 @@ INVENTORY_SCHEMA = 1
 TRANSLATIONS_SCHEMA = 1
 
 
+def translation_request(variant, stage, control, code, answers, code_path):
+    """What the translator is asked for a job (the guest code written to code_path). A cached translation depends on this
+    function's source (TranslationCache identity), not on the rest of this script: the variant name already names the
+    shader's control and code and the bind state, and a change elsewhere here re-translated all 31,000 jobs (5 min)."""
+    c1, length = struct.unpack_from('<II', control, 0x700)
+    code_path.write_bytes(code[0 if stage == 'cs' else 0x30:length])
+    request = dict(variant=variant, stage=stage, code=str(code_path.resolve()), c1=code[c1:length].hex(),
+                   depth_minus_w=True, **answers)
+    if stage == 'cs':
+        request['local'] = list(struct.unpack_from('<III', control, 0x748))
+    return request
+
+
+def translations_folder(beside, identity):
+    """Where the translations live: beside the seed (<output>.translations), or with TOTK_TRANSLATION_CACHE set, in a
+    folder there named after the identity, which packagings of other work folders (an APFS clone, another session's)
+    share. The shared folder must be on the seed's volume (its files are hard links). The three most recently used
+    identities are kept there."""
+    shared = os.environ.get('TOTK_TRANSLATION_CACHE')
+    if not shared:
+        return beside, False
+    root = Path(shared)
+    folder = root/digest(json.dumps(identity, sort_keys=True).encode())[:16]
+    folder.mkdir(parents=True, exist_ok=True)
+    os.utime(folder)
+    for old in sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.stat().st_mtime, reverse=True)[3:]:
+        shutil.rmtree(old, ignore_errors=True)
+    return folder, True
+
+
 def cached_inventory(romfs, modules, game, folder, identity):
     """inventory(), kept in <folder>: inventory.json names the identity it was read with (the RomFS, the game modules,
     this script), each shader's stage, source and the offsets of its control and code in shaders.bin, and the SHA-256
@@ -220,8 +251,8 @@ class TranslationCache:
     that no job of the last preparation asked for are removed after it. digests.json keeps the SHA-256 of each file, so
     the seed manifest does not read tens of thousands of unchanged files again."""
 
-    def __init__(self, folder, identity):
-        self.folder = folder
+    def __init__(self, folder, identity, shared=False):
+        self.folder, self.shared = folder, shared   # shared (translations_folder): other work folders' entries stay
         try:
             same = json.loads((folder/'cache.json').read_text()) == identity
         except (OSError, ValueError):
@@ -262,7 +293,10 @@ class TranslationCache:
             return
         for name in (variant+'_b.metal', variant+'_b.json'):
             (self.folder/name).unlink(missing_ok=True)
-            os.link(staging/name, self.folder/name)
+            try:
+                os.link(staging/name, self.folder/name)
+            except FileExistsError:   # another packaging sharing the folder put the same translation
+                pass
             self.digests[name] = digest((staging/name).read_bytes())
 
     def digest(self, name, path):
@@ -272,7 +306,7 @@ class TranslationCache:
         return self.digests[name]
 
     def prune(self, variants):
-        for p in self.folder.iterdir():
+        for p in ([] if self.shared else self.folder.iterdir()):
             for end in ('_b.metal', '_b.json', '.failed'):
                 if p.name.endswith(end) and p.name[:-len(end)] not in variants:
                     p.unlink()
@@ -643,10 +677,11 @@ def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, m
                    modules={p.name: digest(p.read_bytes()) for p in sorted(Path(modules).glob('*.patched.bin'))} if modules else {},
                    preparation_sha256=identity['preparation_sha256'])
     _, shaders, startup, archives = cached_inventory(romfs, modules, game, output.with_name(output.name+'.inventory'), scanned)
-    cache = TranslationCache(output.with_name(output.name+'.translations'),
-                             dict(schema=TRANSLATIONS_SCHEMA, chain=CHAIN, translator_sha256=identity['translator_sha256'],
-                                  spirv_cross_sha256=identity['spirv_cross_sha256'],
-                                  preparation_sha256=identity['preparation_sha256']))
+    translations = dict(schema=TRANSLATIONS_SCHEMA, chain=CHAIN, translator_sha256=identity['translator_sha256'],
+                        spirv_cross_sha256=identity['spirv_cross_sha256'],
+                        request_sha256=digest(inspect.getsource(translation_request).encode()))
+    folder, common = translations_folder(output.with_name(output.name+'.translations'), translations)
+    cache = TranslationCache(folder, translations, shared=common)
     extra = located({where for where in shared.locators if where[0] not in shaders}, source_reader(romfs, modules, game), game)
     shaders.update(extra)
     print(f'{len(extra)} more shaders read where the shared list locates them (agl .sharcb, game module)', flush=True)
@@ -695,13 +730,8 @@ def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, m
                             process = subprocess.Popen([str(translator), '--service', '--spirv-cross', str(spirv_cross),
                                                         '--out', str(staging), '--chain', CHAIN],
                                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-                        c1, length = struct.unpack_from('<II', control, 0x700)
                         code_path = staging/(variant+'.code')
-                        code_path.write_bytes(code[0 if stage == 'cs' else 0x30:length])
-                        request = dict(variant=variant, stage=stage, code=str(code_path.resolve()),
-                                       c1=code[c1:length].hex(), depth_minus_w=True, **answers)
-                        if stage == 'cs':
-                            request['local'] = list(struct.unpack_from('<III', control, 0x748))
+                        request = translation_request(variant, stage, control, code, answers, code_path)
                         process.stdin.write(json.dumps(request)+'\n'); process.stdin.flush()
                         response = process.stdout.readline()
                         if not response:

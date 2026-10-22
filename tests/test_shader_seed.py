@@ -356,6 +356,24 @@ class ShaderKeyScope(unittest.TestCase):
         self.assertEqual(seed.answers_for({'tex': {'1': '*', '2': '*_depth', '3': 'cube'}})['tex'],
                          {'1': '2d', '2': '2d_depth', '3': 'cube'})
 
+    def test_a_shared_translation_cache_serves_another_work_folder_and_keeps_its_entries(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root/'a').mkdir(); (root/'b').mkdir()
+            with mock.patch.dict(os.environ, {'TOTK_TRANSLATION_CACHE': str(root/'translations')}):
+                _, first, _ = self.prepare_with_service(root/'a', root/'a'/'seed')
+                _, again, _ = self.prepare_with_service(root/'b', root/'b'/'seed')   # another work folder (a clone)
+            self.assertTrue(first)
+            self.assertEqual(again, [])
+            self.assertFalse((root/'a'/'seed.translations').exists())
+            [shared] = [p for p in (root/'translations').iterdir() if p.is_dir()]
+            self.assertTrue(any(p.name.endswith('_b.metal') for p in shared.iterdir()))
+            # a new translator gets a folder of its own; the old one stays for whoever still uses it
+            with mock.patch.dict(os.environ, {'TOTK_TRANSLATION_CACHE': str(root/'translations')}):
+                _, other, _ = self.prepare_with_service(root/'b', root/'b'/'seed', translator_text='another build')
+            self.assertEqual(sorted(other), sorted(first))
+            self.assertEqual(len([p for p in (root/'translations').iterdir() if p.is_dir()]), 2)
+
     def test_a_new_translator_empties_the_translation_cache(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
