@@ -29,7 +29,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shader_list import ShaderList   # noqa: E402
 
-CHAIN = 'totk-native-v6-unverified'
+CHAIN = 'totk-native-v7-unverified'
 MIN_SHADERS = 8000
 ZSTD = b'\x28\xb5\x2f\xfd'
 YAZ0 = b'Yaz0'
@@ -596,7 +596,8 @@ def plan(shaders, startup, listed, all_default=False):
     """Translation jobs (key, answers, variant, why): the default bind state for every startup shader (every shader found
     with all_default), then each bind state the shared list names for a shader found in this game ('listed'). A listed
     state a variant made before already serves is not translated (prepare), and one whose translation gives the deps of
-    an earlier variant is dropped, since only the translator knows a shader's deps."""
+    an earlier variant is dropped, since only the translator knows a shader's deps. A default translation that
+    compare-samples textures (shadow maps) adds a job with those slots bound to depth textures ('compare', prepare)."""
     jobs = [(key, ANSWERS, key+'-'+SUFFIX, 'default') for key in sorted(shaders if all_default else startup)]
     for key, deps in sorted(listed):
         if key in shaders:
@@ -659,6 +660,7 @@ def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, m
     for index, job in enumerate(jobs):
         by_key.setdefault(job[0], []).append(index)
     outcome = [None]*len(jobs)   # ('ok', variant, rows) / ('failed', record) / None (skipped or a duplicate of deps)
+    derived = {}   # key -> results of the jobs a translation added (its compare-sampled slots bound to depth textures)
     produced = {}   # key -> {canonical deps: variant}; a shader's .variants rows
     lock = threading.Lock()
     pending = iter(by_key.items())
@@ -676,10 +678,11 @@ def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, m
                     return
                 key, indices = item
                 mine = {}
-                for index in indices:
-                    _, answers, variant, why = jobs[index]
+                queue = [(index, *jobs[index][1:]) for index in indices]
+                while queue:
+                    index, answers, variant, why = queue.pop(0)
                     stage, control, code, source = shaders[key]
-                    if why == 'listed':   # a variant made already serves this bind state, as the runtime would pick it
+                    if why != 'default':   # a variant made already serves this bind state, as the runtime would pick it
                         serving = next((v for d, v in mine.items() if deps_match(json.loads(d), answers)), None)
                         if serving:
                             with lock:
@@ -721,10 +724,18 @@ def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, m
                         rows =[f'S\t{variant}_b\t'+str({'vs': 0, 'ps': 1, 'cs': 5}[stage])]
                         if stage == 'cs':
                             rows.append(f'C\t{variant}_b')
-                        outcome[index] = ('ok', variant, rows)
+                        result = ('ok', variant, rows)
+                        if why == 'default' and refl.get('compare_slots'):   # its shadow maps bound too: next, before listed rows
+                            depth = answers_for({'tex': {str(s): '*_depth' for s in refl['compare_slots']}})
+                            queue.insert(0, (None, depth, key+'-'+suffix(depth), 'compare'))
                     else:
-                        outcome[index] = ('failed', dict(key=key, variant=variant, why=why, stage=stage, source=source,
-                                                         error=reply.get('error')))
+                        result = ('failed', dict(key=key, variant=variant, why=why, stage=stage, source=source,
+                                                 error=reply.get('error')))
+                    if index is None:
+                        with lock:
+                            derived.setdefault(key, []).append(result)
+                    else:
+                        outcome[index] = result
                     with lock:
                         done[0 if reply.get('ok') else 1] += 1
                         done[2] += reused
@@ -749,7 +760,7 @@ def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, m
         for future in [pool.submit(worker) for _ in range(workers)]:
             future.result()
     failed, rows, completed = [], [], []
-    for result in outcome:
+    for result in outcome+[result for key in sorted(derived) for result in derived[key]]:
         if result and result[0] == 'ok':
             completed.append(result[1]); rows.extend(result[2])
         elif result:
@@ -785,7 +796,8 @@ def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, m
     if output.exists():
         shutil.rmtree(output)
     staging.rename(output)
-    cache.prune({variant for _, _, variant, _ in jobs})
+    cache.prune({variant for _, _, variant, _ in jobs} |
+                {r[1] if r[0] == 'ok' else r[1]['variant'] for results in derived.values() for r in results})
     record_verified(output, report['files'])
     print(f'startup seed ready: {len(completed)} shader variants ({ready} startup shaders, the rest from the shared list), '
           f'{len(failed)} skipped; {done[2]} translations taken from the cache, {done[0]+done[1]-done[2]} translated', flush=True)

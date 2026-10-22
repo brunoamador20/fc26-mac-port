@@ -21,9 +21,10 @@ differed in its logic, only in declarations:
 ## What the translator does now (`games/totk/tools/totk_xlate/Service.cs`)
 
 - A texture slot whose kind it did not query (Ryujinx queries it only for size queries, 1D / buffer and bindless) is
-  recorded as `"*"`, or `"*_depth"` when a depth-format texture is bound and the code reads it without a compare.
-- A slot only ever compare-sampled is declared depth whatever is bound and is no dependency. The old variant cast the
-  colour declaration to depth in the shader (`spvDepthCast`), so the GPU samples the same texture the same way.
+  recorded as `"*"`, or `"*_depth"` when a depth-format texture is bound there. The MSL is the one the old translator
+  wrote for the same answers, byte for byte.
+- The reflection lists the slots the code compare-samples (`compare_slots`, shadow maps). The game binds depth
+  textures to all of a shader's compare slots or to none (1,248 and 126 Mac-translated variants, never some).
 - A vertex input the request does not answer is typed by its use: `uint` when every value loaded from it is only bitcast
   to an integer, converted to one or used as an index. Measured on the variants the game translated with real answers:
   834 of 837 integer inputs found, no float input taken for an integer one. An answered input keeps its answer.
@@ -33,13 +34,22 @@ non-depth answer and `"*_depth"` to any depth one; an unanswered vertex input (n
 
 ## The seed
 
-Tears of the Kingdom's seed now translates every shader the build finds for the default bind state (28,769 in 1.4.3,
-up from the 12,472 of the startup packages). A shared-list row is translated only when no variant already made serves
-its bind state; a row served by another variant goes into `<seed>.aliases.tsv`, and the packaging renames the warm-up
-rows through it (`shader_list.py rename`), since rows recorded on a player's Mac name the variant translated there.
+Tears of the Kingdom's seed now translates every shader the build finds for the default bind state (28,771 in 1.4.3,
+up from the 12,472 of the startup packages), and for a shader with compare slots also the variant with all of them
+bound to depth textures. A shared-list row is translated only when no variant already made serves its bind state; a
+row served by another variant goes into `<seed>.aliases.tsv`, and the packaging renames the warm-up rows through it
+(`shader_list.py rename`), since rows recorded on a player's Mac name the variant translated there.
 
-What still needs its own variant: a depth texture read without a compare (61 shaders), a queried texture kind other than
-2D, an integer colour output, and an integer vertex input used as a float somewhere. The shared list keeps naming those.
+Offline check (2026-10-22): of 2,681 variants the game translated on this Mac, the new translator gives identical MSL
+for every one with the same answers, and 2,641 (98.5 %) are served by the default or the depth-bound variant with
+identical MSL.
+
+What still needs its own variant: a depth texture read without a compare, a queried texture kind other than 2D, an
+integer colour output, and an integer vertex input used as a float somewhere. The shared list keeps naming those.
+
+The translation chain went from `totk-native-v6-unverified` to `totk-native-v7-unverified` with this change: a v6 cache
+indexes the default variants under the same names with the old, stricter deps, and the runtime takes a cache's index
+rows before the seed's, so v6 caches would keep translating states the seed serves.
 
 Render pipelines (`R` / `B` rows) are not covered: they combine two shaders with render target formats, blending and the
 vertex layout, which the game's materials decide, not the shader code. A missing pipeline costs one Metal pipeline build

@@ -979,7 +979,7 @@ def variant_folder(game):
     """Where the game keeps the source of each patched shader variant it compiled while it was played (nvn_mtl.m
     variant_library: sampler border colours, missing varyings, the layer index, no depth output, MetalFX roles), named by
     its SHA-256: the player's shader cache, ~/Library/Application Support/MacNativeGames/<game>/shader-cache/rt-<chain>."""
-    return Path.home()/'Library/Application Support/MacNativeGames'/APPS[game][2]/'shader-cache/rt-totk-native-v6-unverified/variants'
+    return Path.home()/'Library/Application Support/MacNativeGames'/APPS[game][2]/'shader-cache/rt-totk-native-v7-unverified/variants'
 
 
 def variant_sources(game):
@@ -1272,7 +1272,7 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
         try:
             report = json.loads((seed/'seed-manifest.json').read_text())
             known = seed_digests(seed)
-            if (report['version'] != version or report['chain'] != 'totk-native-v6-unverified' or
+            if (report['version'] != version or report['chain'] != 'totk-native-v7-unverified' or
                     report['shaders'] < (8000 if game == 'totk' else 2000) or not report['files'] or any(
                         Path(name).name != name or seed_sha256(seed, name, known) != digest for name, digest in report['files'].items())):
                 raise ValueError('version, translation chain or file hash differs')

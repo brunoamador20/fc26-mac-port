@@ -233,7 +233,7 @@ class ShaderKeyScope(unittest.TestCase):
                 self.assertEqual(json.loads((output/'shader-keys.json').read_text())['keys'], scope['keys'])
                 self.assertEqual(inventory.call_count, 1)
 
-    def prepare_with_service(self, root, output, listed=(), translator_text='', fail=(), inventory_calls=None):
+    def prepare_with_service(self, root, output, listed=(), translator_text='', fail=(), inventory_calls=None, compare=()):
         """prepare() with a synthetic service; returns (manifest, the variants it was asked to translate)."""
         asked = []
 
@@ -251,9 +251,12 @@ class ShaderKeyScope(unittest.TestCase):
                 base = Path(request['code']).with_suffix('')
                 deps = {k: request[k] for k in ('tex', 'img', 'attr', 'fout')}
                 deps['tex'] = {'1': '2d', '2': '2d', **deps['tex']}   # as if the code queried the kind of slots 1 and 2
+                key = request['variant'].split('-')[0]
+                if key in compare:   # slot 3 is compare-sampled and not queried: only whether a depth texture is bound counts
+                    deps['tex']['3'] = '*_depth' if deps['tex'].get('3', '').endswith('_depth') else '*'
                 base.with_name(base.name+'_b.metal').write_text('// synthetic '+request['variant'])
                 base.with_name(base.name+'_b.json').write_text(json.dumps(
-                    dict(chain=seed.CHAIN, stage=request['stage'], deps=deps)))
+                    dict(chain=seed.CHAIN, stage=request['stage'], deps=deps, compare_slots=[3] if key in compare else [])))
                 self.reply = '{"ok":true}\n'
 
             def flush(self): pass
@@ -323,6 +326,24 @@ class ShaderKeyScope(unittest.TestCase):
             aliases = (root/'seed.aliases.tsv').read_text().splitlines()
             self.assertEqual(aliases, [served+'\t'+rows[0][0]+'-'+seed.SUFFIX])
             self.assertEqual(manifest['shaders'], 4)
+
+    def test_a_shader_sampling_shadow_maps_gets_its_depth_bound_variant_without_a_listed_row(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            rows = list(seed.bnsh_shaders(bnsh()))
+            shadow = rows[0][0]
+            listed = [(shadow, self.deps(tex={'3': '2darray_depth'}))]   # what a player met: served by the derived variant
+            manifest, asked, _ = self.prepare_with_service(root, root/'seed', listed, compare={shadow})
+            depth = shadow+'-'+seed.suffix(seed.answers_for({'tex': {'3': '*_depth'}}))
+            self.assertIn(depth, asked)
+            self.assertNotIn(shadow+'-'+seed.suffix(seed.answers_for(json.loads(listed[0][1]))), asked)
+            self.assertEqual(manifest['shaders'], 4)   # three defaults and the derived one
+            index = json.loads((root/'seed'/(shadow+'.variants')).read_text())
+            self.assertEqual([row['deps']['tex']['3'] for row in index], ['*', '*_depth'])
+            # the derived translation stays in the translation cache: a second preparation asks for nothing
+            (root/'seed'/'seed-manifest.json').unlink()
+            _, again, _ = self.prepare_with_service(root, root/'seed', listed, compare={shadow})
+            self.assertEqual(again, [])
 
     def test_deps_match_reads_wildcard_texture_kinds_and_unbound_vertex_inputs_as_the_runtime_does(self):
         deps = {'tex': {'1': '*', '2': '*_depth', '3': '2d'}, 'attr': {'0': 'uint'}, 'fout': {}, 'img': {}}

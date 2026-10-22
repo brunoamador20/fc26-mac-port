@@ -110,11 +110,12 @@ static class ShaderService
 
     static readonly Regex TexDecl = new(@"\b(?:texture\w+|depth\w+)<float>\s+(\w+)\s*\[\[id\(\d+\)\]\]");
 
-    /// NVN texture slots of the textures the MSL uses only through sample_compare / gather_compare (every use is a compare,
-    /// and there is at least one): the game's shadow maps, which are always depth textures.
-    static HashSet<long> CompareOnlySlots(string src)
+    /// NVN texture slots of the textures the MSL samples with a depth compare (sample_compare / gather_compare): shadow
+    /// maps. The game binds depth textures to all of a shader's compare slots or to none of them (1,248 and 126 of the
+    /// variants it translated on the Mac by 2026-10-22, never some), so the seed prepares both (prepare_shader_seed.py).
+    static SortedSet<long> CompareSlots(string src)
     {
-        var slots = new HashSet<long>();
+        var slots = new SortedSet<long>();
         string[] lines = src.Split('\n');
         foreach (Match m in TexDecl.Matches(src))
         {
@@ -122,14 +123,8 @@ static class ShaderService
             long slot = TexSlotOfName(name);
             if (slot < 0) continue;
             var use = new Regex(@"\b" + Regex.Escape(name) + @"\b");
-            int uses = 0; bool other = false;
-            foreach (string line in lines)
-            {
-                if (!use.IsMatch(line) || line.Contains("[[id(", StringComparison.Ordinal)) continue;
-                uses++;
-                if (!line.Contains("_compare(", StringComparison.Ordinal)) { other = true; break; }
-            }
-            if (uses > 0 && !other) slots.Add(slot);
+            if (lines.Any(line => use.IsMatch(line) && !line.Contains("[[id(", StringComparison.Ordinal) && line.Contains("_compare(", StringComparison.Ordinal)))
+                slots.Add(slot);
         }
         return slots;
     }
@@ -424,11 +419,7 @@ static class ShaderService
         }
         var depthSlots = new HashSet<long>(tex.Where(kv => kv.Value is JsonValue v && v.GetValueKind() == JsonValueKind.String && v.GetValue<string>().EndsWith("_depth", StringComparison.Ordinal))
                                             .Select(kv => ParseInt(kv.Key)));
-        // A texture the code only ever compare-samples is a shadow map: declared depth whatever the request answers for
-        // it, so the variant does not depend on that slot (the runtime binds a depth placeholder when the slot holds no
-        // depth texture).
-        var compareOnly = CompareOnlySlots(src);
-        depthSlots.UnionWith(compareOnly);
+        var compareSlots = CompareSlots(src);   // before the depth rewrite: it drops spvDepthCast, not the compare
         if (depthSlots.Count > 0)
             src = RewriteDepthTextures(src, depthSlots);
         src = MatchSwitchDepthSampling(src);
@@ -443,8 +434,8 @@ static class ShaderService
         var colors = new SortedSet<long>(Regex.Matches(outStruct.Success ? outStruct.Groups[1].Value : "", @"\[\[color\((\d+)\)\]\]").Select(m => ParseInt(m.Groups[1].Value)));
         // Answers this translation depends on: queried texture / image slots, consumed vertex inputs, written colour outputs.
         // A texture slot the MSL binds without having queried its kind takes that kind from the sampling instruction, so
-        // only whether a depth-format texture sits there changes the MSL: "*" (any colour texture) or "*_depth". A slot
-        // only compare-sampled is declared depth whatever is bound and is no dependency (shader_variants.md).
+        // only whether a depth-format texture sits there changes the MSL: "*" (any colour texture) or "*_depth"
+        // (docs/shader-variants.md).
         var usedSlots = new HashSet<long>(Regex.Matches(src, @"\b(texture\w+|depth\w+)<float>\s+(\w+)\s*\[\[id\(\d+\)\]\]").Select(m => TexSlotOfName(m.Groups[2].Value)));
         usedSlots.Remove(-1);
         var deps = new JsonObject { ["tex"] = new JsonObject(), ["img"] = new JsonObject(), ["attr"] = new JsonObject(), ["fout"] = new JsonObject() };
@@ -453,8 +444,7 @@ static class ShaderService
         foreach (long s in new SortedSet<long>(queried.Concat(usedSlots)))
         {
             string slot = s.ToString(CultureInfo.InvariantCulture);
-            if (queried.Contains(s)) deps["tex"][slot] = GetOr(tex, slot, "2d");
-            else if (!compareOnly.Contains(s)) deps["tex"][slot] = depthSlots.Contains(s) ? "*_depth" : "*";
+            deps["tex"][slot] = queried.Contains(s) ? GetOr(tex, slot, "2d") : depthSlots.Contains(s) ? "*_depth" : "*";
         }
         foreach (long s in Ints("img_queried"))
             deps["img"][s.ToString(CultureInfo.InvariantCulture)] = GetOr(img, s.ToString(CultureInfo.InvariantCulture), new JsonObject());
@@ -469,6 +459,7 @@ static class ShaderService
             ["threadgroup_size"] = GetOr(rq, "local", null), ["c1"] = GetStr(rq, "c1", ""), ["notes"] = res["notes"].DeepClone(),
             ["drv_reads"] = dr, ["drv_unfillable"] = unfillable, ["bindings"] = Reflect(stage, src, res),
             ["vertex_inputs"] = vertexInputs, ["raster"] = new JsonObject(), ["deps"] = deps, ["softfloat64"] = softfloat64,
+            ["compare_slots"] = new JsonArray(compareSlots.Select(s => (JsonNode)s).ToArray()),
         };
         string tmp = Path.Combine(outDir, variant + "_b.json.tmp");
         File.WriteAllText(tmp, PyJson(refl, 1, false));
