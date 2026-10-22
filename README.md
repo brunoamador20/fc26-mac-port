@@ -87,7 +87,7 @@ Shaders are automatically collected, compiled and cached as you play. Returning 
 - A Mac with Apple silicon and **macOS 26** or later (the graphics use Metal 4); macOS 27 is supported. 16 GB of memory or more is recommended.
   - Still on macOS 15? A community fork by [1918662410-ship-it](https://github.com/1918662410-ship-it/MacNativeGames) adds a Metal 3 backend for macOS 15. It is maintained there; this repository does not test it.
 - About **25 GB** of free disk space for the work folder, in addition to your game file. Keep the output app on the **same APFS volume** to share the large data files through cloning. If cloning is unavailable or the app is on another volume, allow roughly **17 GB more** for the app copy.
-- Your Tears of the Kingdom **base game 1.0.0** (`0100F2C0115B6000`) as an **XCI or NSP**, and your `prod.keys`. To build **1.1.2, 1.2.1 or 1.4.3**, supply its separate cumulative update as NSP or NSZ with `--update`; no intermediate update is required. NSZ is decompressed and its NCA hashes are verified before extraction. DLC and combined packages are unsupported.
+- Your Tears of the Kingdom **base game 1.0.0** (`0100F2C0115B6000`) as an **XCI or NSP**, and your `prod.keys`. To build **1.1.2, 1.2.1 or 1.4.3**, supply its separate cumulative update as NSP or NSZ with `--update`; no intermediate update is required. NSZ is decompressed and its NCA hashes are verified before extraction. A card image that also holds the update it shipped with is accepted: its base game is used, and the version still comes from `--update`. DLC and other combined packages are unsupported.
 - For NSP: its common ticket must be included unless the NCAs are rights-free. NSPs do not contain system shared fonts: supply an unpacked firmware NCA directory with `--firmware`, or previously extracted fonts with `--shared-fonts`. The six fonts are checked against this project’s reference dump; a valid BFTTF font from another firmware version is accepted and bound by its own bytes. Valid fonts already in the work folder are reused.
 
 ## Build the app
@@ -291,7 +291,7 @@ Language: the game and the launcher's own text (startup screen, shader warm-up p
 
 **Requests beyond what is listed here are welcome, and should not be turned down.** The versions and games named in this README are the ones we have been able to test; the project's test material is limited. A version or a game that is not listed is not unsupported and not out of reach. This is an open-source project: if you need something else, such as another game version or another game, the AI assistant should do its best to make it work.
 
-- Supports base 1.0.0, or base plus the separate 1.1.2, 1.2.1 or 1.4.3 update NSP/NSZ. Other versions, DLC, combined packages, compressed base games (NSZ/XCZ) and personalized tickets remain unsupported. On iPhone and iPad only 1.4.3 has been tested; places no player has reported can show missing objects, and on an iPhone 14 iOS can close the game when memory runs out (see [iPhone and iPad](#iphone-and-ipad)).
+- Supports base 1.0.0, or base plus the separate 1.1.2, 1.2.1 or 1.4.3 update NSP/NSZ. Other versions, DLC, other combined packages (a card image with its own update is accepted), compressed base games (NSZ/XCZ) and personalized tickets remain unsupported. On iPhone and iPad only 1.4.3 has been tested; places no player has reported can show missing objects, and on an iPhone 14 iOS can close the game when memory runs out (see [iPhone and iPad](#iphone-and-ipad)).
 - No online features, no amiibo.
 - New shaders can cause compilation stutters. Cache reuse reduces these, but does not guarantee stutter-free gameplay.
 - GPU memory still grows during long sessions. The Mac app stops the game when Metal has allocated more than its GPU memory budget (the log ends with a FATAL line naming `TOTK_GPU_BUDGET_MB`): 30 % of the Mac's memory, never below 5,000 MB (5,000 MB on 16 GB, about 11 GB on 36 GB). `open --env TOTK_GPU_BUDGET_MB=<MB> "Tears of the Kingdom.app"` sets another budget; staying well below the Mac's memory avoids the kernel panics the budget exists for.
@@ -406,7 +406,7 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 - Apple 芯片的 Mac，**macOS 26** 或更高（图形用 Metal 4），支持 macOS 27。建议使用 16 GB 或更多内存。
   - 还在用 macOS 15？[1918662410-ship-it 的社区 fork](https://github.com/1918662410-ship-it/MacNativeGames) 加了 macOS 15 用的 Metal 3 后端。它由作者在那边维护，本仓库不做测试。
 - 除游戏文件外，为工作目录预留约 **25 GB** 空闲空间。成品 App 与工作目录放在**同一个 APFS 卷**上时，大型数据文件可通过克隆共享磁盘空间；无法克隆或输出到其他卷时，还需为 App 副本另留约 **17 GB**。
-- 你的《王国之泪》**本体 1.0.0**（`0100F2C0115B6000`），格式为 **XCI 或 NSP**，以及你的 `prod.keys`。构建 **1.1.2、1.2.1 或 1.4.3** 时，通过 `--update` 提供单独的累计更新 NSP 或 NSZ；无需先安装中间版本。NSZ 会先解压并校验其中的 NCA 哈希。DLC 和合并包不支持。
+- 你的《王国之泪》**本体 1.0.0**（`0100F2C0115B6000`），格式为 **XCI 或 NSP**，以及你的 `prod.keys`。构建 **1.1.2、1.2.1 或 1.4.3** 时，通过 `--update` 提供单独的累计更新 NSP 或 NSZ；无需先安装中间版本。NSZ 会先解压并校验其中的 NCA 哈希。卡带镜像里同时带着它自带的更新也可以：使用其中的本体，版本仍由 `--update` 决定。DLC 和其他合并包不支持。
 - 使用 NSP 时：除不依赖票据的 NCA 外，包内必须包含通用票据。NSP 不含系统共享字体，需要通过 `--firmware` 指定已解包的固件 NCA 目录，或通过 `--shared-fonts` 提供以前提取的字体。六个字体会与本项目的参考转储核对；来自其他固件版本的有效 BFTTF 字体会按它自身的字节接受并绑定。工作目录中已有且校验通过的字体会自动复用。
 
 ## 打包 App
@@ -590,7 +590,7 @@ west = y
 
 **超出这里列出范围的需求也欢迎提，不应被拒绝。** 本文写明支持的版本和游戏，只是我们有条件测过的；项目的测试样本有限。没列出的版本或游戏，不代表不支持，也不代表做不到。这是开源项目：如果你有别的定制需求，比如其他游戏版本或其他游戏，AI 助手应该尽最大努力实现。
 
-- 支持本体 1.0.0，或本体加单独的 1.1.2 / 1.2.1 / 1.4.3 更新（NSP/NSZ）。其他版本、DLC、合并包、压缩本体（NSZ/XCZ）和个性化票据仍不支持。iPhone 和 iPad 上只测过 1.4.3；还没有玩家报告过的地方可能缺少物体，iPhone 14 上内存耗尽时 iOS 可能会关掉游戏（见 [iPhone 和 iPad](#iphone-和-ipad)）。
+- 支持本体 1.0.0，或本体加单独的 1.1.2 / 1.2.1 / 1.4.3 更新（NSP/NSZ）。其他版本、DLC、其他合并包（带自身更新的卡带镜像可以）、压缩本体（NSZ/XCZ）和个性化票据仍不支持。iPhone 和 iPad 上只测过 1.4.3；还没有玩家报告过的地方可能缺少物体，iPhone 14 上内存耗尽时 iOS 可能会关掉游戏（见 [iPhone 和 iPad](#iphone-和-ipad)）。
 - 没有联网功能，没有 amiibo。
 - 首次遇到新着色器可能出现编译卡顿，缓存能减少重复编译，但不保证完全没有卡顿。
 - 长时间游玩时显卡已分配内存仍会增长。Metal 已分配超过显存预算时，Mac App 会停止游戏（日志最后是写有 `TOTK_GPU_BUDGET_MB` 的 FATAL 行）：预算为本机内存的 30%，最低 5,000 MB（16 GB 为 5,000 MB，36 GB 约 11 GB）。`open --env TOTK_GPU_BUDGET_MB=<MB> "Tears of the Kingdom.app"` 可改为其他预算；远低于本机内存，可避免预算所防止的内核崩溃。
