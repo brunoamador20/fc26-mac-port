@@ -29,6 +29,8 @@ It holds no game data, only identifiers; the build turns them into shaders from 
   shader_list.py export <list> <pso_manifest.tsv> <pso_title.tsv>   the two files the runtime reads (nvn_mtl.m warm_start)
   shader_list.py export <list> <pso_manifest.tsv>   one file with every warm row, title rows first, for a runtime
                                                      without a title list (the original port, native-port)
+  shader_list.py rename <seed>.aliases.tsv <file>... rename the variants exported warm rows name through the aliases the
+                                                     seed's preparation wrote (listed variants another one serves)
   shader_list.py stats <list>                        check the list and count it
 """
 import json
@@ -200,6 +202,55 @@ class ShaderList:
                 f'{kinds["S"]} S, {kinds["C"]} C, {kinds["R"]} R, {kinds["B"]} B ({title} for the title screen)')
 
 
+NAME = 80   # nvn_pso_skey.h pso_skey: char vs[80], fs[80] lead the pipeline key, each a NUL-padded "<variant>_b"
+
+
+def load_aliases(path):
+    """<seed>.aliases.tsv (prepare_shader_seed.py write_aliases): variant -> the variant the seed carries in its place."""
+    aliases = {}
+    for line in Path(path).read_text().splitlines():
+        old, new = line.split('\t')
+        if not (VARIANT.match(old+'_b') and VARIANT.match(new+'_b')):
+            raise ValueError(f'{path}: not an alias row: {line!r}')
+        aliases[old] = new
+    return aliases
+
+
+def rename_row(line, aliases):
+    """A warm row with the variants it names renamed through aliases (S / C: the variant; R / B: the two names in the
+    pipeline key), anything else as it is."""
+    fields = line.split('\t')
+    def name(v):   # "<variant>_b"
+        return aliases.get(v[:-2], v[:-2])+'_b' if v.endswith('_b') else v
+    if fields[0] in ('S', 'C') and len(fields) >= 2:
+        fields[1] = name(fields[1])
+    elif fields[0] in ('R', 'B') and len(fields) >= 2 and PIPELINE.match(fields[1]) and len(fields[1]) >= 4*NAME:
+        key = bytearray.fromhex(fields[1])
+        for at in (0, NAME):
+            old = bytes(key[at:at+NAME]).split(b'\0')[0].decode('ascii', 'replace')
+            new = name(old)
+            if new != old:
+                if len(new) >= NAME:
+                    raise ValueError(f'variant name {new} does not fit a pipeline key')
+                key[at:at+NAME] = new.encode().ljust(NAME, b'\0')
+        fields[1] = key.hex()
+    return '\t'.join(fields)
+
+
+def rename(text, aliases):
+    """An exported warm-up list (or a seed's pso_manifest.tsv) with its variants renamed; a row renamed into one it
+    already has is dropped."""
+    out, seen = [], set()
+    for line in text.splitlines():
+        row = rename_row(line, aliases) if line and not line.startswith('#') else line
+        if row and not row.startswith('#'):
+            if row in seen:
+                continue
+            seen.add(row)
+        out.append(row)
+    return ''.join(line+'\n' for line in out)
+
+
 def main(argv):
     if argv[:1] == ['merge'] and len(argv) >= 3:
         title = argv[1] == '--title'
@@ -221,6 +272,14 @@ def main(argv):
         Path(argv[3]).write_text(lst.export('t', source=list_name(argv[1])))
     elif argv[:1] == ['export'] and len(argv) == 3:
         Path(argv[2]).write_text(ShaderList.load(argv[1]).export('t', 'm', source=list_name(argv[1])))
+    elif argv[:1] == ['rename'] and len(argv) >= 3:
+        aliases = load_aliases(argv[1])
+        for path in argv[2:]:
+            text = Path(path).read_text()
+            renamed = rename(text, aliases)
+            if renamed != text:   # often a clone of the exported file: written anew, not through the shared blocks
+                Path(path).unlink()
+                Path(path).write_text(renamed)
     elif argv[:1] == ['stats'] and len(argv) == 2:
         lst = ShaderList.load(argv[1])
         lines = [l for l in Path(argv[1]).read_text().splitlines() if l and not l.startswith('#')]

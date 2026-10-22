@@ -1279,6 +1279,10 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
         except (ValueError, KeyError, OSError, TypeError) as error:
             raise BuildError(f'invalid prepared startup shader seed: {error}') from None
         copy_tree(seed, res/'build/shader-seed')
+        aliases = seed.with_name(seed.name+'.aliases.tsv')   # listed variants the seed carries under another name
+        if aliases.is_file():
+            run([tree/'.venv/bin/python', 'scripts/shader_list.py', 'rename', aliases, res/'build/pso_manifest.tsv',
+                 res/'build/pso_title.tsv'], logs/'shader-list-rename.log', cwd=tree)
         for src in sorted(seed.glob('*.metal')):   # each named in the manifest, its hash just checked
             lib = tree/f'build/shader-libs/{report["files"][src.name]}.metallib'
             if lib.is_file():

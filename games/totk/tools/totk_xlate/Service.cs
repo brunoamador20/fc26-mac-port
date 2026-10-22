@@ -108,6 +108,76 @@ static class ShaderService
         return m.Success ? FloorDiv(ParseHex(m.Groups[1].Value) - 8, 2) : -1;
     }
 
+    static readonly Regex TexDecl = new(@"\b(?:texture\w+|depth\w+)<float>\s+(\w+)\s*\[\[id\(\d+\)\]\]");
+
+    /// NVN texture slots of the textures the MSL uses only through sample_compare / gather_compare (every use is a compare,
+    /// and there is at least one): the game's shadow maps, which are always depth textures.
+    static HashSet<long> CompareOnlySlots(string src)
+    {
+        var slots = new HashSet<long>();
+        string[] lines = src.Split('\n');
+        foreach (Match m in TexDecl.Matches(src))
+        {
+            string name = m.Groups[1].Value;
+            long slot = TexSlotOfName(name);
+            if (slot < 0) continue;
+            var use = new Regex(@"\b" + Regex.Escape(name) + @"\b");
+            int uses = 0; bool other = false;
+            foreach (string line in lines)
+            {
+                if (!use.IsMatch(line) || line.Contains("[[id(", StringComparison.Ordinal)) continue;
+                uses++;
+                if (!line.Contains("_compare(", StringComparison.Ordinal)) { other = true; break; }
+            }
+            if (uses > 0 && !other) slots.Add(slot);
+        }
+        return slots;
+    }
+
+    static readonly Regex AttrDecl = new(@"\b\w+\s+(\w+)\s*\[\[attribute\((\d+)\)\]\]");
+    static readonly Regex Ssa = new(@"\b_\d+\b");
+
+    /// location -> "uint" | "float" for every vertex input: "uint" when every value loaded from it is only ever bitcast to
+    /// an integer, converted with int() / uint(), or used as an index (the game binds an integer vertex format there:
+    /// 834 of 837 integer attributes the Mac translated by 2026-10-22, the other 3 mixed in a float use; no integer
+    /// attribute was ever used as float only). A value with any float use, or an input read any other way, is "float".
+    static Dictionary<string, string> InferAttributeTypes(string src)
+    {
+        var result = new Dictionary<string, string>();
+        string[] lines = src.Split('\n');
+        // where each SSA value is used (its defining line excluded)
+        var usedIn = new Dictionary<string, List<string>>();
+        foreach (string line in lines)
+        {
+            Match def = Regex.Match(line, @"^\s*\w+\s+(_\d+)\s*=");
+            string defined = def.Success ? def.Groups[1].Value : null;
+            foreach (Match t in Ssa.Matches(line))
+            {
+                if (t.Value == defined) continue;
+                if (!usedIn.TryGetValue(t.Value, out var l)) usedIn[t.Value] = l = new List<string>();
+                l.Add(line);
+            }
+        }
+        foreach (Match m in AttrDecl.Matches(src))
+        {
+            string field = m.Groups[1].Value, loc = m.Groups[2].Value;
+            var load = new Regex(@"^\s*\w+\s+(_\d+)\s*=\s*(?:as_type<\w+>\()?in\." + field + @"\.[xyzw]\)?;\s*$");
+            var any = new Regex(@"\bin\." + field + @"\b");
+            bool intUse = false, floatUse = false;
+            foreach (string line in lines)
+            {
+                Match l = load.Match(line);
+                if (!l.Success) { if (any.IsMatch(line) && !line.Contains("[[attribute(", StringComparison.Ordinal)) floatUse = true; continue; }
+                string v = l.Groups[1].Value;
+                var intPat = new Regex(@"as_type<u?int>\(" + v + @"\)|\bu?int\(" + v + @"\)|\[" + v + @"\]");
+                if (usedIn.TryGetValue(v, out var uses))
+                    foreach (string u in uses) { if (intPat.IsMatch(u)) intUse = true; else floatUse = true; }
+            }
+            result[loc] = intUse && !floatUse ? "uint" : "float";
+        }
+        return result;
+    }
+
     static int CloseParen(string src, int i)   // index just past the ')' closing a call whose '(' ends at i (or src.Length)
     {
         int depth = 1;
@@ -324,6 +394,23 @@ static class ShaderService
         string spv = Path.Combine(outDir, variant + ".spv"), msl = Path.Combine(outDir, variant + "_b.metal");
         SpirvCross(spv, msl, "spirv-cross: ");
         string src = File.ReadAllText(msl);
+        JsonObject tex = GetObj(rq, "tex"), img = GetObj(rq, "img"), attr = GetObj(rq, "attr"), fout = GetObj(rq, "fout");
+        // Vertex inputs the request leaves unanswered (the prepared seed answers none) are typed by their use: an input
+        // the code only ever bitcasts to an integer or indexes with is an integer attribute (shader_variants.md). The
+        // translation is redone with those answers, so the result is the one an answered request gives.
+        if (stage == "vs")
+        {
+            bool again = false;
+            foreach (var kv in InferAttributeTypes(src))
+                if (!attr.ContainsKey(kv.Key) && kv.Value != "float") { job["attr"][kv.Key] = kv.Value; again = true; }
+            if (again)
+            {
+                Translate(job);
+                res = ReadRes(variant);
+                SpirvCross(spv, msl, "spirv-cross (inferred attributes): ");
+                src = File.ReadAllText(msl);
+            }
+        }
         bool softfloat64 = Fp64.IsMatch(src);
         if (softfloat64)
         {
@@ -335,9 +422,13 @@ static class ShaderService
             src = File.ReadAllText(msl);
             if (Fp64.IsMatch(src)) throw new RuntimeError("Ryujinx FP64 fallback still emitted Metal-unsupported double");
         }
-        JsonObject tex = GetObj(rq, "tex"), img = GetObj(rq, "img"), attr = GetObj(rq, "attr"), fout = GetObj(rq, "fout");
         var depthSlots = new HashSet<long>(tex.Where(kv => kv.Value is JsonValue v && v.GetValueKind() == JsonValueKind.String && v.GetValue<string>().EndsWith("_depth", StringComparison.Ordinal))
                                             .Select(kv => ParseInt(kv.Key)));
+        // A texture the code only ever compare-samples is a shadow map: declared depth whatever the request answers for
+        // it, so the variant does not depend on that slot (the runtime binds a depth placeholder when the slot holds no
+        // depth texture).
+        var compareOnly = CompareOnlySlots(src);
+        depthSlots.UnionWith(compareOnly);
         if (depthSlots.Count > 0)
             src = RewriteDepthTextures(src, depthSlots);
         src = MatchSwitchDepthSampling(src);
@@ -350,18 +441,25 @@ static class ShaderService
             .Select(m => (JsonNode)new JsonObject { ["location"] = ParseInt(m.Groups[2].Value), ["msl_type"] = m.Groups[1].Value }).ToArray());
         Match outStruct = Regex.Match(src, @"struct main0_out\s*\{(.*?)\};", RegexOptions.Singleline);
         var colors = new SortedSet<long>(Regex.Matches(outStruct.Success ? outStruct.Groups[1].Value : "", @"\[\[color\((\d+)\)\]\]").Select(m => ParseInt(m.Groups[1].Value)));
-        // Answers this translation depends on: queried texture / image slots, consumed vertex inputs, written colour outputs;
-        // every texture slot the MSL binds is a dependency too (a depth-format texture there changes the MSL).
+        // Answers this translation depends on: queried texture / image slots, consumed vertex inputs, written colour outputs.
+        // A texture slot the MSL binds without having queried its kind takes that kind from the sampling instruction, so
+        // only whether a depth-format texture sits there changes the MSL: "*" (any colour texture) or "*_depth". A slot
+        // only compare-sampled is declared depth whatever is bound and is no dependency (shader_variants.md).
         var usedSlots = new HashSet<long>(Regex.Matches(src, @"\b(texture\w+|depth\w+)<float>\s+(\w+)\s*\[\[id\(\d+\)\]\]").Select(m => TexSlotOfName(m.Groups[2].Value)));
         usedSlots.Remove(-1);
         var deps = new JsonObject { ["tex"] = new JsonObject(), ["img"] = new JsonObject(), ["attr"] = new JsonObject(), ["fout"] = new JsonObject() };
         IEnumerable<long> Ints(string key) => res.TryGetPropertyValue(key, out JsonNode a) && a is JsonArray arr ? arr.Select(Long) : Enumerable.Empty<long>();
-        foreach (long s in new SortedSet<long>(Ints("tex_queried").Concat(usedSlots)))
-            deps["tex"][s.ToString(CultureInfo.InvariantCulture)] = GetOr(tex, s.ToString(CultureInfo.InvariantCulture), "2d");
+        var queried = new HashSet<long>(Ints("tex_queried"));
+        foreach (long s in new SortedSet<long>(queried.Concat(usedSlots)))
+        {
+            string slot = s.ToString(CultureInfo.InvariantCulture);
+            if (queried.Contains(s)) deps["tex"][slot] = GetOr(tex, slot, "2d");
+            else if (!compareOnly.Contains(s)) deps["tex"][slot] = depthSlots.Contains(s) ? "*_depth" : "*";
+        }
         foreach (long s in Ints("img_queried"))
             deps["img"][s.ToString(CultureInfo.InvariantCulture)] = GetOr(img, s.ToString(CultureInfo.InvariantCulture), new JsonObject());
-        if (stage == "vs")
-            foreach (JsonNode v in vertexInputs) { string loc = Long(v["location"]).ToString(CultureInfo.InvariantCulture); deps["attr"][loc] = GetOr(attr, loc, "float"); }
+        if (stage == "vs")   // the answered type, or the one inferred from the code (job["attr"] holds both)
+            foreach (JsonNode v in vertexInputs) { string loc = Long(v["location"]).ToString(CultureInfo.InvariantCulture); deps["attr"][loc] = GetOr(job["attr"].AsObject(), loc, "float"); }
         if (stage == "ps")
             foreach (long c in colors) { string k = c.ToString(CultureInfo.InvariantCulture); deps["fout"][k] = GetOr(fout, k, "float"); }
         var refl = new JsonObject

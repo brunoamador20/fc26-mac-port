@@ -180,8 +180,8 @@ class ShaderKeyScope(unittest.TestCase):
                 seed.shader_key_scope(**values)
 
     def test_preparation_keeps_untranslated_and_located_keys_and_rebuilds_old_seed(self):
-        # A tiny service prepares one startup shader. The other inventory shader and verified locator need no startup
-        # variant but still belong to this game; filtering by the translated seed would incorrectly lose their cache.
+        # A tiny service prepares the shaders. One is a startup shader; the other inventory shader and the verified
+        # locator are translated for the default bind state too (all_default) and belong to this game either way.
         class Service:
             def __init__(self, *args, **kwargs):
                 self.stdin = self.stdout = self
@@ -215,7 +215,8 @@ class ShaderKeyScope(unittest.TestCase):
                 manifest = seed.prepare(romfs, output, translator, cross, '1.2.1', shared)
                 scope = json.loads((output/'shader-keys.json').read_text())
                 self.assertEqual(scope['keys'], sorted(row[0] for row in rows))
-                self.assertEqual((manifest['shaders'], manifest['discovered'], manifest['located']), (1, 3, 1))
+                self.assertEqual((manifest['shaders'], manifest['discovered'], manifest['located']), (3, 3, 1))
+                self.assertEqual(manifest['startup_shaders'], 1)
                 self.assertEqual(manifest['files']['shader-keys.json'], seed.digest((output/'shader-keys.json').read_bytes()))
                 self.assertEqual(seed.prepare(romfs, output, translator, cross, '1.2.1', shared), manifest)
                 self.assertEqual(inventory.call_count, 1)
@@ -249,6 +250,7 @@ class ShaderKeyScope(unittest.TestCase):
                     return
                 base = Path(request['code']).with_suffix('')
                 deps = {k: request[k] for k in ('tex', 'img', 'attr', 'fout')}
+                deps['tex'] = {'1': '2d', '2': '2d', **deps['tex']}   # as if the code queried the kind of slots 1 and 2
                 base.with_name(base.name+'_b.metal').write_text('// synthetic '+request['variant'])
                 base.with_name(base.name+'_b.json').write_text(json.dumps(
                     dict(chain=seed.CHAIN, stage=request['stage'], deps=deps)))
@@ -295,25 +297,50 @@ class ShaderKeyScope(unittest.TestCase):
             more = first+[(rows[1][0], self.deps(tex={'2': '3d'}))]
             calls = []
             _, asked, _ = self.prepare_with_service(root, root/'seed', first, inventory_calls=calls)
-            self.assertEqual(len(asked), 3)   # two default bind states and one listed
+            self.assertEqual(len(asked), 4)   # every shader's default bind state and one listed
             (root/'seed'/('f'*64+'-'+'0'*12+'_b.metal')).write_text('left from an older seed')   # removed, not kept
             manifest, asked, _ = self.prepare_with_service(root, root/'seed', more, inventory_calls=calls)
             self.assertEqual(asked, [rows[1][0]+'-'+seed.suffix({**seed.ANSWERS, 'tex': {'2': '3d'}})])
             self.assertEqual(calls, [1, 0])   # the RomFS was not scanned again
-            self.assertEqual(manifest['shaders'], 4)
+            self.assertEqual(manifest['shaders'], 5)
             # A fresh preparation of the longer list, with no caches, gives byte-identical files.
             fresh = root/'fresh'; fresh.mkdir()
             full, asked, _ = self.prepare_with_service(fresh, fresh/'seed', more)
-            self.assertEqual(len(asked), 4)
+            self.assertEqual(len(asked), 5)
             self.assertEqual(self.tree(root/'seed'), self.tree(fresh/'seed'))
             self.assertEqual(manifest['files'], full['files'])
+
+    def test_a_listed_state_another_variant_serves_is_not_translated_but_named_in_the_aliases(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            rows = list(seed.bnsh_shaders(bnsh()))
+            # slot 5 was never queried: the default variant serves a 3D texture there; slot 1 was, so a cube needs its own
+            listed = [(rows[0][0], self.deps(tex={'5': '3d'})), (rows[0][0], self.deps(tex={'1': 'cube'}))]
+            manifest, asked, _ = self.prepare_with_service(root, root/'seed', listed)
+            served = rows[0][0]+'-'+seed.suffix({**seed.ANSWERS, 'tex': {'5': '3d'}})
+            self.assertNotIn(served, asked)
+            self.assertIn(rows[0][0]+'-'+seed.suffix({**seed.ANSWERS, 'tex': {'1': 'cube'}}), asked)
+            aliases = (root/'seed.aliases.tsv').read_text().splitlines()
+            self.assertEqual(aliases, [served+'\t'+rows[0][0]+'-'+seed.SUFFIX])
+            self.assertEqual(manifest['shaders'], 4)
+
+    def test_deps_match_reads_wildcard_texture_kinds_and_unbound_vertex_inputs_as_the_runtime_does(self):
+        deps = {'tex': {'1': '*', '2': '*_depth', '3': '2d'}, 'attr': {'0': 'uint'}, 'fout': {}, 'img': {}}
+        self.assertTrue(seed.deps_match(deps, {'tex': {'1': 'cube', '2': '2darray_depth'}, 'attr': {'0': 'uint'}}))
+        self.assertTrue(seed.deps_match(deps, {'tex': {'2': '2d_depth'}}))              # unbound slot 1 and input 0
+        self.assertFalse(seed.deps_match(deps, {'tex': {'1': '2d_depth', '2': '2d_depth'}}))
+        self.assertFalse(seed.deps_match(deps, {'tex': {'2': '2d'}}))
+        self.assertFalse(seed.deps_match(deps, {'tex': {'2': '2d_depth', '3': '3d'}}))   # a queried kind still counts
+        self.assertFalse(seed.deps_match(deps, {'tex': {'2': '2d_depth'}, 'attr': {'0': 'float'}}))
+        self.assertEqual(seed.answers_for({'tex': {'1': '*', '2': '*_depth', '3': 'cube'}})['tex'],
+                         {'1': '2d', '2': '2d_depth', '3': 'cube'})
 
     def test_a_new_translator_empties_the_translation_cache(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             self.prepare_with_service(root, root/'seed')
             _, asked, _ = self.prepare_with_service(root, root/'seed', translator_text='another build')
-            self.assertEqual(len(asked), 2)
+            self.assertEqual(len(asked), 3)
 
     def test_failed_translations_are_remembered_and_unused_entries_dropped(self):
         with tempfile.TemporaryDirectory() as folder:

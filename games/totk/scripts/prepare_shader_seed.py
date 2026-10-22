@@ -36,12 +36,15 @@ YAZ0 = b'Yaz0'
 ANSWERS = dict(tex={}, img={}, attr={}, fout={})
 LIST = Path(__file__).resolve().parents[1]/'assets/shader_list.tsv'
 # Per game: the RomFS folders that hold shaders (None: every file), the packages whose shaders are translated for the
-# default bind state (the startup ones), the fewest startup shaders a seed may have.
+# default bind state (the startup ones), the fewest startup shaders a seed may have, and whether every shader found is
+# translated for the default bind state too (all_default; docs/shader-variants.md: since the translator takes texture
+# kinds from the instructions and vertex input types from their use, the default state serves almost every draw).
 GAMES = {
-    'totk': dict(folders=None, min_shaders=MIN_SHADERS, list=LIST),
+    'totk': dict(folders=None, min_shaders=MIN_SHADERS, list=LIST, all_default=True),
     'botw': dict(folders=('Pack/', 'Effect/', 'Event/', 'System/'), min_shaders=2000,
-                 list=Path(__file__).resolve().parents[2]/'botw/assets/shader_list.tsv'),
+                 list=Path(__file__).resolve().parents[2]/'botw/assets/shader_list.tsv', all_default=False),
 }
+DEFAULTS = dict(tex='2d', img={}, attr='float', fout='float')
 
 
 def suffix(answers):
@@ -49,6 +52,30 @@ def suffix(answers):
 
 
 SUFFIX = suffix(ANSWERS)
+
+
+def deps_match(deps, answers):
+    """Whether a variant translated with deps serves these answers: totk_shader_rt.m deps_match, which the runtime picks
+    variants with. "*" / "*_depth": any texture kind, without / with a depth format; an unanswered vertex input is unbound."""
+    for kind, default in DEFAULTS.items():
+        have = answers.get(kind, {})
+        for slot, want in deps.get(kind, {}).items():
+            if slot not in have and kind == 'attr':
+                continue
+            got = have.get(slot, default)
+            if want in ('*', '*_depth'):
+                if not isinstance(got, str) or got.endswith('_depth') != (want == '*_depth'):
+                    return False
+            elif got != want:
+                return False
+    return True
+
+
+def answers_for(deps):
+    """The bind state to translate a listed row with: its deps, a "*" slot answered as the plain 2D texture it stands for."""
+    answers = {**ANSWERS, **deps}
+    answers['tex'] = {slot: {'*': '2d', '*_depth': '2d_depth'}.get(kind, kind) for slot, kind in answers['tex'].items()}
+    return answers
 
 
 def digest(data):
@@ -565,16 +592,25 @@ def source_reader(romfs, modules, game='totk'):
     return read
 
 
-def plan(shaders, startup, listed):
-    """Translation jobs (key, answers, variant, why): the default bind state for every startup shader, then each bind
-    state the shared list names for a shader found in this game ('listed'). Listed states the default already produced
-    are dropped after translation (prepare), since only the translator knows a shader's deps."""
-    jobs = [(key, ANSWERS, key+'-'+SUFFIX, 'default') for key in sorted(startup)]
+def plan(shaders, startup, listed, all_default=False):
+    """Translation jobs (key, answers, variant, why): the default bind state for every startup shader (every shader found
+    with all_default), then each bind state the shared list names for a shader found in this game ('listed'). A listed
+    state a variant made before already serves is not translated (prepare), and one whose translation gives the deps of
+    an earlier variant is dropped, since only the translator knows a shader's deps."""
+    jobs = [(key, ANSWERS, key+'-'+SUFFIX, 'default') for key in sorted(shaders if all_default else startup)]
     for key, deps in sorted(listed):
         if key in shaders:
-            answers = {**ANSWERS, **json.loads(deps)}
+            answers = answers_for(json.loads(deps))
             jobs.append((key, answers, key+'-'+suffix(answers), 'listed'))
     return jobs
+
+
+def write_aliases(path, aliases):
+    """<seed>.aliases.tsv: each listed variant the seed does not carry, because a variant it does carry serves the same
+    bind state, and that variant. The packaging renames the warm-up rows through it (shader_list.py rename), since
+    rows recorded on a player's Mac name the variant translated there."""
+    path.with_name(path.name+'.tmp').write_text(''.join(f'{old}\t{new}\n' for old, new in sorted(aliases.items())))
+    path.with_name(path.name+'.tmp').replace(path)
 
 
 def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, modules=None, game='totk'):
@@ -613,7 +649,8 @@ def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, m
     extra = located({where for where in shared.locators if where[0] not in shaders}, source_reader(romfs, modules, game), game)
     shaders.update(extra)
     print(f'{len(extra)} more shaders read where the shared list locates them (agl .sharcb, game module)', flush=True)
-    jobs = plan(shaders, startup, listed)
+    jobs = plan(shaders, startup, listed, GAMES[game]['all_default'])
+    aliases = {}   # listed variant -> the variant serving its bind state (write_aliases)
     # One translator service per core. A shader's jobs (its default bind state, then its listed ones) run in order on
     # one service, because whether a listed job is translated and kept depends on that shader's earlier results; the
     # files each job writes are named after its own shader. The results are then taken in the order of `jobs`, so the
@@ -642,8 +679,12 @@ def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, m
                 for index in indices:
                     _, answers, variant, why = jobs[index]
                     stage, control, code, source = shaders[key]
-                    if why == 'listed' and json.dumps(answers, sort_keys=True, separators=(',', ':')) in mine:
-                        continue   # the default (or an earlier row) already gave exactly these deps
+                    if why == 'listed':   # a variant made already serves this bind state, as the runtime would pick it
+                        serving = next((v for d, v in mine.items() if deps_match(json.loads(d), answers)), None)
+                        if serving:
+                            with lock:
+                                aliases[variant] = serving
+                            continue
                     reply = cache.take(variant, staging)
                     reused = reply is not None
                     if not reused:
@@ -673,6 +714,8 @@ def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, m
                         if deps in mine:   # same deps as a variant already made: keep one
                             for name in (variant+'_b.metal', variant+'_b.json'):
                                 (staging/name).unlink(missing_ok=True)
+                            with lock:
+                                aliases[variant] = mine[deps]
                             continue
                         mine[deps] = variant
                         rows =[f'S\t{variant}_b\t'+str({'vs': 0, 'ps': 1, 'cs': 5}[stage])]
@@ -738,6 +781,7 @@ def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, m
                   files={p.name: cache.digest(p.name, p) if p.name in linked else digest(p.read_bytes())
                          for p in sorted(staging.iterdir()) if p.name in wanted_final})
     (staging/'seed-manifest.json').write_text(json.dumps(report, indent=2)+'\n')
+    write_aliases(output.with_name(output.name+'.aliases.tsv'), {old: new for old, new in aliases.items() if new in completed})
     if output.exists():
         shutil.rmtree(output)
     staging.rename(output)

@@ -239,11 +239,24 @@ static NSMutableArray *variants_of(NSString *shader) {
     g_variants[shader] = v;
     return v;
 }
+/* Whether a variant translated with deps serves these answers. A texture slot whose kind the translator took from the
+   sampling instruction records only whether a depth-format texture sits there: "*" (any other) or "*_depth"
+   (Service.cs, docs/shader-variants.md). A vertex input the answers leave out is unbound: the replay feeds it a constant
+   of the declared type (nvn_mtl.m pso_desc), so any variant serves it. prepare_shader_seed.py deps_match is the same. */
 static int deps_match(NSDictionary *deps, NSDictionary *ans) {
     NSDictionary *defaults = @{@"tex": @"2d", @"img": @{}, @"attr": @"float", @"fout": @"float"};
     for (NSString *kind in defaults) {
         NSDictionary *want = deps[kind], *have = ans[kind];
-        for (NSString *slot in want) { id h = have[slot] ?: defaults[kind]; if (![h isEqual:want[slot]]) return 0; }
+        for (NSString *slot in want) {
+            id w = want[slot], h = have[slot];
+            if (!h && [kind isEqualToString:@"attr"]) continue;
+            if (!h) h = defaults[kind];
+            if ([w isEqual:@"*"] || [w isEqual:@"*_depth"]) {
+                if (![h isKindOfClass:NSString.class] || [h hasSuffix:@"_depth"] != [w isEqual:@"*_depth"]) return 0;
+                continue;
+            }
+            if (![h isEqual:w]) return 0;
+        }
     }
     return 1;
 }

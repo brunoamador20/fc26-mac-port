@@ -116,6 +116,10 @@ def main():
     # Exported from the one shared shader list (games/totk/assets/shader_list.tsv, docs/shader-list.md).
     run([sys.executable,tree/'scripts/shader_list.py','export',tree/'assets/shader_list.tsv',logs/'pso_manifest.tsv',
          res/'shader-seed/pso_title.tsv'],tree,logs/'shader-list.log',env)
+    aliases=seed_src.with_name(seed_src.name+'.aliases.tsv')   # listed variants the seed carries under another name
+    if aliases.is_file():
+        run([sys.executable,tree/'scripts/shader_list.py','rename',aliases,res/'shader-seed/pso_title.tsv'],tree,
+            logs/'shader-list-rename.log',env)
     # Keep the player's first install self-contained; the app stores saves and writable shader cache in Documents.
     payload=tree/'build/ios-payload';shutil.rmtree(payload,ignore_errors=True);(payload/'Payload').mkdir(parents=True)
     copy_tree(app,payload/'Payload/TOTK.app')

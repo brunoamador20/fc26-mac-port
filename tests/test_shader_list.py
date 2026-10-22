@@ -30,6 +30,28 @@ class ShaderList(unittest.TestCase):
         self.assertEqual(r.returncode, 0 if good else 1, r.stderr)
         return r.stdout
 
+    def test_rename_moves_warm_rows_to_the_variants_the_seed_carries(self):
+        old, new = KEY+'-'+'1'*12, KEY+'-'+'2'*12
+        other = 'c'*64+'-'+'3'*12
+        def key(vs, fs):   # nvn_pso_skey.h: vs[80], fs[80], then the rest of the key
+            return (vs.encode().ljust(80, b'\0')+fs.encode().ljust(80, b'\0')+b'\x07'*40).hex()
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root/'seed.aliases.tsv').write_text(f'{old}\t{new}\n')
+            listed = root/'pso_manifest.tsv'
+            listed.write_text('# exported\n'
+                              f'S\t{old}_b\t1\n'
+                              f'S\t{new}_b\t1\n'                         # the same row once renamed: kept once
+                              f'R\t{key(other+"_b", old+"_b")}\n'
+                              f'B\t{key(old+"_b", other+"_b")}\t-\t0:0:0x1p-1,0x1p-1,0x1p-1,0x1p-1;\n'
+                              f'C\t{other}_b\n')
+            self.run_tool('rename', root/'seed.aliases.tsv', listed)
+            self.assertEqual(rows(listed), [f'S\t{new}_b\t1', f'R\t{key(other+"_b", new+"_b")}',
+                                             f'B\t{key(new+"_b", other+"_b")}\t-\t0:0:0x1p-1,0x1p-1,0x1p-1,0x1p-1;',
+                                             f'C\t{other}_b'])
+            (root/'bad.tsv').write_text('not\tan alias\n')
+            self.run_tool('rename', root/'bad.tsv', listed, good=False)
+
     def test_variants_are_the_shader_and_its_bind_state_not_a_variant_name(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder); out = root/'list.tsv'
