@@ -35,28 +35,13 @@ Update history:
 | Date | Platform | Update |
 |---|---|---|
 | Oct 21 | Mac | **Breath of the Wild 1.9.0** above 30 fps as 1.6.0: menus and the HUD at normal speed, physics steady, movies at their own 30 fps; docked play renders at native 1080p; keys 4 (21:9 ultrawide) and 5 (edge smoothing, MetalFX temporal) work on 1.9.0 |
-| Oct 21 | Mac | `TOTK_FIXED_RES=1` holds 1.4.3's dynamic resolution at 100 % (#122); the mouse cursor hides after 1.5 s idle in native full screen (#121); 16:10 UI layouts with `make_romfs_patches.py --aspect` (#123); a translation mod's UI archive is merged with the build's quick-menu edit instead of refusing to start (#134, #73) |
-| Oct 21 | Mac, iPhone, iPad | Vertex shaders with a custom sampler border colour get their own pipeline per colour, and a sampler that repeats on one axis no longer returns the border there (#148); Breath of the Wild's Magnesis and Stasis pick targets are written back to the CPU (#140); macOS 27 start-up reserves the guest regions separately when no single gap is left (#138); 4,648 new variants in the shared shader list |
-| Oct 21 | Mac, iPhone, iPad | When the game reads or writes part of a texture, only that region is converted, on the GPU, instead of the whole level on the CPU, which was behind long hitches on the Lanayru sky islands (#143) |
-| Oct 21 | Mac | With key 5 (edge smoothing, MetalFX temporal), ground decals no longer leave purple glows on hazy cliffs and lamps no longer pulse while standing still (#157) |
-| Oct 21 | Mac | Key 4 cycles 16:9 → fit to the window or display → 21:9. Fitting gives 16:10 on a MacBook in full screen (a little less at the sides; `TOTK_ASPECT_VERT=1` sees more above and below instead, 1.4.3, experimental: some UI effects such as the button-press effect sit off), 21:9 or 32:9 on an ultrawide; the HUD keeps its shape on all of them (#120) |
+| Oct 21 | Mac, iPhone, iPad | **Tears of the Kingdom**: steadier at 90 fps, and steadier frame rates when no shaders are cached at all |
 | Oct 20 | Mac | **Breath of the Wild 1.9.0** (early): a base NSP and the 1.9.0 update NSP build the same app, each DLC pack optional (`--dlc`); keys 2 and 3 work; both versions now run uncapped on a 120 Hz display too (measured on 1.9.0); since Oct 22 the uncapped mode goes up to 240 FPS on any display |
-| Oct 20 | iPhone, iPad | Sound plays with the silent switch on and comes back after a call, Siri or an alarm; the game follows the system language; a fresh install reaches the title screen (#97) |
-| Oct 20 | iPhone, iPad | First launch after installing shows the game in about 7 seconds instead of about 4½ minutes: the shaders that come with the app are read where they are, without checking or copying them again (iPhone 14) |
-| Oct 20 | Mac | Breath of the Wild above 30 fps: menus and the HUD at normal speed, physics steady, movies at their own speed; docked play renders at native 1080p (`TOTK_RENDER_RES=900` keeps 1600x900) (#103) |
-| Oct 20 | Mac | Faster app builds: files are cloned in one call and the 16 GB of game data is signed once (#100) |
-| Oct 20 | All | Shader translation update: vertex outputs a shader does not write start as (0, 0, 0, 1), which brings back missing markers and effects (#91), and shadow compares and depth reads match the Switch, which removes dark patches on the ground and walls and the dark halo behind Link (#89, #104). The first launch after updating translates shaders again, because the old cache is from the previous translation (on iPhone and iPad the old cache is removed) |
-| Oct 20 | Mac | High frame rates (all four versions): trampolines bounce above 100 FPS (#61), and hair and cloth sway at the right speed above 30 FPS (#79) |
-| Oct 20 | Mac | Key 5 smooths the stair-stepped edges of the 3D scene with MetalFX temporal anti-aliasing (1.4.3); `TOTK_ANISO=16` sharpens ground and wall textures seen at a grazing angle |
-| Oct 20 | Mac | The live FPS in the menu bar; key 1 gains an FPS-only state |
-| Oct 20 | Mac | Optional UI layouts for 21:9 and 32:9 displays with the HUD in the screen's corners (1.4.3, made from your own game files) |
-| Oct 20 | Mac | Background warm-up prepares only the shaders this version of the game uses (about half the time); `TOTK_WARM_ALL=1` warms the whole cache |
-| Oct 20 | Mac | Two memory leaks fixed for both games |
+| Oct 20 | Mac | **Tears of the Kingdom**: faster app builds |
 | Oct 20 | Mac | **Breath of the Wild 1.6.0** (early): a card image holding the base game, the update and the add-on content builds its own app with the same command; title, saves, the Great Plateau and the DLC packs work, keys 2 (frame interpolation) and 3 (MetalFX 2K) work |
 | Oct 20 | iPhone, iPad | The launcher adopts the UIScene lifecycle, so an IPA built with Xcode 27 starts on iOS 27 (which ends apps that still make their window in the app delegate) |
 | Oct 19 | Mac | Key 4 switches to a true 21:9 ultrawide view and back (1.2.1, 1.4.3); the HUD keeps its shape in the middle 16:9 |
 | Oct 19 | iPhone, iPad | Tested with 1.4.3: a fresh install shows the game from the first launch, without a played cache |
-| Oct 19 | iPhone, iPad | Touch controls laid out like a Switch controller, with every button and both sticks |
 | Oct 19 | All | The game notes the shaders the shared list lacks; on a Mac, every 500 it asks to send them in a [GitHub issue](https://github.com/ly05010419/MacNativeGames/issues/new?template=shader-list.yml) |
 | Oct 19 | All | One shared [shader list](docs/shader-list.md); the build reads every shader in the game data (15,266 prepared for 1.4.3) |
 | Oct 19 | Mac | 1.2.1 support (the most widely used update), with the same build command |
@@ -354,28 +339,13 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 | 日期 | 平台 | 更新 |
 |---|---|---|
 | 10 月 21 日 | Mac | **旷野之息 1.9.0** 30 帧以上和 1.6.0 一样：菜单和 HUD 速度正常、物理稳定、过场动画按自己的 30 帧播放；底座模式按原生 1080p 渲染；4 键（21:9 宽屏）和 5 键（边缘平滑，MetalFX 时间性）在 1.9.0 上也能用 |
-| 10 月 21 日 | Mac | `TOTK_FIXED_RES=1` 把 1.4.3 的动态分辨率固定在 100%（#122）；原生全屏时鼠标 1.5 秒不动就隐藏（#121）；`make_romfs_patches.py --aspect` 支持 16:10 界面布局（#123）；翻译模组的界面档案和构建自带的快捷菜单修改合并，不再拒绝启动（#134，#73） |
-| 10 月 21 日 | Mac、iPhone、iPad | 顶点着色器的自定义采样器边框色按颜色各建管线，单轴重复的采样器在该轴不再返回边框色（#148）；旷野之息磁力、静止的选取目标回写到 CPU（#140）；macOS 27 启动时没有整块空间就分开保留客体区域（#138）；公共着色器清单新增 4,648 条 |
-| 10 月 21 日 | Mac、iPhone、iPad | 游戏读写贴图的一部分时，只在 GPU 上转换那一块，不再在 CPU 上转换整层；拉聂尔一带空岛上的长卡顿就来自这里（#143） |
-| 10 月 21 日 | Mac | 开 5 键（边缘平滑，MetalFX 时间性）时，地面贴花不再在雾蒙蒙的山崖上留下紫色光斑，站着不动时灯也不再忽明忽暗（#157） |
-| 10 月 21 日 | Mac | 按 4 在 16:9 → 适配窗口或显示器 → 21:9 之间切换。适配时 MacBook 全屏是 16:10（两侧略少；`TOTK_ASPECT_VERT=1` 改为上下看到更多，1.4.3，实验性：按键特效等部分界面特效位置偏了），超宽屏是 21:9 或 32:9；HUD 在各种比例下都保持原形状（#120） |
+| 10 月 21 日 | Mac、iPhone、iPad | **王国之泪** 提高90帧稳定性，提高完全没有着色器时帧数稳定 |
 | 10 月 20 日 | Mac | **旷野之息 1.9.0**（早期）：本体 NSP + 1.9.0 更新 NSP 打成同一个 App，每个 DLC 内容包都可选（`--dlc`）；2 键和 3 键都能用；两个版本在 120 Hz 显示器上现在也不限帧（在 1.9.0 上测的）；10 月 22 日起不限帧在任何显示器上最高 240 帧 |
-| 10 月 20 日 | iPhone、iPad | 打开静音键也有声音，来电、Siri、闹钟之后声音会恢复；游戏跟随系统语言；全新安装能进标题画面（#97） |
-| 10 月 20 日 | iPhone、iPad | 安装后第一次启动约 7 秒出画面，原来要约 4 分半：随 App 的着色器直接原地读取，不再校验和复制（iPhone 14） |
-| 10 月 20 日 | Mac | 旷野之息 30 帧以上：菜单和 HUD 速度正常、物理稳定、过场动画按原速播放；底座模式按原生 1080p 渲染（`TOTK_RENDER_RES=900` 保持 1600x900）（#103） |
-| 10 月 20 日 | Mac | 打包更快：文件一次克隆，16 GB 游戏数据只签名一次（#100） |
-| 10 月 20 日 | 全部 | 着色器翻译更新：着色器没写的顶点输出从 (0, 0, 0, 1) 开始，找回了缺失的标记和特效（#91）；阴影比较和深度读取改成和 Switch 一样，去掉了地面、墙面的暗斑和林克身后的暗边（#89、#104）。更新后第一次启动会重新翻译着色器，因为旧缓存是上一版翻译的（iPhone、iPad 上旧缓存会被删掉） |
-| 10 月 20 日 | Mac | 高帧率（四个版本）：100 FPS 以上蹦床能弹起来（#61），30 FPS 以上头发和衣服摆动速度正常（#79） |
-| 10 月 20 日 | Mac | 按 5 用 MetalFX 时间性抗锯齿让 3D 画面边缘的锯齿变平滑（1.4.3）；`TOTK_ANISO=16` 让斜着看的地面、墙面纹理更清楚 |
-| 10 月 20 日 | Mac | 菜单栏显示实时帧率；1 键多了“只显示 FPS”一档 |
-| 10 月 20 日 | Mac | 可选的 21:9、32:9 界面布局，HUD 贴到屏幕四角（1.4.3，用你自己的游戏文件生成） |
-| 10 月 20 日 | Mac | 后台预热只准备这个版本游戏会用到的着色器（时间约减半）；`TOTK_WARM_ALL=1` 预热整个缓存 |
-| 10 月 20 日 | Mac | 修了两处两个游戏都有的内存泄漏|
+| 10 月 20 日 | Mac | **王国之泪** 打包更快|
 | 10 月 20 日 | Mac | **旷野之息 1.6.0**（早期）：本体 + 更新 + 追加内容合在一起的卡带镜像用同一条命令打成单独的 App；标题、存档、初始台地和 DLC 内容包都能用，2 键（补帧）和 3 键（MetalFX 2K）都能用 |
 | 10 月 20 日 | iPhone、iPad | 启动器改用 UIScene 生命周期：用 Xcode 27 构建的 IPA 能在 iOS 27 上启动（iOS 27 会结束仍在 app delegate 里创建窗口的 App） |
 | 10 月 19 日 | Mac | 按 4 切换真正的 21:9 超宽画面（1.2.1、1.4.3），HUD 保持原比例、在中间 16:9 区域 |
 | 10 月 19 日 | iPhone、iPad | 用 1.4.3 实测：全新安装、没有玩过的缓存，第一次启动就能看到游戏画面 |
-| 10 月 19 日 | iPhone、iPad | 触屏控件按 Switch 手柄排布，所有按键和两个摇杆都有 |
 | 10 月 19 日 | 全部 | 游戏会记下公共清单里还没有的着色器；Mac 上每攒够 500 个提醒一次用 [GitHub Issue](https://github.com/ly05010419/MacNativeGames/issues/new?template=shader-list.yml) 发送 |
 | 10 月 19 日 | 全部 | 所有平台共用一份[着色器清单](docs/shader-list.md)；打包时读取游戏数据里的全部着色器（1.4.3 准备 15,266 个） |
 | 10 月 19 日 | Mac | 支持 1.2.1（玩家最多的版本），构建命令不变 |
