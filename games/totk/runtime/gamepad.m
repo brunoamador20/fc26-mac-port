@@ -8,8 +8,10 @@
 #endif
 #include <math.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include "runtime.h"
 #include "gamepad_layout.h"   // face buttons by position (PlayStation, Xbox) or label (Nintendo)
 #include "controller_map.h"   // the player's button layout (controls.txt)
@@ -56,8 +58,46 @@ static int32_t stronger_axis(int32_t a, int32_t b) {
     return abs(b) > abs(a) ? b : a;
 }
 
+/* Controller type (gamepad_layout.h GAMEPAD_TYPE_*), key 6 on the Mac. Saved in controller-type.txt next to controls.txt
+   (TOTK_CONTROLS; a run without it, such as a test, neither reads nor writes one), so the pick holds for the next launch. */
+static _Atomic int controllerType = GAMEPAD_TYPE_AUTO;
+
+static int controller_type_path(char *out, size_t size) {
+    const char *controls = getenv("TOTK_CONTROLS");
+    if (!controls || !*controls) return 0;
+    const char *slash = strrchr(controls, '/');
+    int dir = slash ? (int)(slash - controls) : 0;
+    int n = slash ? snprintf(out, size, "%.*s/controller-type.txt", dir, controls) : snprintf(out, size, "controller-type.txt");
+    return n > 0 && (size_t)n < size;
+}
+
+static void load_controller_type(void) {
+    char path[4096], word[64] = {0};
+    if (!controller_type_path(path, sizeof path)) return;
+    FILE *f = fopen(path, "r");
+    if (!f) return;   /* never picked: auto */
+    size_t n = fread(word, 1, sizeof word - 1, f);
+    fclose(f);
+    word[n] = 0;
+    int type = gamepad_type_parse(word);
+    if (type < 0) { fprintf(stderr, "[totk-input] %s: not a controller type (auto, xbox, playstation, switch); using auto\n", path); return; }
+    atomic_store(&controllerType, type);
+    fprintf(stderr, "[totk-input] controller type: %s (%s)\n", gamepad_type_name(type), path);
+}
+
+static void save_controller_type(int type) {
+    char path[4096], temp[4200];
+    if (!controller_type_path(path, sizeof path)) return;
+    snprintf(temp, sizeof temp, "%s.tmp", path);
+    FILE *f = fopen(temp, "w");
+    int ok = f && fprintf(f, "%s\n", gamepad_type_name(type)) > 0;
+    if (f && fclose(f)) ok = 0;
+    if (ok && rename(temp, path)) ok = 0;
+    if (!ok) { fprintf(stderr, "[totk-input] could not save the controller type to %s; it holds until the game closes\n", path); unlink(temp); }
+}
+
 static int face_by_position(GCController *controller) {
-    return gamepad_face_by_position(controller.productCategory.UTF8String, controller.vendorName.UTF8String);
+    return gamepad_type_face_by_position(atomic_load(&controllerType), controller.productCategory.UTF8String, controller.vendorName.UTF8String);
 }
 
 /* The physical buttons held, bit i = controller_physical_names[i]; the face buttons by where they sit
@@ -333,10 +373,39 @@ static void attach_gamepad(GCController *controller) {
     refresh_gamepads();
 }
 
+/* Key 6 (runtime/input.c): the next type (auto -> Xbox -> PlayStation -> Switch); the held buttons are read again at once. */
+int runtime_gamepad_type_cycle(void) {
+    int type = gamepad_type_next(atomic_load(&controllerType));
+    atomic_store(&controllerType, type);
+    save_controller_type(type);
+    fprintf(stderr, "[totk-input] controller type: %s (key 6)\n", gamepad_type_name(type));
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (GCController *controller in GCController.controllers)
+            if (controller.extendedGamepad)
+                fprintf(stderr, "[totk-input] %s: face buttons by %s\n", (controller.vendorName ?: @"unknown").UTF8String,
+                        face_by_position(controller) ? "position" : "label");
+        refresh_gamepads();
+    });
+    return type;
+}
+
+/* For the HUD (main thread): the picked type; *detected = what auto takes the first connected controller for, -1 none. */
+int runtime_gamepad_type(int *detected) {
+    int found = -1;
+    for (GCController *controller in GCController.controllers)
+        if (controller.extendedGamepad) { found = gamepad_type_detect(controller.productCategory.UTF8String, controller.vendorName.UTF8String); break; }
+#if TARGET_OS_OSX
+    if (found < 0 && hidPad.present) found = GAMEPAD_TYPE_SWITCH;   /* the generic HID pads are Switch-style */
+#endif
+    if (detected) *detected = found;
+    return atomic_load(&controllerType);
+}
+
 void runtime_gamepad_start(void) {
     if (started) return;
     started = YES;
     load_controller_map();
+    load_controller_type();
     NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
     [center addObserverForName:GCControllerDidConnectNotification object:nil queue:NSOperationQueue.mainQueue
                    usingBlock:^(NSNotification *notification) { attach_gamepad(notification.object); }];
