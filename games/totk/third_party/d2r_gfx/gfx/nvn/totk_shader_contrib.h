@@ -45,23 +45,28 @@ static inline NSMutableSet<NSString *> *totk_contrib_read(NSString *path) {
     return rows;
 }
 
+/* Where the last reminder's row count (or "never") is kept: a hidden file beside the contribution file,
+   .<name>.reminded, so a player's folder shows only the files to send (the project folder's shader-list-contribution/). */
+static inline NSString *totk_contrib_state(NSString *path) {
+    return [path.stringByDeletingLastPathComponent stringByAppendingPathComponent:[NSString stringWithFormat:@".%@.reminded", path.lastPathComponent]];
+}
 /* The reminder is due when the file holds TOTK_CONTRIB_STEP rows more than at the last one (<file>.reminded), unless the
    player chose "Don't remind me again" ("never" there). Returns the row count then, else 0. */
 static inline NSUInteger totk_contrib_due(NSString *path) {
     if (!path) return 0;
-    NSString *last = [NSString stringWithContentsOfFile:[path stringByAppendingString:@".reminded"] encoding:NSUTF8StringEncoding error:nil];
+    NSString *last = [NSString stringWithContentsOfFile:totk_contrib_state(path) encoding:NSUTF8StringEncoding error:nil];
     if ([last hasPrefix:@"never"]) return 0;
     NSUInteger rows = totk_contrib_read(path).count;
     NSUInteger at = last ? (NSUInteger)strtoull(last.UTF8String, NULL, 10) : 0;
     return rows >= at + TOTK_CONTRIB_STEP ? rows : 0;
 }
 static inline void totk_contrib_reminded(NSString *path, NSUInteger rows) {
-    [[NSString stringWithFormat:@"%lu\n", (unsigned long)rows] writeToFile:[path stringByAppendingString:@".reminded"]
+    [[NSString stringWithFormat:@"%lu\n", (unsigned long)rows] writeToFile:totk_contrib_state(path)
                                                                  atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 /* "Don't remind me again": no more reminders for this file. The game still notes the shaders. */
 static inline void totk_contrib_never(NSString *path) {
-    [@"never\n" writeToFile:[path stringByAppendingString:@".reminded"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [@"never\n" writeToFile:totk_contrib_state(path) atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
 /* Compact JSON with keys in code-point order, as scripts/shader_list.py canonical() writes it (Python's json.dumps with

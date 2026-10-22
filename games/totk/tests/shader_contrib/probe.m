@@ -12,7 +12,7 @@ int main(int argc, char **argv) {
         if (argc != 2 && !(argc == 3 && !strcmp(argv[2], "noseed"))) return 2;
         NSString *path = @(argv[1]);
         [NSFileManager.defaultManager removeItemAtPath:path error:nil];
-        [NSFileManager.defaultManager removeItemAtPath:[path stringByAppendingString:@".reminded"] error:nil];
+        [NSFileManager.defaultManager removeItemAtPath:totk_contrib_state(path) error:nil];
         setenv("TOTK_SHADER_CONTRIB", argv[1], 1);
         if (argc == 3) {
             setenv("TOTK_SHADER_SEED", "off", 1);

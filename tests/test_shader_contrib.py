@@ -115,10 +115,23 @@ class MacReminderForDevicesTests(unittest.TestCase):
         self.assertFalse(watch.due(99, 0)); self.assertTrue(watch.due(100, 0))
         self.assertFalse(watch.due(199, 100)); self.assertTrue(watch.due(200, 100))
 
+    def test_a_device_s_rows_are_merged_into_the_one_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d); phone, mine = d / 'phone.txt', d / 'shader-list-contribution.txt'
+            mine.write_text('# Mac\nR\tab\nV\t' + 'a' * 64 + '\t{}\n')
+            phone.write_text('# phone\nR\tab\nR\tcd\nR\tcd\nB\tcd\t-\t-\n')
+            self.assertEqual(watch.merge_rows(phone, mine), 4)      # ab and the V row, then cd and its B row once
+            self.assertEqual(watch.merge_rows(phone, mine), 4)      # nothing new the second time
+            fresh = d / 'new.txt'
+            self.assertEqual(watch.merge_rows(phone, fresh), 3)
+            self.assertTrue(fresh.read_text().startswith('# '))
+
     def test_agent_runs_check_every_ten_minutes_with_the_xcode(self):
         plist = watch.agent_plist('/usr/bin/python3', Path('/x/shader_contrib_watch.py'), '/X/Xcode.app/Contents/Developer')
         self.assertEqual(plist['ProgramArguments'], ['/usr/bin/python3', '/x/shader_contrib_watch.py', 'check'])
         self.assertEqual(plist['StartInterval'], 600)
+        stored = watch.agent_plist('/usr/bin/python3', Path('/x/w.py'), '/X', Path('/Users/me/MacNativeGames/shader-list-contribution'))
+        self.assertEqual(stored['ProgramArguments'][2:], ['check', '--store', '/Users/me/MacNativeGames/shader-list-contribution'])   # the clone
         self.assertEqual(plist['EnvironmentVariables'], {'DEVELOPER_DIR': '/X/Xcode.app/Contents/Developer'})
         self.assertFalse(plist['RunAtLoad'])
 

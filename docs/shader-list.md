@@ -75,8 +75,11 @@ its deps as `prepare_shader_seed.py` names a list row (`totk_contrib_listed_name
 
 On a Mac, every 100 new rows of either kind (Breath of the Wild: 500) the launcher asks once, before the game starts, whether to send the file. An iPhone or
 iPad never asks during play: while it is connected to the Mac that built its app (cable or the same Wi-Fi),
-`games/totk/ios/tools/shader_contrib_watch.py` (a LaunchAgent the iOS build installs) copies the file to the Mac every
-10 minutes at most and asks there, every 100 new rows per device. "Remind me next time" waits for the next 100;
+`games/totk/ios/tools/shader_contrib_watch.py` (a LaunchAgent the iOS build installs) fetches the device's rows every
+10 minutes at most and adds the ones not there yet to the same file the Mac writes:
+`shader-list-contribution/shader-list-contribution.txt` in your clone (the build makes the folder; Breath of the Wild's
+is `shader-list-contribution-botw.txt`). One file for the Mac and every device, since the list does not tell platforms
+apart; the folder opens in Finder with each reminder, which comes every 100 new rows in that file. "Remind me next time" waits for the next 100;
 "Don't remind me again" stops the reminders for good (the file is still kept). "Send" opens the [shader list contribution](https://github.com/ly05010419/MacNativeGames/issues/new?template=shader-list.yml)
 issue form; drag the file into it. Later reminders come at 200, 300 and so on, so sending the whole file each time
 is fine: rows the list already has are skipped. The game never uploads anything by itself.
