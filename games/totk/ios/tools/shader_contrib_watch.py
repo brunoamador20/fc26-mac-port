@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Remind iPhone / iPad players on their Mac to send the shaders the shared list does not have yet.
+"""Remind iPhone / iPad players on their Mac to send the shaders and render pipelines the shared list does not have yet.
 
-The iOS app notes those shaders in Documents/shader-list-contribution.txt but never asks during play
+The iOS app notes them in Documents/shader-list-contribution.txt but never asks during play
 (third_party/d2r_gfx/gfx/nvn/totk_shader_contrib.h). While a device with the game is connected to this Mac (cable or the
 same network), `check` copies that file to ~/Library/Application Support/MacNativeGames/TOTK/ios-contributions/ and,
-every 50 new rows per device, asks once on the Mac to send it in a GitHub issue. When the GitHub CLI (gh) is installed and
+every 100 new rows (shaders and pipelines together) per device, asks once on the Mac to send it in a GitHub issue. When the GitHub CLI (gh) is installed and
 signed in, the question offers "Submit automatically" instead of "Remind me next time": that sends this file at once (a
 secret gist and an issue that links it), without the browser. `install` runs `check` every 10 minutes as a LaunchAgent
 (build_app.py --platform ios installs it); `uninstall` removes it.
@@ -21,7 +21,7 @@ import tempfile
 import time
 from pathlib import Path
 
-STEP = 50                      # as TOTK_CONTRIB_STEP in totk_shader_contrib.h
+STEP = 100                     # as TOTK_CONTRIB_STEP in totk_shader_contrib.h
 CHECK_EVERY = 10 * 60          # the LaunchAgent's interval
 PULL_EVERY = 30 * 60           # one copy per device at most this often
 ISSUE_URL = 'https://github.com/ly05010419/MacNativeGames/issues/new?template=shader-list.yml'
@@ -56,7 +56,7 @@ def game_bundle(apps):
 
 
 def contribution_rows(text):
-    return len({line for line in text.splitlines() if line.startswith('V\t')})
+    return len({line for line in text.splitlines() if line.startswith(('V\t', 'R\t', 'B\t'))})   # shaders and pipelines
 
 
 def due(rows, reminded):
@@ -75,14 +75,14 @@ def chinese():
 def message(rows, device, auto=False):
     """(title, text, the middle button, "never", "send"); with auto (gh ready) the middle button submits at once."""
     if chinese():
-        return ('期待你的贡献', f'你的 {device} 上有 {rows} 个着色器可以贡献：玩的时候遇到的、公共着色器清单里还没有的。'
-                f'它们只有着色器的标识，不含游戏内容、存档或个人信息。发到 GitHub 加进公共清单后，以后大家打包的 App 都会带上它们，'
+        return ('期待你的贡献', f'你的 {device} 上有 {rows} 条着色器和渲染管线可以贡献：玩的时候遇到的、公共着色器清单里还没有的。'
+                f'它们只有着色器和管线的标识，不含游戏内容、存档或个人信息。发到 GitHub 加进公共清单后，以后大家打包的 App 都会带上它们，'
                 f'玩到那里不再缺画面。\n\n'
                 + ('点“自动提交”会用这台 Mac 上登录的 GitHub 命令行（gh）直接提交，不用打开网页。' if auto else '')
                 + '点“发送”会打开 GitHub 的提交页面，并在访达里显示这个文件，把它拖进页面即可。',
                 '自动提交' if auto else '下次提醒', '不要提醒了', '发送')
-    return ('We would love your contribution', f'Your {device} has {rows} shaders to contribute: ones the game met that the '
-            f'shared shader list does not have yet. They are shader identifiers only: no game data, saves or personal '
+    return ('We would love your contribution', f'Your {device} has {rows} shaders and render pipelines to contribute: ones the game met that the '
+            f'shared shader list does not have yet. They are shader and pipeline identifiers only: no game data, saves or personal '
             f'information. Sent to GitHub and added to the shared list, they come with everyone\'s next build, and nothing '
             f'is missing there any more.\n\n'
             + ('"Submit automatically" sends it now with the GitHub CLI (gh) signed in on this Mac, without the browser. ' if auto else '')

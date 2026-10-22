@@ -31,22 +31,29 @@ int main(int argc, char **argv) {
         check([lines[3] isEqualToString:[NSString stringWithFormat:@"V\t%@\t{\"attr\":{\"0\":\"float\"},\"fout\":{},\"img\":{\"1\":{\"fmt\":\"r32f\",\"type\":\"2d\"}},\"tex\":{\"10\":\"3d\",\"9\":\"2d\"}}", key(1)]],
               "sorted compact deps, only tex / img / attr / fout");
         check(totk_contrib_read(path).count == 2 && totk_contrib_due(path) == 0, "two rows, no reminder yet");
-        for (unsigned i = 2; i < 49; i++) totk_contrib_add(key(i), deps);   // rows 3..49
-        check(totk_contrib_read(path).count == 49 && totk_contrib_due(path) == 0, "49 rows: not yet");
-        totk_contrib_add(key(49), deps);
-        check(totk_contrib_due(path) == 50, "50 rows: due");
-        totk_contrib_reminded(path, 50);
+        enum { S = TOTK_CONTRIB_STEP };
+        for (unsigned i = 2; i < S - 1; i++) totk_contrib_add(key(i), deps);   // rows 3..S-1
+        check(totk_contrib_read(path).count == S - 1 && totk_contrib_due(path) == 0, "S-1 rows: not yet");
+        totk_contrib_add(key(S - 1), deps);
+        check(totk_contrib_due(path) == S, "S rows: due");
+        totk_contrib_reminded(path, S);
         check(totk_contrib_due(path) == 0, "reminded: not again at once");
-        for (unsigned i = 50; i < 99; i++) totk_contrib_add(key(i), deps);   // rows 51..99
-        check(totk_contrib_due(path) == 0, "99 rows: the next step is not reached");
-        totk_contrib_add(key(99), deps);
-        check(totk_contrib_due(path) == 100, "100 rows: due again");
+        for (unsigned i = S; i < 2 * S - 1; i++) totk_contrib_add(key(i), deps);   // rows S+1..2S-1
+        check(totk_contrib_due(path) == 0, "2S-1 rows: the next step is not reached");
+        totk_contrib_add(key(2 * S - 1), deps);
+        check(totk_contrib_due(path) == 2 * S, "2S rows: due again");
         totk_contrib_never(path);
-        for (unsigned i = 100; i < 160; i++) totk_contrib_add(key(i), deps);
-        check(totk_contrib_due(path) == 0 && totk_contrib_read(path).count == 160, "never: still noted, never due");
+        for (unsigned i = 2 * S; i < 2 * S + 60; i++) totk_contrib_add(key(i), deps);
+        check(totk_contrib_due(path) == 0 && totk_contrib_read(path).count == 2 * S + 60, "never: still noted, never due");
+        NSString *pipe = [@"R\t" stringByAppendingString:[@"" stringByPaddingToLength:64 withString:@"ab" startingAtIndex:0]];
+        totk_contrib_add_line(pipe); totk_contrib_add_line(pipe);                      // a render pipeline: once
+        totk_contrib_add_line([[pipe stringByReplacingOccurrencesOfString:@"R\t" withString:@"B\t"]
+                               stringByAppendingString:@"\t-\t3:7:0x1p-1,0x1p-1,0x1p-1,0x1p-1;"]);   // its border recipe
+        check(totk_contrib_read(path).count == 2 * S + 62, "pipeline rows count with the shaders");
         unsetenv("TOTK_SHADER_CONTRIB");
         check(totk_contrib_due(nil) == 0, "no file: nothing due");
-        printf("{\"status\":\"%s\",\"probe\":\"shader-contrib\",\"checked\":%d,\"failures\":%d}\n", failures ? "fail" : "pass", checked, failures);
+        NSString *listed = totk_contrib_listed_name(key(7), @{@"tex": @{@"9": @"*", @"10": @"*_depth", @"3": @"cube"}, @"attr": @{@"6": @"uint"}, @"fout": @{@"0": @"float"}});
+        printf("{\"status\":\"%s\",\"probe\":\"shader-contrib\",\"checked\":%d,\"failures\":%d,\"listed\":\"%s\"}\n", failures ? "fail" : "pass", checked, failures, listed.UTF8String);
         return failures != 0;
     }
 }

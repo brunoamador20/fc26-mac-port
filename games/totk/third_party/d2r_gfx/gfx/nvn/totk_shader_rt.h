@@ -28,6 +28,9 @@ void totk_rt_urgent_stats(uint64_t *n, uint64_t *ns);   // urgent jobs done and 
 void totk_rt_set_ready_hook(void (*hook)(NSString *variant, int stage));
 // The variant totk_rt_variant would return when the cache index already names one; nil otherwise (never translates).
 NSString *totk_rt_variant_cached(NSString *shader, NSDictionary *answers);
+NSString *totk_rt_portable_variant(NSString *name);   // "<variant>_b" as another player's build names it (pipeline contributions)
+int totk_rt_contrib_on(void);                       // a contribution file is kept (TOTK_SHADER_CONTRIB set, seed on)
+void totk_rt_contrib_line(NSString *line);           // one row into the contribution file (totk_shader_contrib.h)
 void totk_rt_probe_index(NSString *shader, NSArray<NSDictionary *> *rows);   // probe-gfx only
 #endif
 #include <stdint.h>

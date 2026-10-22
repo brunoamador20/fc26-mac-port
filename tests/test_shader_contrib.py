@@ -10,6 +10,7 @@ from pathlib import Path
 TOTK = Path(__file__).resolve().parents[1] / 'games/totk'
 sys.path.insert(0, str(TOTK / 'scripts'))
 from shader_list import ShaderList, canonical  # noqa: E402
+from prepare_shader_seed import answers_for, suffix  # noqa: E402
 
 
 @unittest.skipUnless(shutil.which('xcrun'), 'needs the Xcode command line tools')
@@ -29,8 +30,11 @@ class ContributionFileTests(unittest.TestCase):
             self.assertTrue(rows and all(canonical(json.loads(deps)) == deps for _, _, deps in rows), 'deps as canonical() writes them')
             shared = ShaderList()
             shared.add_rows(contrib, 'm')
-            self.assertEqual(len(shared.variants), 160)
-            self.assertFalse(shared.warm)
+            self.assertEqual(len(shared.variants), 2 * 100 + 60)   # TOTK_CONTRIB_STEP 100
+            self.assertEqual([row[0] for row in shared.warm], ['R', 'B'])   # render pipelines merge with the shaders
+            deps = {'tex': {'9': '*', '10': '*_depth', '3': 'cube'}, 'attr': {'6': 'uint'}, 'fout': {'0': 'float'}}
+            self.assertEqual(json.loads(run.stdout)['listed'], f'{7:064x}-' + suffix(answers_for(deps)),
+                             'a pipeline names its shaders as prepare_shader_seed.py names list rows')
             noseed = subprocess.run([str(probe), str(contrib), 'noseed'], capture_output=True, text=True)
             self.assertEqual(noseed.returncode, 0, noseed.stderr)
             self.assertEqual(json.loads(noseed.stdout)['status'], 'pass')
@@ -41,7 +45,7 @@ if __name__ == '__main__':
     unittest.main()
 
 
-from collect_shader_issues import attachment_urls, contribution_rows  # noqa: E402
+from collect_shader_issues import attachment_urls, contribution_pipelines, contribution_rows  # noqa: E402
 
 
 class IssueCollectionTests(unittest.TestCase):
@@ -70,12 +74,15 @@ class IssueCollectionTests(unittest.TestCase):
             f'V\t{self.KEY_A}\t{{"tex":{{"9":"2d","10":"3d"}}}}',     # canonicalised
             f'V\t{self.KEY_A}\t{{"tex":{{"10":"3d","9":"2d"}}}}',     # the same row
             f'V\t{self.KEY_B}\t{{}}',
-            f'S\t{self.KEY_A}-0123456789ab_b\t0\tm',                  # warm rows are not taken from contributions
+            f'S\t{self.KEY_A}-0123456789ab_b\t0\tm',                  # shader libraries are not taken from contributions
             f'L\t{self.KEY_A}\tShader/x.bnsh\t0\t880\t100',            # nor locators
+            'R\tabcd', 'R\tabcd', 'B\tabcd\t-\t3:7:0x1p-1,0x1p-1,0x1p-1,0x1p-1;',   # render pipelines are (a row once)
+            'R\tnot hex', 'B\tabcd\t-\t-',
             'V\tnot-a-key\t{}', f'V\t{self.KEY_B}\t{{"local":[1]}}', f'V\t{self.KEY_B}\tnot json'])
         rows, dropped = contribution_rows(text)
         self.assertEqual(rows, {(self.KEY_A, '{"tex":{"10":"3d","9":"2d"}}'), (self.KEY_B, '{}')})
-        self.assertEqual(dropped, 5)
+        self.assertEqual(dropped, 7)
+        self.assertEqual(contribution_pipelines(text), [('R', 'abcd'), ('B', 'abcd', '-', '3:7:0x1p-1,0x1p-1,0x1p-1,0x1p-1;')])
 
 
 sys.path.insert(0, str(TOTK / 'ios/tools'))
@@ -102,11 +109,11 @@ class MacReminderForDevicesTests(unittest.TestCase):
         self.assertEqual(watch.game_bundle({'result': {'apps': [{'name': 'TOTK', 'bundleIdentifier': 'org.macnativegames.totk'}]}}), 'org.macnativegames.totk')
         self.assertIsNone(watch.game_bundle({'result': {'apps': [{'name': 'Other', 'bundleIdentifier': 'x.y'}]}}))
 
-    def test_rows_and_every_50(self):
-        text = '# header\n' + ''.join(f'V\t{i:064x}\t{{}}\n' for i in range(3)) + f'V\t{0:064x}\t{{}}\n'
-        self.assertEqual(watch.contribution_rows(text), 3)
-        self.assertFalse(watch.due(49, 0)); self.assertTrue(watch.due(50, 0))
-        self.assertFalse(watch.due(99, 50)); self.assertTrue(watch.due(100, 50))
+    def test_rows_and_every_100(self):
+        text = '# header\n' + ''.join(f'V\t{i:064x}\t{{}}\n' for i in range(3)) + f'V\t{0:064x}\t{{}}\n' + 'R\tab\n' + 'R\tab\n'
+        self.assertEqual(watch.contribution_rows(text), 4)   # shaders and pipelines together
+        self.assertFalse(watch.due(99, 0)); self.assertTrue(watch.due(100, 0))
+        self.assertFalse(watch.due(199, 100)); self.assertTrue(watch.due(200, 100))
 
     def test_agent_runs_check_every_ten_minutes_with_the_xcode(self):
         plist = watch.agent_plist('/usr/bin/python3', Path('/x/shader_contrib_watch.py'), '/X/Xcode.app/Contents/Developer')

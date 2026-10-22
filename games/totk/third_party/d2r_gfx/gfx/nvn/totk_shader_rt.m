@@ -331,17 +331,45 @@ static NSMutableDictionary *variant_request(NSString *shader, int stage, const u
    do not serve (user 2026-10-22): the shader's default variant is there and this is another one. A shader the build did
    not find or could not translate is left out too: the list cannot make a build find it. Older seeds (Breath of the
    Wild's): every new variant, as before. g_rt_lock held. */
-static BOOL contrib_wanted(NSString *shader, NSString *variant) {
-    if (!g_seed_all_default) return YES;
+static NSString *default_variant(NSString *shader) {   // the default bind state's name, as prepare_shader_seed.py SUFFIX (no answers at all)
     static NSString *suffix;
-    if (!suffix) {   // the default bind state's name, as prepare_shader_seed.py SUFFIX (no answers at all)
+    if (!suffix) {
         uint8_t md[32]; NSData *ad = [json_string(@{@"tex": @{}, @"img": @{}, @"attr": @{}, @"fout": @{}}) dataUsingEncoding:NSUTF8StringEncoding];
         CC_SHA256(ad.bytes, (CC_LONG)ad.length, md); suffix = [@"-" stringByAppendingString:hex(md, 6)];
     }
-    NSString *builtin = [shader stringByAppendingString:suffix];
+    return [shader stringByAppendingString:suffix];
+}
+static BOOL contrib_wanted(NSString *shader, NSString *variant) {
+    if (!g_seed_all_default) return YES;
+    NSString *builtin = default_variant(shader);
     if ([variant isEqualToString:builtin]) return NO;
     for (NSDictionary *v in variants_of(shader)) if ([v[@"variant"] isEqual:builtin]) return YES;
     return NO;
+}
+/* nvn_mtl.m pso_contribute: the name a pipeline row gives "<variant>_b" so that another player's build has that variant.
+   A variant the seed makes from the code alone keeps its name (the default bind state; the depth-bound one of a shadow-map
+   shader, named after its depth slots only); any other is named as a build names a list row with its deps
+   (totk_contrib_listed_name), which the row the same variant added to the contribution file makes. */
+NSString *totk_rt_portable_variant(NSString *name) {
+    if (name.length < 66 || ![name hasSuffix:@"_b"]) return name;
+    NSString *variant = [name substringToIndex:name.length - 2], *shader = [variant substringToIndex:64];
+    if ([variant isEqualToString:default_variant(shader)]) return name;
+    pthread_mutex_lock(&g_rt_lock);
+    NSDictionary *deps = nil;
+    for (NSDictionary *v in variants_of(shader)) if ([v[@"variant"] isEqual:variant]) { deps = v[@"deps"]; break; }
+    pthread_mutex_unlock(&g_rt_lock);
+    if (![deps isKindOfClass:NSDictionary.class]) return name;
+    NSMutableDictionary *depth = [NSMutableDictionary dictionary];
+    NSDictionary *tex = [deps[@"tex"] isKindOfClass:NSDictionary.class] ? deps[@"tex"] : @{};
+    for (NSString *slot in tex) if ([tex[slot] isEqual:@"*_depth"]) depth[slot] = @"*_depth";
+    if (depth.count && [variant isEqualToString:totk_contrib_listed_name(shader, @{@"tex": depth})]) return name;
+    return [totk_contrib_listed_name(shader, deps) stringByAppendingString:@"_b"];
+}
+int totk_rt_contrib_on(void) { return totk_contrib_path() != nil; }
+void totk_rt_contrib_line(NSString *line) {   // totk_contrib_add_line under the lock its other writers hold
+    pthread_mutex_lock(&g_rt_lock);
+    totk_contrib_add_line(line);
+    pthread_mutex_unlock(&g_rt_lock);
 }
 /* No translator on the phone (Python + .NET + SPIRV-Cross): the variant cache is translated on the Mac and copied over.
    A miss records the complete request (with the guest code bytes) under shader-requests/ for ios/tools/fill_shaders.py.
