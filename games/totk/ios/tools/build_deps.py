@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Build the audio and VP9 static libraries for a physical iOS device."""
-import os, subprocess, sys
+import os, subprocess, sys, tempfile
 from pathlib import Path
 
 out = Path(sys.argv[1]).resolve(); out.mkdir(parents=True, exist_ok=True)
+# libvpx's configure splits its compiler path and flags on spaces: when the work folder has one
+# (e.g. "Tears of the Kingdom/TOTK_build"), sources and build trees go under a space-free root instead.
+root = out if ' ' not in str(out) else Path(tempfile.gettempdir()).resolve()/'macnativegames-ios-deps'
 sdk = subprocess.check_output(['xcrun','--sdk','iphoneos','--show-sdk-path'], text=True).strip()
-src = out/'src'; build = out/'build'; src.mkdir(exist_ok=True); build.mkdir(exist_ok=True)
-sdklink=out/'sdkroot/Platforms/iPhoneOS.platform/Developer/SDKs'/Path(sdk).name
+src = root/'src'; build = root/'build'; src.mkdir(parents=True, exist_ok=True); build.mkdir(exist_ok=True)
+sdklink=root/'sdkroot/Platforms/iPhoneOS.platform/Developer/SDKs'/Path(sdk).name
 if sdklink.is_symlink(): sdklink.unlink()
 sdklink.parent.mkdir(parents=True,exist_ok=True)
 if not sdklink.exists(): sdklink.symlink_to(sdk)
