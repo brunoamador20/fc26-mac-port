@@ -358,46 +358,97 @@ static void variant_record(NSString *shader, NSDictionary *rq, NSDictionary *ref
 }
 
 /* Background translation (Mac, user 2026-10-21: new shaders are prepared the way games stream their content): a variant
-   the caller does not wait for (may_defer) goes to one of RT_BG_WORKERS translator services of their own, and nil is
+   the caller does not wait for (may_defer) goes to one of rt_bg_workers() translator services of their own, and nil is
    returned; nvn_mtl.m skips the draws that need it. One job per shader at a time: while it is queued or running, a
    request for the same shader defers again. One that may not wait for long (may_defer 0) takes a job still queued back
    and translates on the spot (a new area can queue dozens before it), or waits for a running one and looks again, since
    its deps may already cover these answers. The worker also compiles the Metal library (g_rt_ready_hook), then records
-   the variant and moves g_rt_gen. */
-#define RT_BG_WORKERS 2
+   the variant and moves g_rt_gen.
+   Urgent jobs (may_defer 2, nvn_mtl.m shader_predict_rest): the variants that draws further on in this submission cannot
+   go without. They run at once on rt_urgent_workers() services of their own (4; the background line waits meanwhile,
+   TOTK_RT_URGENT_FIRST=0 lets it run on), a queued job of the same shader taken out of
+   its line, so those draws wait in parallel instead of translating and compiling one after another on the submit
+   thread behind the background line (entering an area: 157 libraries, 6.3 s on the submit thread, 2026-10-22). */
+#define RT_BG_MAX 8
+#define RT_BG_DEFAULT 4   // 2 left draws waiting to be shown for 13-15 s after flying into an area; 4 halved the skipped draws (2026-10-22)
+/* Background translator services (each its own translator process and serial queue): TOTK_RT_BG_WORKERS, 1-8. */
+static int rt_bg_workers(void) {
+    static int n;
+    if (!n) { const char *e = getenv("TOTK_RT_BG_WORKERS"); n = e ? atoi(e) : RT_BG_DEFAULT; n = n < 1 ? 1 : n > RT_BG_MAX ? RT_BG_MAX : n; }
+    return n;
+}
+#define RT_URGENT_MAX 8
+/* Urgent translator services: TOTK_RT_URGENT_WORKERS, 1-8. */
+static int rt_urgent_workers(void) {
+    static int n;
+    if (!n) { const char *e = getenv("TOTK_RT_URGENT_WORKERS"); n = e ? atoi(e) : 4; n = n < 1 ? 1 : n > RT_URGENT_MAX ? RT_URGENT_MAX : n; }
+    return n;
+}
+static _Atomic int g_rt_urgent_busy;   // urgent jobs queued or running: the background line does not start new jobs meanwhile
 enum { RT_JOB_QUEUED, RT_JOB_RUNNING, RT_JOB_TAKEN };
-static NSMutableDictionary<NSString *, NSMutableArray *> *g_rt_pending;   // shader -> its job's state, @[@RT_JOB_*] (g_rt_lock)
+static NSMutableDictionary<NSString *, NSMutableArray *> *g_rt_pending;   // shader -> its job: @[@RT_JOB_*, request, @stage, @existed] (g_rt_lock)
+static _Atomic uint64_t g_rt_urgent_n, g_rt_urgent_ns;
 static pthread_cond_t g_rt_done = PTHREAD_COND_INITIALIZER;
 static _Atomic uint64_t g_rt_gen;
 static void (*g_rt_ready_hook)(NSString *variant, int stage);
 void totk_rt_set_ready_hook(void (*hook)(NSString *variant, int stage)) { g_rt_ready_hook = hook; }
 uint64_t totk_rt_ready_gen(void) { return atomic_load(&g_rt_gen); }
-static void bg_translate(NSString *shader, int stage, NSDictionary *rq, BOOL existed) {   // g_rt_lock held
-    static rt_svc svc[RT_BG_WORKERS]; static dispatch_queue_t queue[RT_BG_WORKERS]; static unsigned next;
-    if (!queue[0]) for (int i = 0; i < RT_BG_WORKERS; i++)
-        queue[i] = dispatch_queue_create("totk.shader.background", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
+/* One job: translate on svc, compile its Metal library (the ready hook), record it and wake the waiters. */
+static void rt_job_run(NSString *shader, NSMutableArray *job, rt_svc *svc, uint64_t queued) {
+    NSDictionary *rq = job[1]; int stage = [job[2] intValue]; BOOL existed = [job[3] boolValue];
+    uint64_t started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    NSDictionary *refl = translate(svc, rq, started);
+    if (g_rt_ready_hook) g_rt_ready_hook(rq[@"variant"], stage);   // the Metal library too, off the submit thread
+    pthread_mutex_lock(&g_rt_lock);
+    variant_record(shader, rq, refl, existed, started, queued);
+    if (g_rt_pending[shader] == job) [g_rt_pending removeObjectForKey:shader];
+    atomic_fetch_add(&g_rt_gen, 1);
+    pthread_cond_broadcast(&g_rt_done);
+    pthread_mutex_unlock(&g_rt_lock);
+}
+static NSMutableArray *rt_job_new(NSString *shader, int stage, NSDictionary *rq, BOOL existed) {   // g_rt_lock held
     if (!g_rt_pending) g_rt_pending = [NSMutableDictionary dictionary];
-    NSMutableArray *job = [NSMutableArray arrayWithObject:@(RT_JOB_QUEUED)];
+    NSMutableArray *job = [NSMutableArray arrayWithObjects:@(RT_JOB_QUEUED), rq, @(stage), @(existed), nil];
     g_rt_pending[shader] = job;
-    rt_svc *own = &svc[next % RT_BG_WORKERS]; dispatch_queue_t q = queue[next++ % RT_BG_WORKERS];
+    return job;
+}
+static void bg_translate(NSString *shader, int stage, NSDictionary *rq, BOOL existed) {   // g_rt_lock held
+    static rt_svc svc[RT_BG_MAX]; static dispatch_queue_t queue[RT_BG_MAX]; static unsigned next; int workers = rt_bg_workers();
+    if (!queue[0]) for (int i = 0; i < workers; i++)
+        queue[i] = dispatch_queue_create("totk.shader.background", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
+    NSMutableArray *job = rt_job_new(shader, stage, rq, existed);
+    rt_svc *own = &svc[next % workers]; dispatch_queue_t q = queue[next++ % workers];
     uint64_t queued = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     dispatch_async(q, ^{ @autoreleasepool {
+        static int yield = -1; if (yield < 0) { const char *e = getenv("TOTK_RT_URGENT_FIRST"); yield = !(e && !strcmp(e, "0")); }
+        while (yield && atomic_load(&g_rt_urgent_busy) > 0) usleep(2000);   // the CPU to what draws are waiting for
         pthread_mutex_lock(&g_rt_lock);
-        int taken = [job[0] intValue] == RT_JOB_TAKEN;
-        if (!taken) job[0] = @(RT_JOB_RUNNING);
+        int mine = [job[0] intValue] == RT_JOB_QUEUED;   // not taken back by a draw, nor made urgent
+        if (mine) job[0] = @(RT_JOB_RUNNING);
         pthread_mutex_unlock(&g_rt_lock);
-        if (taken) return;   // translated on the spot by a draw that could not wait
-        uint64_t started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-        NSDictionary *refl = translate(own, rq, started);
-        if (g_rt_ready_hook) g_rt_ready_hook(rq[@"variant"], stage);   // the Metal library too, off the submit thread
-        pthread_mutex_lock(&g_rt_lock);
-        variant_record(shader, rq, refl, existed, started, queued);
-        [g_rt_pending removeObjectForKey:shader];
-        atomic_fetch_add(&g_rt_gen, 1);
-        pthread_cond_broadcast(&g_rt_done);
-        pthread_mutex_unlock(&g_rt_lock);
+        if (mine) rt_job_run(shader, job, own, queued);
     } });
 }
+/* Run a job now on a free urgent service (g_rt_lock held; the job is marked running, so waiters wait for it). */
+static void urgent_translate(NSString *shader, NSMutableArray *job) {
+    static rt_svc svc[RT_URGENT_MAX]; static int busy[RT_URGENT_MAX]; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static dispatch_semaphore_t free_svc; static dispatch_queue_t q;
+    if (!q) { free_svc = dispatch_semaphore_create(rt_urgent_workers());
+              q = dispatch_queue_create("totk.shader.urgent", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT, QOS_CLASS_USER_INTERACTIVE, 0)); }
+    job[0] = @(RT_JOB_RUNNING);
+    uint64_t queued = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    atomic_fetch_add(&g_rt_urgent_busy, 1);
+    dispatch_async(q, ^{ @autoreleasepool {
+        dispatch_semaphore_wait(free_svc, DISPATCH_TIME_FOREVER);
+        pthread_mutex_lock(&mu); int i = 0; while (busy[i]) i++; busy[i] = 1; pthread_mutex_unlock(&mu);
+        rt_job_run(shader, job, &svc[i], queued);
+        pthread_mutex_lock(&mu); busy[i] = 0; pthread_mutex_unlock(&mu);
+        dispatch_semaphore_signal(free_svc);
+        atomic_fetch_sub(&g_rt_urgent_busy, 1);
+        atomic_fetch_add(&g_rt_urgent_n, 1); atomic_fetch_add(&g_rt_urgent_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - queued);
+    } });
+}
+void totk_rt_urgent_stats(uint64_t *n, uint64_t *ns) { *n = atomic_load(&g_rt_urgent_n); *ns = atomic_load(&g_rt_urgent_ns); }
 
 NSString *totk_rt_variant(NSString *shader, int stage, const uint8_t *control, const uint8_t *code, NSDictionary *answers, NSArray *local, int may_defer) {
     uint64_t started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
@@ -410,10 +461,16 @@ NSString *totk_rt_variant(NSString *shader, int stage, const uint8_t *control, c
         if ([job[0] intValue] == RT_JOB_QUEUED) { job[0] = @(RT_JOB_TAKEN); [g_rt_pending removeObjectForKey:shader]; break; }
         pthread_cond_wait(&g_rt_done, &g_rt_lock);
     }
+    if (!found && may_defer == 2 && g_rt_pending[shader]) {   // urgent: a job of this shader still in line runs now
+        NSMutableArray *job = g_rt_pending[shader];
+        if ([job[0] intValue] == RT_JOB_QUEUED) urgent_translate(shader, job);
+        pthread_mutex_unlock(&g_rt_lock); return nil;
+    }
     if (found || g_rt_pending[shader]) { pthread_mutex_unlock(&g_rt_lock); return found; }
     NSMutableDictionary *rq = variant_request(shader, stage, control, code, answers, local);
     if (no_translator()) { record_miss(shader, rq, answers); pthread_mutex_unlock(&g_rt_lock); return nil; }
     BOOL existed = [NSFileManager.defaultManager fileExistsAtPath:[totk_rt_dir() stringByAppendingFormat:@"/%@_b.metal", rq[@"variant"]]];   // a re-translation of a broken variant is not a new one
+    if (may_defer == 2) { urgent_translate(shader, rt_job_new(shader, stage, rq, existed)); pthread_mutex_unlock(&g_rt_lock); return nil; }
     if (may_defer) { bg_translate(shader, stage, rq, existed); pthread_mutex_unlock(&g_rt_lock); return nil; }
     variant_record(shader, rq, translate(&g_svc, rq, started), existed, started, 0);
     pthread_mutex_unlock(&g_rt_lock);
