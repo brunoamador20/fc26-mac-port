@@ -80,6 +80,42 @@ def shader_key_scope(keys, version, source_romfs_sha256, *, chain=CHAIN):
     return dict(schema=1, chain=chain, version=version, source_romfs_sha256=source_romfs_sha256, keys=sorted(values))
 
 
+def file_identity(path):
+    """What changes whenever a file's bytes may have: device, inode, size, modification and change time (writing moves
+    both times; resetting the modification time still moves the change time)."""
+    s = os.stat(path)
+    return [s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns]
+
+
+# <output>.verified.json: each seed file's identity and the SHA-256 it had when it was last checked. A whole-seed reuse
+# hashed all 65,436 files again (30 s), and build_app.py did the same twice more (2026-10-21); a file whose identity is
+# the recorded one keeps its digest. build_app.py reads the same record (seed_digests).
+def verified_digests(output):
+    """name -> SHA-256 for the files of output whose identity is the one recorded with it."""
+    try:
+        record = json.loads(output.with_name(output.name+'.verified.json').read_text())
+        if record.get('schema') != 1:
+            return {}
+        known = {}
+        for name, entry in record['files'].items():
+            try:
+                if Path(name).name == name and entry[:-1] == file_identity(output/name):
+                    known[name] = entry[-1]
+            except OSError:
+                pass
+        return known
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+
+
+def record_verified(output, files):
+    """Record the identity of output's files with the digests they were just checked or written with."""
+    record = dict(schema=1, files={name: file_identity(output/name)+[sha] for name, sha in sorted(files.items())})
+    path = output.with_name(output.name+'.verified.json')
+    path.with_name(path.name+'.tmp').write_text(json.dumps(record, separators=(',', ':')))
+    path.with_name(path.name+'.tmp').replace(path)
+
+
 def reusable_seed(output, identity, min_shaders=MIN_SHADERS):
     """Return a verified seed manifest, or None when it must be prepared again."""
     marker = output/'seed-manifest.json'
@@ -93,8 +129,11 @@ def reusable_seed(output, identity, min_shaders=MIN_SHADERS):
             return None
         if not all(old.get(k) == v for k, v in identity.items()) or old.get('shaders', 0) < min_shaders:
             return None
-        if not all((output/name).is_file() and digest((output/name).read_bytes()) == sha for name, sha in files.items()):
+        known = verified_digests(output)
+        if not all((output/name).is_file() and (known.get(name) or digest((output/name).read_bytes())) == sha
+                   for name, sha in files.items()):
             return None
+        record_verified(output, files)
         scope = json.loads((output/'shader-keys.json').read_text())
         if scope.get('schema') != 1 or scope.get('version') != identity['version'] or \
                 scope.get('source_romfs_sha256') != identity['source_romfs_sha256']:
@@ -703,6 +742,7 @@ def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, m
         shutil.rmtree(output)
     staging.rename(output)
     cache.prune({variant for _, _, variant, _ in jobs})
+    record_verified(output, report['files'])
     print(f'startup seed ready: {len(completed)} shader variants ({ready} startup shaders, the rest from the shared list), '
           f'{len(failed)} skipped; {done[2]} translations taken from the cache, {done[0]+done[1]-done[2]} translated', flush=True)
     return report

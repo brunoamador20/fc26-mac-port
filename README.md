@@ -22,7 +22,7 @@ Play your own copy of **The Legend of Zelda: Tears of the Kingdom** natively on 
 > [!TIP]
 > **Every shader in the shared list is ready before you play.** On a Mac the game does not stop to compile it, and on an iPhone or iPad nothing is missing from the picture. The more places players cover, the smoother the game gets for everyone.
 
-The [shared shader list](docs/shader-list.md) now holds **51,075 shader variants** (43,651 shaders) from the Mac, iPhone and iPad. Every build makes them from the player's own game files, so the list holds identifiers only, never game data. Helping takes no setup:
+The [shared shader list](docs/shader-list.md) now holds **51,077 shader variants** (43,651 shaders) from the Mac, iPhone and iPad. Every build makes them from the player's own game files, so the list holds identifiers only, never game data. Helping takes no setup:
 
 1. **Play.** When your game meets a shader the list does not have yet, it notes it in `shader-list-contribution.txt`.
 2. **On a Mac, every 500 new shaders it asks you once, before the game starts.** Click "Send": the GitHub form opens and the file is shown, ready to drag in. If the GitHub CLI (`gh`) is installed and signed in, the dialog offers "Submit automatically" instead, which sends this batch for you (a private gist and an issue) without opening the browser. An iPhone or iPad never asks during play: while it is connected to the Mac that built its app (cable or the same Wi-Fi), the Mac asks instead. "Don't remind me again" stops the reminders.
@@ -158,6 +158,37 @@ Allow about **40 GB free for a fresh update build**, or **19 GB extra** when the
 
 Saves stay in the same profile folder. Before the first updated launch, the app makes a complete backup beside it, such as `profile-before-1.1.2`, `profile-before-1.2.1` or `profile-before-1.4.3`; failure stops startup. Keep this backup if you need to return to an older version—do not assume an updated save is backward compatible.
 
+### Build with a mod's code patches
+
+```sh
+python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.4.3.nsp \
+  --mod "/path/to/The Second Quest 1.4.3" --install-mod-romfs
+```
+
+`--mod` takes the mod folder as it comes, `exefs/` and `romfs/` together (either half alone works too). Why a build
+flag at all: the app has no module loader - at start it maps the three code modules it was built from (main, sdk,
+subsdk0), rewritten for Apple silicon and bound by SHA-256, and nothing in it reads a mod's `exefs/` the way Ryujinx or
+a Switch does. So the code side goes in one step earlier: `--mod` merges the mod's main-module patches into the verified
+retail module before it is rewritten.
+
+The data side is a separate choice, because the version's mod folder is yours: `--install-mod-romfs` says the build may
+replace it. With the flag, at the end of the build the folder
+`~/Library/Application Support/MacNativeGames/TOTK/mods/<version>` is replaced by the mod's `romfs/` with a fresh
+manifest written against the app just built (`make_mod_manifest.py`) - one command, an app that plays with the mod as it
+stands. What the folder held is not deleted: it is moved next to it as `<version>.backup-<date>-<time>` (the game never
+loads it), and the build says so when it starts and names the backup at the end, so add the flag only when that is what
+you want; without it the build leaves the folder alone and prints the two commands that fill
+it by hand. Several mods with code patches: merge them in the mod manager first (TKMM's output is one folder with one
+`exefs/` and one `romfs/`), then build with `--mod <that folder> --install-mod-romfs`.
+The patches are applied to the verified retail main of the version
+being built - a `.pchtxt` as the game's own patch loader reads it, a `.ips` / `.ips32` with the emulator offset
+convention - after checking that no edit lands on a site the app patches itself, that no two patches change the same
+bytes and that every edit is inside main's own segments. The merged module is then rewritten for Apple silicon and the
+app is bound to its SHA-256. `analysis/phase12-validation.json` (1.0.0) or `analysis/<version>-port/phase12-validation.json`
+in `--work` records the mod folder, each patch file's SHA-256 and the addresses it changed, under `mod_exefs`. An extra
+code module a mod ships (`subsdk9`, a hooking framework's) is not loaded and the build says so: such a mod keeps its
+main patches and its RomFS, but not the code changes that live in that module. Step by step: [docs/mods.md](docs/mods.md).
+
 To keep one desktop entry, link the packaged app with the optional installer:
 
 ```sh
@@ -241,7 +272,7 @@ Language: the game and the launcher's own text (startup screen, shader warm-up p
 - Shader cache: `~/Library/Application Support/MacNativeGames/TOTK/shader-cache` (delete it to translate everything again)
 - Shaders the shared list does not have yet: `~/Library/Application Support/MacNativeGames/TOTK/shader-list-contribution.txt`
 - Log: `~/Library/Logs/MacNativeGames/totk.log` (the run before: `totk.previous.log`)
-- Mods: `~/Library/Application Support/MacNativeGames/TOTK/mods/<v0|v112|v121|v143>`. Its `manifest.tsv` lists each RomFS file the mod replaces or adds as tab-separated path, size, SHA-256 and the original's SHA-256 (`-` for a file the game does not have); the files sit under the same paths. `python3 games/totk/scripts/make_mod_manifest.py <mods folder> --app <Tears of the Kingdom.app>` writes it, adding files the game lacks; a path that differs from the game's only in upper and lower case stops it (paths are case-sensitive). Only the RomFS (data) side of a mod is loaded: ExeFS parts (extra code modules, IPS patches) are not supported. The game checks every listed file at start and stops on a mismatch, or when a mod file changes while it runs. Delete the folder to play without mods. Step by step: [docs/mods.md](docs/mods.md). A mod file the build's own overlay also replaces (a translation's UI archive `Common.Product.<n>`) is merged with the build's edit by the same tool: it writes the merged archive, keeps the mod's own file next to it as `<name>.mod-original`, and the game lets the merged file take the place of the build's overlay (#73); any other collision still stops the start.
+- Mods: `~/Library/Application Support/MacNativeGames/TOTK/mods/<v0|v112|v121|v143>`. Its `manifest.tsv` lists each RomFS file the mod replaces or adds as tab-separated path, size, SHA-256 and the original's SHA-256 (`-` for a file the game does not have); the files sit under the same paths. `python3 games/totk/scripts/make_mod_manifest.py <mods folder> --app <Tears of the Kingdom.app>` writes it, adding files the game lacks; a path that differs from the game's only in upper and lower case stops it (paths are case-sensitive). The RomFS (data) side is loaded while the game runs. A mod's code patch for the main module (`exefs/*.ips`, `*.ips32`, `*.pchtxt`) is merged at build time with `--mod <mod folder>` instead, because the code modules are rewritten for Apple silicon and bound by SHA-256 when the app is built; a patch that would land on a site the app patches itself (60 FPS, resolutions, ultrawide, cloth) is refused. Add `--install-mod-romfs` to that build and it also replaces this folder with the mod's `romfs/` and writes the manifest itself (what the folder held is kept next to it as `<version>.backup-<date>-<time>`; without the flag the build leaves it alone). An extra code module a mod ships (`subsdk9`) is not loaded - the app runs main, sdk and subsdk0 - and the build prints that. The game checks every listed file at start and stops on a mismatch, or when a mod file changes while it runs. Delete the folder to play without mods. Step by step: [docs/mods.md](docs/mods.md). A mod file the build's own overlay also replaces (a translation's UI archive `Common.Product.<n>`) is merged with the build's edit by the same tool: it writes the merged archive, keeps the mod's own file next to it as `<name>.mod-original`, and the game lets the merged file take the place of the build's overlay (#73); any other collision still stops the start.
 - Button icons: `python3.14 games/totk/scripts/make_button_icons.py <mods folder> --app <Tears of the Kingdom.app> --style keyboard` (or `--style xbox`) writes a mod that draws the Mac keyboard keys (J K I U for A B X Y, W A S D, the arrow keys and so on) or Xbox buttons (B A Y X in the Switch positions, LB/RB, LT/RT, Menu/View) in the game's button prompts. It redraws the icon font from your own RomFS (nothing of the game is in the project) and writes the manifest; files already in the folder are kept. Needs Python 3.14 and `python3.14 -m pip install fonttools`. If the folder already has a font archive (another mod's, or an earlier run) it stops; `--replace` overwrites it, which is also how to switch styles. The Xbox icons match the default face-button mapping (by position); with `TOTK_FACE_BUTTONS=label` or face buttons changed in `controls.txt` they do not. remove the font file and run `make_mod_manifest.py` to go back. Prompts drawn as fixed images (some tutorial animations) keep the Switch icons.
 
 ## Known issues
@@ -252,7 +283,7 @@ Language: the game and the launcher's own text (startup screen, shader warm-up p
 - No online features, no amiibo.
 - New shaders can cause compilation stutters. Cache reuse reduces these, but does not guarantee stutter-free gameplay.
 - GPU memory still grows during long sessions. The Mac app stops the game when Metal has allocated more than its GPU memory budget (the log ends with a FATAL line naming `TOTK_GPU_BUDGET_MB`): 30 % of the Mac's memory, never below 5,000 MB (5,000 MB on 16 GB, about 11 GB on 36 GB). `open --env TOTK_GPU_BUDGET_MB=<MB> "Tears of the Kingdom.app"` sets another budget; staying well below the Mac's memory avoids the kernel panics the budget exists for.
-- The 79 automated tests cover generated container/update fixtures, relocation formats, work-folder isolation, packaging, desktop migration, shader extraction (BNSH, agl `.sharcb` and game-module shaders), the shared shader list and the players' contribution file, first-import cache preservation, the Metal toolchain lookup and 27 native RomFS path cases. GitHub Actions is configured to run the source tests and the native path parser under the undefined-behavior sanitizer, without game data or keys. A complete Mac build also passed with a local XCI-derived NSP fixture and generated common ticket. An independent retail base NSP and gameplay from that input have not yet been tested.
+- The 255 automated tests cover generated container/update fixtures, relocation formats, work-folder isolation, packaging, desktop migration, shader extraction (BNSH, agl `.sharcb` and game-module shaders), the shared shader list and the players' contribution file, first-import cache preservation, the Metal toolchain lookup, mod code-patch merging (IPS / IPS32 / pchtxt against synthetic NSO modules, with the reserved-site list read out of the C sources and the file named by its module or build id), the build's own mod install (`--install-mod-romfs`: the version folder replaced and what it held kept as a backup, a symlinked folder refused, a misspelt path stopped before anything is touched, the real `make_mod_manifest.py` run against a fake RomFS), the 2K output overlay's record of the heap table it was built on, the RomFS manifest that leaves the app's own overlay files out by itself and 27 native RomFS path cases. GitHub Actions is configured to run the source tests and the native path parser under the undefined-behavior sanitizer, without game data or keys. A complete Mac build also passed with a local XCI-derived NSP fixture and generated common ticket. An independent retail base NSP and gameplay from that input have not yet been tested.
 
 ## How it works
 
@@ -298,7 +329,7 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license: [THIRD_PAR
 > [!TIP]
 > **公共清单里的每个着色器，开玩之前就已经准备好。** Mac 上不用停下来现场编译，iPhone 和 iPad 上画面也不会缺东西。大家玩过的地方越多，所有人玩得越流畅。
 
-[公共着色器清单](docs/shader-list.md)现在有 **51,075 个着色器变体**（43,651 个着色器），来自 Mac、iPhone 和 iPad。每次打包都用玩家自己的游戏文件生成，所以清单里只有标识，不含任何游戏数据。参与不需要任何设置：
+[公共着色器清单](docs/shader-list.md)现在有 **51,077 个着色器变体**（43,651 个着色器），来自 Mac、iPhone 和 iPad。每次打包都用玩家自己的游戏文件生成，所以清单里只有标识，不含任何游戏数据。参与不需要任何设置：
 
 1. **照常玩。** 游戏遇到清单里还没有的着色器，会自动记进 `shader-list-contribution.txt`。
 2. **在 Mac 上，每攒够 500 个，它会在游戏启动前问你一次。** 点“发送”，GitHub 提交页面会打开，文件也会显示出来，拖进去就行。装了 GitHub 命令行工具（`gh`）并已登录时，对话框里会多一个“自动提交”，点了就直接替你把这一批发出去（私密 gist 加一个 issue），不用打开浏览器。iPhone 和 iPad 玩的时候从不提醒：设备连着打包它的那台 Mac（线连或同一 Wi‑Fi）时，由 Mac 来问。点“不要提醒了”以后就不再问。
@@ -448,6 +479,17 @@ python3.14 games/totk/tools/install_desktop_entry.py --app "/路径/Tears of the
 
 1.2.1（10 月 19 日）通过了同样的改写验证（600 个反向对照全部抓到）和加载、RomFS、启动探针。在 M4 Mac 上读过 1.0.0 和 1.1.2 两种格式的存档，并通过移动 / 跳跃、菜单 / 地图 / 快捷菜单、手动存档后新进程读档、摔死重试和 3 键的三种画质；打包后的 App 也从启动器打开测试过。详见 [1.2.1 测试记录](docs/v1.2.1-port.md)；这不代表全流程或长局验收。
 
+### 构建带模组代码补丁
+
+```sh
+python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.4.3.nsp \
+  --mod "/路径/The Second Quest 1.4.3" --install-mod-romfs
+```
+
+`--mod` 原样接收模组文件夹，`exefs/` 和 `romfs/` 一起（只有其中一半也可以）。为什么要一个构建参数：App 没有模块加载器——启动时它映射的是构建时的那三个代码模块（main、sdk、subsdk0），已经改写为 Apple 芯片版本并按 SHA-256 绑定，里面没有任何东西会像 Ryujinx 或 Switch 那样去加载模组的 `exefs/`。所以代码这一半只能在更早一步进去：`--mod` 在改写之前把模组的主模块补丁合并进核对过的原版模块。数据这一半也不需要新的加载器，但装不装由你决定，因为版本目录是你的：加 `--install-mod-romfs` 时，构建结束时会把 `~/Library/Application Support/MacNativeGames/TOTK/mods/<版本>` 整个换成模组的 `romfs/` 并对着刚构建好的 App 生成清单（`make_mod_manifest.py`），一条命令就得到可直接带着模组玩的 App。那个目录里原来的东西不会删除，而是挪到旁边的 `<版本>.backup-<日期>-<时间>`（游戏不读它），构建开始时会醒目提示，结束时说出备份在哪。不加这个参数时构建完全不碰该目录，只打印手动复制的两条命令。多个带代码补丁的模组建议先在模组管理器里合并（TKMM 的输出就是一个文件夹，一套 `exefs/`、一套 `romfs/`），再用 `--mod <那个文件夹> --install-mod-romfs` 构建。
+
+补丁只打在当前版本、核对过的原版 main 上：`.pchtxt` 按游戏自带补丁加载器的规则读，`.ips` / `.ips32` 按模拟器的偏移约定（含 0x100 字节 NSO 头）读；打之前会检查没有任何改动落在 App 自己打补丁的位置、没有两个补丁改同一批字节、且每处改动都在 main 自己的段内。合并后的模块再改写为 Apple 芯片版本，App 按它的 SHA-256 绑定。`--work` 里的 `analysis/phase12-validation.json`（1.0.0）或 `analysis/<version>-port/phase12-validation.json` 在 `mod_exefs` 下记录模组目录、每个补丁文件的 SHA-256 和它改动的地址。模组附带的额外代码模块（`subsdk9` 这类 hook 框架的模块）不会被加载，构建会明确提示：这样的模组保留主模块补丁和整个 RomFS，但依赖那个模块的那部分代码改动不会生效。逐步说明见 [docs/mods.md](docs/mods.md)。
+
 ### 旷野之息 1.6.0（早期）
 
 同一个脚本也能打包**《塞尔达传说 旷野之息》1.6.0**（`01007EF00011E000`）：卡带镜像里要同时有本体、1.6.0 更新和两个追加内容（不用 `--update`；认的是文件里的标题 ID，不看文件名）。这张卡没有系统更新分区，六个共享字体可以用 `--firmware` 从已解包的固件提取（和王国之泪的 NSP 一样），或用 `--shared-fonts` 从王国之泪打包的工作目录拿（`TOTK_build/totk/extracted/firmware/shared-fonts`），或别的已校验的字体目录。启动着色器和王国之泪一样来自游戏数据和这个游戏自己的[公共着色器清单](docs/shader-list.md)（`games/botw/assets/shader_list.tsv`）：启动包和标题包里的每个着色器按默认绑定状态翻译，清单里的每个绑定状态也翻译，打包时预先编好，第一帧只等标题要的那些。
@@ -517,7 +559,7 @@ west = y
 - 着色器缓存：`~/Library/Application Support/MacNativeGames/TOTK/shader-cache`（删掉会全部重新翻译）
 - 公共清单里还没有的着色器：`~/Library/Application Support/MacNativeGames/TOTK/shader-list-contribution.txt`
 - 日志：`~/Library/Logs/MacNativeGames/totk.log`（上一次运行：`totk.previous.log`）
-- 模组：`~/Library/Application Support/MacNativeGames/TOTK/mods/<v0|v112|v121|v143>`。其中的 `manifest.tsv` 以制表符分隔列出模组替换或新增的每个 RomFS 文件：路径、大小、SHA-256 和原文件的 SHA-256（游戏里没有的新文件写 `-`）；文件按相同路径存放。可用 `python3 games/totk/scripts/make_mod_manifest.py <模组文件夹> --app <Tears of the Kingdom.app>` 生成，游戏里没有的文件会作为新增文件写入；只是大小写和游戏里的路径不同的会报错（路径区分大小写）。只加载模组的 RomFS（数据）部分，ExeFS 部分（额外的代码模块、IPS 补丁）不支持。游戏启动时校验所有列出的文件，不一致即停止；游戏运行中模组文件被改动也会停止。删除该文件夹即可不带模组运行。详细步骤见 [docs/mods.md](docs/mods.md)。构建自身的覆盖层也会替换的模组文件（例如翻译模组的 UI 归档 `Common.Product.<n>`）会由同一工具与构建的修改合并：写出合并后的归档，模组原文件保留为旁边的 `<name>.mod-original`，游戏用合并后的文件取代构建的覆盖层（#73）；其他冲突仍会阻止启动。
+- 模组：`~/Library/Application Support/MacNativeGames/TOTK/mods/<v0|v112|v121|v143>`。其中的 `manifest.tsv` 以制表符分隔列出模组替换或新增的每个 RomFS 文件：路径、大小、SHA-256 和原文件的 SHA-256（游戏里没有的新文件写 `-`）；文件按相同路径存放。可用 `python3 games/totk/scripts/make_mod_manifest.py <模组文件夹> --app <Tears of the Kingdom.app>` 生成，游戏里没有的文件会作为新增文件写入；只是大小写和游戏里的路径不同的会报错（路径区分大小写）。模组的 RomFS（数据）部分在游戏运行时加载（带 `--mod --install-mod-romfs` 构建时会把该目录换成模组的 `romfs/` 并生成清单，原来的内容挪到旁边的 `<版本>.backup-<日期>-<时间>`；不带这个参数时构建不碰该目录）。模组对主模块的代码补丁（`exefs/*.ips`、`*.ips32`、`*.pchtxt`）改用 `--mod <模组文件夹>` 在构建时合并，因为代码模块在构建时已改写为 Apple 芯片版本并按 SHA-256 绑定；会落在 App 自己打补丁的位置（60 帧、分辨率、超宽屏、布料）上的补丁会被拒绝。模组附带的额外代码模块（`subsdk9`）不会被加载（App 跑的是 main、sdk、subsdk0），构建会明确提示。游戏启动时校验所有列出的文件，不一致即停止；游戏运行中模组文件被改动也会停止。删除该文件夹即可不带模组运行。详细步骤见 [docs/mods.md](docs/mods.md)。构建自身覆盖层也会替换的模组文件（例如翻译模组的 UI 归档 `Common.Product.<n>`）由同一工具与构建的修改合并：写出合并后的归档，模组原文件保留为旁边的 `<name>.mod-original`，游戏用合并后的文件取代构建的覆盖层（#73）；其他冲突仍会阻止启动。
 - 按键图标：`python3.14 games/totk/scripts/make_button_icons.py <模组文件夹> --app <Tears of the Kingdom.app> --style keyboard`（或 `--style xbox`）生成一个模组，把游戏按键提示里的 Switch 图标换成 Mac 键盘按键（A B X Y 对应 J K I U、W A S D、方向键等）或 Xbox 按键（按 Switch 位置排列的 B A Y X、LB/RB、LT/RT、Menu/View）。它用你自己的 RomFS 重绘图标字体（项目里不含任何游戏内容）并写好 manifest；文件夹里已有的文件会保留。需要 Python 3.14 和 `python3.14 -m pip install fonttools`。文件夹里已有字体包（别的模组的，或者上次生成的）时会停下，加 `--replace` 才覆盖，换风格也要加它。Xbox 图标对应默认的按位置映射；设了 `TOTK_FACE_BUTTONS=label` 或在 `controls.txt` 里改过面键时会对不上。删除字体文件后运行 `make_mod_manifest.py` 即可恢复。以固定图片显示的提示（部分教程动画）仍是 Switch 图标。
 
 ## 已知问题
@@ -528,7 +570,7 @@ west = y
 - 没有联网功能，没有 amiibo。
 - 首次遇到新着色器可能出现编译卡顿，缓存能减少重复编译，但不保证完全没有卡顿。
 - 长时间游玩时显卡已分配内存仍会增长。Metal 已分配超过显存预算时，Mac App 会停止游戏（日志最后是写有 `TOTK_GPU_BUDGET_MB` 的 FATAL 行）：预算为本机内存的 30%，最低 5,000 MB（16 GB 为 5,000 MB，36 GB 约 11 GB）。`open --env TOTK_GPU_BUDGET_MB=<MB> "Tears of the Kingdom.app"` 可改为其他预算；远低于本机内存，可避免预算所防止的内核崩溃。
-- 79 项自动测试覆盖生成的容器 / 更新样本、重定位格式、工作目录隔离、打包、桌面入口迁移、着色器提取（BNSH、agl 的 `.sharcb` 和游戏程序里的着色器）、公共着色器清单和玩家的贡献文件、首次导入的缓存保留、Metal 工具链查找及 27 个原生 RomFS 路径用例。GitHub Actions 已配置为运行源码测试，并在未定义行为检查（UBSan）下运行原生路径解析器，不需要游戏数据或密钥；另使用本地 XCI 构造、附带生成通用票据的 NSP 测试副本完成完整 Mac 打包。尚未验证独立的零售本体 NSP，也未测试从该类输入构建后的实际游玩。
+- 256 项自动测试覆盖生成的容器 / 更新样本、重定位格式、工作目录隔离、打包、桌面入口迁移、着色器提取（BNSH、agl 的 `.sharcb` 和游戏程序里的着色器）、公共着色器清单和玩家的贡献文件、首次导入的缓存保留、Metal 工具链查找、模组代码补丁合并（用合成 NSO 样本测 IPS / IPS32 / pchtxt，保留地址表直接从 C 源码读出，补丁文件按模块名或 build id 认定）、模组清单自动排除 App 自身覆盖的文件及 27 个原生 RomFS 路径用例。GitHub Actions 已配置为运行源码测试，并在未定义行为检查（UBSan）下运行原生路径解析器，不需要游戏数据或密钥；另使用本地 XCI 构造、附带生成通用票据的 NSP 测试副本完成完整 Mac 打包。尚未验证独立的零售本体 NSP，也未测试从该类输入构建后的实际游玩。
 
 ## 工作原理
 

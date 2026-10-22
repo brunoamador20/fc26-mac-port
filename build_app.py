@@ -2,6 +2,7 @@
 """MacNativeGames: turn your own XCI or NSP into a native Mac app or iPhone/iPad IPA.
 
     python3 build_app.py <game.xci|game.nsp> -k <prod.keys> [--platform macos|ios] [-o <output>] [--work <folder>]
+                         [--update <update.nsp>] [--mod <mod folder> [--install-mod-romfs]]
 
 Supported: TOTK base 1.0.0 (0100F2C0115B6000), XCI or NSP; optional --update with a supported cumulative update.
 Also Breath of the Wild 1.6.0 (01007EF00011E000) as one card image holding the base game, the update and the add-on
@@ -14,7 +15,10 @@ Nothing from the game is in this repository; everything is made from your files 
 Steps (each one checked against games/totk/assets/expected-v<version>.json, so a damaged dump or another version stops the
 build at the first wrong file; a different dump of the same version is accepted — main.npdm by Nintendo's ACID
 signature, or signed again by a dump tool once all four code modules match, shared fonts by valid BFTTF structure):
-  1. code: ExeFS out of the XCI or NSP, the three code modules rewritten for Apple silicon (games/totk/third_party/d2r)
+  1. code: ExeFS out of the XCI or NSP, a mod's main-module code patches merged when --mod is given
+     (games/totk/scripts/mod_exefs.py, after checking them against the sites the app patches itself,
+     games/totk/scripts/patch_sites.py), the three code modules rewritten for Apple silicon
+     (games/totk/third_party/d2r)
   2. data: RomFS (17 GB), the system shared fonts (from XCI firmware or an explicit font source), the RomFS overlays
   3. shaders: SPIRV-Cross (fetched at a pinned commit, compiled with clang) and the shader translator, which ships
      ready-made as a native program (games/totk/prebuilt/macos-arm64: vendor/ryujinx + patches + Service.cs, made with
@@ -22,7 +26,11 @@ signature, or signed again by a dump tool once all four code modules match, shar
      translated into a bundled seed, ready for GPU warm-up even with an empty cache on the first launch
   4. the game binary and either a macOS app bundle or an unsigned iPhone/iPad IPA (large game data is cloned when possible);
      for the Mac the startup shaders are then compiled once into this Mac's Metal cache (about 2 minutes on an M4), so the
-     first start does not compile them in the background (games/totk/tools/warm_metal_cache.m)
+     first start does not compile them in the background (games/totk/tools/warm_metal_cache.m); with --mod
+     --install-mod-romfs the player's mod folder for this version is replaced by the mod's RomFS files and its manifest
+     (games/totk/scripts/mod_folder.py, games/totk/scripts/make_mod_manifest.py), so the build is playable with the mod as
+     it stands - the flag is required because that folder may hold files of the player's own (they are kept next to it
+     as <version>.backup-<date>-<time>)
 
 Every intermediate file is in the work folder (default: "<game file folder>/TOTK_build"); a second run reuses
 what is already done and correct. Mac saves, shader cache and logs go to the user's Library folders; iOS keeps saves
@@ -34,11 +42,13 @@ For iPhone/iPad: Xcode 26+ with iOS/Metal toolchains, plus xcodegen, CMake and N
 Optional: Xcode's Metal toolchain (xcodebuild -downloadComponent MetalToolchain) compiles the startup shaders into the
 app, so moving or rebuilding it does not repeat that work at launch.
 """
-import argparse, concurrent.futures, hashlib, json, os, platform, shutil, struct, subprocess, sys, threading, time
+import argparse, concurrent.futures, glob, hashlib, json, os, platform, shutil, struct, subprocess, sys, threading, time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
 GAME = REPO / 'games/totk'
+sys.path.insert(0, str(GAME/'scripts'))
+import mod_folder                  # noqa: E402  the player's RomFS mod folder: replaced only when --install-mod-romfs is given
 EXPECTED = json.loads((GAME / 'assets/expected-v1.0.0.json').read_text())
 UPDATED = json.loads((GAME / 'assets/expected-v1.1.2.json').read_text())
 UPDATED121 = json.loads((GAME / 'assets/expected-v1.2.1.json').read_text())
@@ -120,6 +130,31 @@ def sha256(path):
         while chunk := f.read(8 << 20):
             h.update(chunk)
     return h.hexdigest()
+
+
+def seed_digests(seed):
+    """name -> SHA-256 for the seed files whose identity (device, inode, size, modification and change time) is still the
+    one prepare_shader_seed.py recorded when it checked them (<seed>.verified.json, its verified_digests). Hashing all
+    65,436 files in each packaging took tens of seconds (2026-10-21); a changed file is hashed as before."""
+    try:
+        record = json.loads(seed.with_name(seed.name + '.verified.json').read_text())
+        if record.get('schema') != 1:
+            return {}
+        known = {}
+        for name, entry in record['files'].items():
+            try:
+                s = os.stat(seed / name)
+            except OSError:
+                continue
+            if Path(name).name == name and entry[:-1] == [s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns]:
+                known[name] = entry[-1]
+        return known
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+
+
+def seed_sha256(seed, name, known):
+    return known.get(name) or sha256(seed / name)
 
 
 def check(what, got, want):
@@ -418,7 +453,50 @@ def fonts_valid(folder):
         return False
 
 
-def step_code(tree, game, keys, env, logs, *, version="v0"):
+def merge_mod_exefs(tree, mod, version, logs):
+    """Merge a mod's main-module code patches into a copy of the verified retail main (scripts/mod_exefs.py): the
+    game's own patch sites are checked first, and the merged module is what the rewrite and the app are built from.
+    The retail extracted/<version>/exefs is never touched, so version identification and its pinned hashes stay put."""
+    py = tree / '.venv/bin/python'
+    staged = tree / f'extracted/{version}/mod-exefs'
+    if staged.exists():
+        shutil.rmtree(staged)
+    main, report_path = staged / 'main', tree / f'extracted/{version}/mod-exefs.json'
+    previous = {}                      # the report of the last build: the same patches keep the same rewrite
+    if report_path.is_file():
+        try:
+            previous = json.loads(report_path.read_text())
+        except ValueError:
+            previous = {}
+    run([py, 'scripts/mod_exefs.py', 'apply', '--exefs', tree / f'extracted/{version}/exefs', '--mod', mod,
+         '--version', version, '--output', main, '--report', report_path],
+        logs / f'mod-exefs-{version}.log', cwd=tree)
+    merged = json.loads(report_path.read_text())
+    if merged.get('status') == 'skipped':           # an exefs/ with nothing to merge into main (a code module the app
+        for note in merged.get('notes', []):        # does not load, a main.npdm): the romfs/ half still goes in
+            say(f'1/4 code: {note}')
+        say(f'1/4 code: nothing to merge for {mod.name}; {version} is built from the retail main')
+        return None, None
+    if merged.get('status') != 'pass' or merged.get('version') != version:
+        raise BuildError(f'{report_path} is not a merge report for {version}')
+    # The rewrite of the merged module is cached on the patched module's hash, and on the rewriter itself: a changed
+    # patch_nso.py (a new GAME_ADDR patch, a new cut) makes a different rewrite out of the same bytes. patch_nso.py
+    # records the same digest in build_src.sha256 next to each image.
+    rewriter = sha256(tree/'third_party/d2r/patch_nso.py')
+    if previous.get('patched_main_sha256') == merged['patched_main_sha256'] \
+            and previous.get('rewritten_main_sha256') and previous.get('rewriter_sha256') == rewriter:
+        merged['rewritten_main_sha256'] = previous['rewritten_main_sha256']     # same patches: the rewrite still holds
+    merged['rewriter_sha256'] = rewriter
+    report_path.write_text(json.dumps(merged, indent=2) + '\n')
+    edits = sum(p['edit_count'] for p in merged['patches'])
+    say(f"1/4 code: merging {mod.name}'s main-module patch ({edits} edits, {merged['edit_bytes']} bytes of main) "
+        f"before the rewrite")
+    for note in merged.get('notes', []):
+        say(f'   {note}')
+    return merged, report_path
+
+
+def step_code(tree, game, keys, env, logs, *, version="v0", mod=None):
     expected = VERSIONS[version]
     update_args = [] if version == "v0" else ["--update"]
     py = tree / '.venv/bin/python'
@@ -446,29 +524,168 @@ def step_code(tree, game, keys, env, logs, *, version="v0"):
                 f"key generation); the game does not use it and the code must match {expected['display_version']}; using it")
             continue
         check(f'ExeFS {n}', got, h)
+    merged, merged_path = merge_mod_exefs(tree, mod, version, logs) if mod else (None, None)
     if not (tree / f'extracted/{version}/elf/main-inventory.json').exists():
         run([py, 'scripts/prepare_modules.py', exefs, '--output', tree / f'extracted/{version}/elf'], logs / 'prepare_modules.log', cwd=tree)
     out = tree / f'rewritten/{version}'
     out.mkdir(parents=True, exist_ok=True)
     for name in ('sdk', 'subsdk0', 'main'):
-        image, h = out / f'{name}.patched.bin', expected['rewritten_sha256'][f'{name}.patched.bin']
-        if image.exists() and sha256(image) == h:
+        image = out / f'{name}.patched.bin'
+        modded = merged is not None and name == 'main'
+        source = tree / f'extracted/{version}/mod-exefs/main' if modded else exefs / name
+        target = merged['rewritten_main_sha256'] if modded else expected['rewritten_sha256'][f'{name}.patched.bin']
+        if image.exists() and target and sha256(image) == target:
             continue
         say(f'1/4 code: rewriting {name} for Apple silicon' + (' (the big one: about a minute)' if name == 'main' else ''))
-        run([py, 'third_party/d2r/patch_nso.py', exefs / name, out, name], logs / f'rewrite_{version}_{name}.log', cwd=tree,
+        run([py, 'third_party/d2r/patch_nso.py', source, out, name], logs / f'rewrite_{version}_{name}.log', cwd=tree,
             env=dict(env, DM_RULESET='native', DM_PRIVATE_GATES='0'))
-        check(f'rewritten {name}', sha256(image), h)
+        if modded:
+            # The rewrite of the merged module is not the verified retail rewrite any more: the mod's own edits are
+            # bound by the module's hash instead (the report says so, and the loader binds itself to this digest).
+            merged['rewritten_main_sha256'] = sha256(image)
+            merged_path.write_text(json.dumps(merged, indent=2) + '\n')
+        else:
+            check(f'rewritten {name}', sha256(image), target)
     # The loader binds itself to these images (scripts/prepare_runtime.py): they are the same bytes as the rewrite that
-    # was verified site by site (python3 games/totk/scripts/verify_rewrites.py re-runs that verification, hours).
-    report = dict(format=1, status='pass', rom_version=version, scope=f'hash match with verified {expected["display_version"]} rewrite',
+    # was verified site by site (python3 games/totk/scripts/verify_rewrites.py re-runs that verification, hours) unless
+    # --mod merged a patch into main, which the report records.
+    digests = {f'{name}.patched.bin': sha256(out / f'{name}.patched.bin') for name in ('main', 'sdk', 'subsdk0')}
+    scope = f'hash match with verified {expected["display_version"]} rewrite'
+    if merged:
+        scope = (f'verified {expected["display_version"]} rewrite, with the main-module patches of {merged["folder"]} '
+                 f'merged before it ({merged["patched_main_sha256"][:16]}...); the mod\u2019s bytes are bound by hash')
+    report = dict(format=1, status='pass', rom_version=version, scope=scope,
                   module_file_sha256={**{f'extracted/{version}/exefs/{n}': want[n] for n in ('main', 'sdk', 'subsdk0')},
-                                      **{f'rewritten/{version}/{n}.patched.bin': expected['rewritten_sha256'][f'{n}.patched.bin'] for n in ('main', 'sdk', 'subsdk0')}})
+                                      **{f'rewritten/{version}/{n}': digests[n] for n in digests}},
+                  **({'mod_exefs': {key: merged[key] for key in
+                                    ('folder', 'folder_sha256', 'build_id', 'patches', 'edit_bytes', 'reserved_sites',
+                                     'retail_main_sha256', 'patched_main_sha256', 'rewritten_main_sha256',
+                                     'rewriter_sha256', 'notes')}} if merged else {}))
     report_path = tree / ('analysis/phase12-validation.json' if version == 'v0' else f'analysis/{version}-port/phase12-validation.json')
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2) + '\n')
 
 
-def step_data(tree, game, keys, logs, *, firmware=None, shared_fonts=None):
+HEAPDEF = 'System/HeapSize/Product.Nin_NX_NVN.HeapDef.byml.zs'
+
+
+def mod_heapdef(mod):
+    """The mod's replacement of the heap-size table, when it has one: the 2K overlay is then built on top of it, so the
+    mod's own heap sizes and the 2K texture heaps both hold. The player's manifest must leave that file to the app."""
+    path = mod / 'romfs' / HEAPDEF if mod else None
+    return path if path and path.is_file() else None
+
+
+def mergeable_overlays(version):
+    """The app's own overlay files a mod's copy is merged with instead of being left out (scripts/make_mod_manifest.py,
+    merge_build_patch): the UI archive whose quick-menu edit the build applies to the mod's own copy (#73)."""
+    try:
+        from make_romfs_patches import common_archive
+        return {common_archive(version)}
+    except (ImportError, KeyError):
+        return set()
+
+
+def check_mod_overlays(tree, mod, version):
+    """A mod folder may hold files the app replaces itself. They are not a build problem - the player's manifest leaves
+    such paths out by itself (games/totk/scripts/make_mod_manifest.py), so the app's version is the one loaded - but say
+    so, instead of leaving somebody wondering why the mod's version of a file does nothing. The heap table is the one the
+    build folds in (see mod_heapdef), so it is not reported."""
+    if not (mod and (mod / 'romfs').is_dir()):
+        return []
+    replaced = set()
+    folders = [tree / f'extracted/{version}/romfs-patches']
+    folders += sorted(p for p in (tree / f'extracted/{version}/romfs-patches-out').glob('*') if p.is_dir())
+    for folder in folders:
+        manifest = folder / 'manifest.tsv'
+        if manifest.is_file():
+            for line in manifest.read_text().splitlines():
+                name = line.split('\t', 1)[0]
+                if name and not name.startswith('#'):
+                    replaced.add(name)
+    mergeable = mergeable_overlays(version)
+    clashes = sorted(name for name in replaced
+                     if name != HEAPDEF and name not in mergeable and (mod / 'romfs' / name).is_file())
+    folded = sorted(name for name in replaced if name in mergeable and (mod / 'romfs' / name).is_file())
+    if folded:
+        say(f"1/4 code: {mod.name}/romfs also holds {folded[0]}, which the app replaces itself: the build's edit is "
+            f"merged into the mod's copy, so both apply (#73)")
+    if clashes:
+        say(f"1/4 code: {mod.name}/romfs also holds {clashes[0]}, which the app replaces itself; a player's manifest "
+            f"leaves it out, so the app's version of it is the one loaded")
+    return clashes
+
+
+OVERLAY_RECORD = 'overlay.json'
+
+
+def overlay_record(path):
+    """The record a 2K output overlay leaves next to its manifest (scripts/make_output_res_overlay.py), or {}: what it
+    was built from."""
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def overlay_stale(out_dir, heapdef, tree):
+    """Why the 2K output overlay has to be built again, '' when the one there is current: it is missing, it has no
+    record, it was made from another heap table (a --mod build chains the mod's sizes into that table, so without this a
+    later build without --mod kept the mod's heap sizes), or the overlay script itself changed."""
+    if not (out_dir/'manifest.tsv').is_file():
+        return 'missing'
+    record = overlay_record(out_dir/OVERLAY_RECORD)
+    if not record:
+        return 'no record of what it was built from'
+    if record.get('heapdef_sha256') != (sha256(heapdef) if heapdef else None):
+        return 'built from another heap table'
+    if record.get('script_sha256') != sha256(tree/'scripts/make_output_res_overlay.py'):
+        return 'built by another version of scripts/make_output_res_overlay.py'
+    return ''
+
+
+def install_mod_romfs(mod, tree, version, out, py, logs):
+    """--mod --install-mod-romfs: replace the player's mod folder for this version with the mod's RomFS files, and write
+    its manifest against the app just built (games/totk/scripts/mod_folder.py). The replacement is copied and given its
+    manifest in a folder next to the player's first, so the player's files are only moved aside for a copy that is
+    complete - and not at all when the mod would replace nothing the game loads. They are kept as a backup next to the
+    folder, never deleted. The manifest leaves out the paths the
+    app replaces itself, the heap table included: mod_heapdef (see above) folded its sizes into the 2K overlay."""
+    log = logs / f'mod-manifest-{version}.log'
+    try:
+        installed = mod_folder.install(mod, version, out, py, tree, say=say)
+    except mod_folder.InstallError as e:
+        log.write_text(e.output + '\n')
+        for line in e.output.splitlines()[-3:]:
+            say(f'   {line}')
+        raise BuildError(f'the app itself is built, but {mod_folder.mods_folder(version)} was not replaced: {e} '
+                         f'(it holds what it held before; fix {mod.name}/romfs, then write the manifest again with '
+                         f'scripts/make_mod_manifest.py)') from None
+    if installed is None:
+        return None
+    log.write_text('\n'.join(installed.manifest) + '\n')
+    say(f'4/4 app: {installed.folder} holds {installed.copied} files from {mod.name}/romfs now'
+        + (f' (what it held before: {installed.backup}; delete that folder once you no longer need it)'
+           if installed.backup else ''))
+    for line in installed.manifest:                 # the notes and the summary; a mod's notes are a handful
+        say(f'   {line}')
+    return installed.folder
+
+
+def say_mod_copy_steps(mod, tree, version, out):
+    """--mod without --install-mod-romfs: the version's mod folder is the player's own, so the build leaves it alone and
+    only says how to fill it."""
+    if not (mod/'romfs').is_dir():
+        say(f'4/4 app: {mod.name} has no romfs/: its code patches are in the app, and there is no data half to copy')
+        return
+    folder = mod_folder.mods_folder(version)
+    say(f'4/4 app: {mod.name}/romfs was not installed: {folder} is your folder, and a build only replaces it when you '
+        f'pass --install-mod-romfs (which keeps what it held as a backup next to it). To do it by hand:')
+    say(f'   rsync -a --exclude=\'.DS_Store\' --exclude=\'manifest.tsv\' "{mod}/romfs/" "{folder}/"')
+    say(f'   "{sys.executable}" "{tree}/scripts/make_mod_manifest.py" "{folder}" --app "{out}" --version {version}')
+
+
+def step_data(tree, game, keys, logs, *, firmware=None, shared_fonts=None, mod=None):
     py = tree / '.venv/bin/python'
     romfs = tree / 'extracted/v0/romfs'
     index = romfs / 'index.json'
@@ -507,9 +724,14 @@ def step_data(tree, game, keys, logs, *, firmware=None, shared_fonts=None):
     if not (tree / 'extracted/v0/romfs-patches/manifest.tsv').exists():
         say('2/4 data: RomFS overlays (quick-menu capture timing, game-over retry)')
         run([py, 'scripts/make_romfs_patches.py'], logs / 'romfs_patches.log', cwd=tree)
-    if not (tree / 'extracted/v0/romfs-patches-out/2560x1440/manifest.tsv').exists():
-        say('2/4 data: RomFS overlay for the 2560x1440 output (key 3 in the game)')
-        run([py, 'scripts/make_output_res_overlay.py', '2560x1440'], logs / 'output_res_overlay.log', cwd=tree)
+    heapdef = mod_heapdef(mod)
+    overlay = tree / 'extracted/v0/romfs-patches-out/2560x1440'
+    why = overlay_stale(overlay, heapdef, tree)
+    if why:
+        say(f'2/4 data: RomFS overlay for the 2560x1440 output (key 3 in the game): {why}'
+            + ('; built on top of the mod\'s heap sizes' if heapdef else ''))
+        run([py, 'scripts/make_output_res_overlay.py', '2560x1440', *(['--heapdef', heapdef] if heapdef else [])],
+            logs / 'output_res_overlay.log', cwd=tree)
 
 
 def build_hactool(tree, logs):
@@ -612,7 +834,7 @@ static FILE *mng_open_base(const char *path) {
     return source/'hactool'
 
 
-def step_update_data(tree, game, update, keys, logs, *, version='v112'):
+def step_update_data(tree, game, update, keys, logs, *, version='v112', mod=None):
     expected = VERSIONS[version]
     folder = tree/f'extracted/{version}/romfs'
     index = folder/'index.json'
@@ -634,11 +856,16 @@ def step_update_data(tree, game, update, keys, logs, *, version='v112'):
         report = json.loads(index.read_text())
         check(f'{expected["display_version"]} RomFS', report['romfs_sha256'], expected['romfs']['sha256'])
         check(f'{expected["display_version"]} RomFS size', report['romfs_size'], expected['romfs']['size'])
+    heapdef = mod_heapdef(mod)
+    if heapdef:
+        say(f'2/4 update: the overlays are built on the mod\'s heap sizes ({heapdef})')
     steps = [('make_romfs_patches.py', []), ('make_output_res_overlay.py', ['2560x1440'])]
     if version == 'v143':   # a TOTK_RENDER_RES scene above 1600x900 grows the same heaps (runtime/game_patches_v143.c)
         steps += [('make_output_res_overlay.py', [canvas, '--scene', scene])
                   for canvas in ('1920x1080', '2560x1440') for scene in ('1920x1080', '2560x1440')]
     for i, (script, arguments) in enumerate(steps):
+        if heapdef and script == 'make_output_res_overlay.py':   # every variant of the file keeps the mod's heap sizes
+            arguments = [*arguments, '--heapdef', heapdef]
         run([tree/'.venv/bin/python', 'scripts/'+script, *arguments, '--version', version],
             logs/(version+'-'+script+(f'-{i}' if i > 1 else '')+'.log'), cwd=tree)
 
@@ -717,6 +944,31 @@ def metal_compiler():
 METAL_FLAGS = ['-fmetal-math-mode=safe']
 
 
+def variant_folder(game):
+    """Where the game keeps the source of each patched shader variant it compiled while it was played (nvn_mtl.m
+    variant_library: sampler border colours, missing varyings, the layer index, no depth output, MetalFX roles), named by
+    its SHA-256: the player's shader cache, ~/Library/Application Support/MacNativeGames/<game>/shader-cache/rt-<chain>."""
+    return Path.home()/'Library/Application Support/MacNativeGames'/APPS[game][2]/'shader-cache/rt-totk-native-v6-unverified/variants'
+
+
+def variant_sources(game):
+    """The recorded variant sources whose name is their SHA-256 (anything else is left out). Compiled ahead with the
+    startup shaders, they are loaded by the game instead of compiled when a draw first needs them: 80-225 ms each on the
+    submit thread with a cold Metal cache, and most of those draws cannot be deferred (2026-10-22)."""
+    folder = variant_folder(game)
+    found = sorted(folder.glob('*.metal')) if folder.is_dir() else []
+    return [p for p in found if len(p.stem) == 64 and sha256(p) == p.stem]
+
+
+def place_variant_libs(tree, res, version):
+    """The compiled variants step_shader_libs listed, in the app's shader-libs beside the startup shaders'."""
+    listed = tree/f'build/shader-libs/variants-{version}.json'
+    for digest in json.loads(listed.read_text()) if listed.is_file() else []:
+        lib = tree/f'build/shader-libs/{digest}.metallib'
+        if len(digest) == 64 and all(c in '0123456789abcdef' for c in digest) and lib.is_file():
+            clone(lib, res/'build/shader-libs'/lib.name)
+
+
 def step_shader_libs(tree, logs, *, version='v0'):
     """Compile the startup shaders ahead of time. Metal's own cache of shaders compiled at launch does not follow the
     app to a folder whose path has another length (step_warm_metal); these files go inside the app. Each is named by the
@@ -736,11 +988,16 @@ def step_shader_libs(tree, logs, *, version='v0'):
     libs.mkdir(parents=True, exist_ok=True)
     stamp.write_text(identity)
     todo = {}
+    known = seed_digests(tree/f'build/shader-seed/{version}')   # the digests the seed's preparation checked
     for src in sources:
-        digest = sha256(src)
+        digest = seed_sha256(src.parent, src.name, known)
         if not (libs/f'{digest}.metallib').is_file():
             todo.setdefault(digest, src)
-    say(f'3/4 shaders: compiling {len(todo)} of {len(sources)} startup shaders ahead of time')
+    variants = variant_sources('botw' if version.startswith('botw') else 'totk')
+    for src in variants:
+        if not (libs/f'{src.stem}.metallib').is_file():
+            todo.setdefault(src.stem, src)
+    say(f'3/4 shaders: compiling {len(todo)} of {len(sources)} startup shaders and {len(variants)} patched variants ahead of time')
 
     def compile_one(item):
         digest, src = item
@@ -755,6 +1012,7 @@ def step_shader_libs(tree, logs, *, version='v0'):
     log = logs/'shader-libs.log'
     log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text('\n'.join(failed))
+    (libs/f'variants-{version}.json').write_text(json.dumps([p.stem for p in variants if (libs/f'{p.stem}.metallib').is_file()]))
     if failed:   # the game compiles these from source at launch, as before
         say(f'   {len(failed)} shaders did not compile ahead of time; they are compiled at launch ({log})')
 
@@ -851,6 +1109,9 @@ def data_bundle(tree, version, logs, *, bundle_id=BUNDLE_ID):
         CFBundleIdentifier=f'{bundle_id}.data.{version}', CFBundleName='Game data', CFBundlePackageType='BNDL',
         CFBundleShortVersionString=VERSIONS[version]['display_version'], CFBundleVersion='1')))
     run(['codesign', '--force', '--sign', '-', tmp], logs / f'sign-data-{version}.log')
+    # Checked once here, where the 16 GB are hashed anyway; an app carrying this bundle checks only its own seal (which
+    # records this bundle's signature), not --deep (55 s on each packaging, 2026-10-21).
+    run(['codesign', '--verify', '--strict', tmp], logs / f'verify-data-{version}.log')
     stamp.unlink(missing_ok=True)
     if bundle.exists():
         shutil.rmtree(bundle)
@@ -910,9 +1171,46 @@ def keep_game_data(new, old, *, verify=app_seal_valid):
 
 def sign_app(app, logs):
     # Seal the bundle, including Info.plist and game resources. Copied helper
-    # executables keep their existing signatures and byte identity.
+    # executables keep their existing signatures and byte identity. Checked once by install_app.
     run(['codesign', '--force', '--sign', '-', app], logs / 'sign-app.log')
-    run(['codesign', '--verify', '--deep', '--strict', app], logs / 'verify-app-signature.log')
+
+
+def remove_in_background(path):
+    """Delete a replaced app after the new one is in place, without waiting: its 90,000 shader files took 25 s."""
+    subprocess.Popen(['rm', '-rf', str(path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def install_app(new, out, *, verify=None, remove=None):
+    """Put the signed app `new` at `out`. Its seal is checked once, before the installed app is touched: by keep_game_data
+    when the installed game data is kept, else here (a seal that does not verify stops the build and leaves the installed
+    app as it is). The installed .app folder stays and takes the new contents; the replaced contents go to a folder whose
+    name is not an app's, deleted in the background with any left by an earlier packaging. Returns whether the installed
+    game data was kept."""
+    verify, remove = verify or app_seal_valid, remove or remove_in_background
+    kept = out.exists() and keep_game_data(new, out, verify=verify)
+    if not kept and not verify(new):
+        raise BuildError(f'{new}: the new app\'s signature does not verify (codesign --verify --strict); the installed app is unchanged')
+    leftovers = sorted(out.parent.glob(f'{glob.escape(out.name)}.replaced-*'))
+    if out.exists():
+        # The .app folder itself stays: macOS keeps its first-run check of an app (Gatekeeper / XProtect read the whole
+        # bundle, 185-200 s for the 17 GB one) with the folder. A new folder with the same contents was scanned again,
+        # new Contents in the same folder were not (2026-10-22). Everything in it moves out, the new Contents move in.
+        old = out.with_name(f'{out.name}.replaced-{os.getpid()}')
+        if old.exists():
+            remove_tree(old)
+        old.mkdir()
+        for entry in list(out.iterdir()):
+            entry.rename(old / entry.name)
+        for entry in list(new.iterdir()):
+            entry.rename(out / entry.name)
+        new.rmdir()
+        leftovers.append(old)
+    else:
+        new.rename(out)
+    for path in leftovers:
+        remove(path)
+    return kept
 
 
 def step_app(tree, out, logs, *, version="v0", game='totk'):
@@ -942,9 +1240,10 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
     else:
         try:
             report = json.loads((seed/'seed-manifest.json').read_text())
+            known = seed_digests(seed)
             if (report['version'] != version or report['chain'] != 'totk-native-v6-unverified' or
                     report['shaders'] < (8000 if game == 'totk' else 2000) or not report['files'] or any(
-                        Path(name).name != name or sha256(seed/name) != digest for name, digest in report['files'].items())):
+                        Path(name).name != name or seed_sha256(seed, name, known) != digest for name, digest in report['files'].items())):
                 raise ValueError('version, translation chain or file hash differs')
         except (ValueError, KeyError, OSError, TypeError) as error:
             raise BuildError(f'invalid prepared startup shader seed: {error}') from None
@@ -953,6 +1252,7 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
             lib = tree/f'build/shader-libs/{report["files"][src.name]}.metallib'
             if lib.is_file():
                 clone(lib, res/'build/shader-libs'/lib.name)
+        place_variant_libs(tree, res, version)
     # after the checks above: signing it is slow
     place_data_bundle(data_bundle(tree, version, logs, bundle_id=bundle_id), tmp, res, version)
     clone(tree / 'build/app-launcher', tmp / f'Contents/MacOS/{executable}')
@@ -981,11 +1281,8 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
             say('4/4 app: replacement is ready; waiting for the running game to close before updating it')
             notified = time.monotonic()
         time.sleep(2)
-    if out.exists() and keep_game_data(tmp, out):
+    if install_app(tmp, out):
         say('4/4 app: the game data is unchanged; kept the installed copy, so the first start need not verify it again')
-    if out.exists():
-        remove_tree(out)
-    tmp.rename(out)
 
 
 def last_json(log):
@@ -1235,6 +1532,15 @@ def parse_args(argv):
     ap.add_argument('-k', '--keys', type=Path, required=True, help='your prod.keys')
     ap.add_argument('-o', '--out', type=Path, help=f'the app or IPA to write (default depends on --platform; next to the game file)')
     ap.add_argument('--work', type=Path, help='work folder (default: TOTK_build next to the game file)')
+    ap.add_argument('--mod', type=Path, metavar='FOLDER',
+                    help='a mod folder prepared before the build: its exefs/ IPS / IPS32 / pchtxt patches for the main '
+                         'module are merged into the code before it is rewritten (its romfs/ goes in with '
+                         '--install-mod-romfs; docs/mods.md)')
+    ap.add_argument('--install-mod-romfs', action='store_true',
+                    help='with --mod: at the end of the build, replace <data>/mods/<version> with the mod\'s romfs/ '
+                         'and its manifest.tsv, so the app plays with the mod. That folder is the player\'s: what it '
+                         'held is moved next to it as <version>.backup-<date>-<time>, not deleted. Without this flag '
+                         'the build leaves the folder alone and prints the two commands that fill it by hand')
     ap.add_argument('--shader-cache', type=Path, help=argparse.SUPPRESS)   # removed: the seed comes from the game data and the shared list
     ap.add_argument('--no-shader-reminder', action='store_true', help='iOS: do not install the Mac agent that asks, while an iPhone / iPad with the game is connected, to send the shaders the shared list lacks')
     fonts = ap.add_mutually_exclusive_group()
@@ -1260,6 +1566,20 @@ def main(argv):
     update = args.update.expanduser().resolve() if args.update else None
     if update and (not update.is_file() or input_kind(update) not in ('nsp', 'nsz')):
         raise BuildError('--update must be a separate cumulative NSP or NSZ')
+    mod = args.mod.expanduser().resolve() if args.mod else None
+    if mod and not ((mod / 'exefs').is_dir() or (mod / 'romfs').is_dir()):
+        raise BuildError(f'--mod expects a mod folder prepared before the build (its files under exefs/ and/or romfs/): '
+                         f'{mod} has neither. See docs/mods.md.')
+    if args.install_mod_romfs and not mod:
+        raise BuildError('--install-mod-romfs fills the player\'s mod folder from a mod\'s romfs/, so it needs --mod '
+                         '<mod folder>; nothing was written')
+    if args.install_mod_romfs and not (mod / 'romfs').is_dir():
+        raise BuildError(f'--install-mod-romfs installs {mod.name}/romfs into the player\'s mod folder, and this mod has '
+                         f'none; leave the flag out to merge its code patches only')
+    if args.install_mod_romfs and args.platform == 'ios':
+        raise BuildError('an iPhone / iPad build loads no player mod folder, so --install-mod-romfs has nothing to fill: '
+                         'build the Mac app (leave out --platform ios) to install a mod\'s RomFS')
+    code_mod = mod if mod and (mod / 'exefs').is_dir() else None   # a data-only mod has no code to merge
     version = 'v0'
     firmware = args.firmware.expanduser().resolve() if args.firmware else None
     shared_fonts = args.shared_fonts.expanduser().resolve() if args.shared_fonts else None
@@ -1287,6 +1607,9 @@ def main(argv):
             shutil.rmtree(work)
         if args.platform == 'ios':
             raise BuildError('Breath of the Wild has no iPhone / iPad build yet: build the Mac app (leave out --platform ios)')
+        if mod:
+            raise BuildError('--mod: merging a mod\'s main-module patches is only wired for Tears of the Kingdom so far '
+                             '(the patch sites of Breath of the Wild 1.6.0 are not listed in scripts/patch_sites.py)')
         if not args.work:
             work = game.parent / 'BotW_build'
             logs = work / 'logs'
@@ -1311,7 +1634,7 @@ def main(argv):
         say(f'4/4 app: assembling {out}')
         step_app(tree, out, logs, version='botw160', game='botw')
         run([LSREGISTER, '-f', out], logs / 'register-app.log')
-        say('4/4 app: macOS checks the new app once (a few minutes for the 16 GB bundle)')
+        say('4/4 app: macOS checks the app once (seconds when this app folder was checked before, a few minutes for a new one)')
         t1 = time.time()
         r = subprocess.run([out / f'Contents/MacOS/{APPS["botw"][2]}', '--check'], capture_output=True, text=True, timeout=1800)
         if r.returncode: raise BuildError(f'the app does not start: {(r.stdout + r.stderr).strip()}')
@@ -1342,14 +1665,21 @@ def main(argv):
             raise BuildError('needs about 40 GB free for a fresh base + update build (19 GB extra with base data cached)')
         if free<25 and not base_cached:
             raise BuildError('needs about 25 GB free for the work folder (the app itself is an APFS clone of it when on the same volume)')
+    if mod and args.install_mod_romfs:      # said before the long steps, so a mistake can still be stopped with Ctrl-C
+        say(f'--install-mod-romfs: the player\'s mod folder for the version this build makes will be REPLACED by '
+            f'{mod.name}/romfs (and its manifest.tsv) when the build ends; what it holds now is moved next to it as '
+            f'<folder>.backup-<date>-<time>, not deleted. Without the flag the build leaves the folder alone.')
     if update:
         version, update = identify_update(tree, update, keys, logs)
-    step_code(tree, game, keys, env, logs)
+    step_code(tree, game, keys, env, logs, mod=None if update else code_mod)
     if update:
-        step_code(tree, update, keys, env, logs, version=version)
-    step_data(tree, game, keys, logs, firmware=firmware, shared_fonts=shared_fonts)
+        step_code(tree, update, keys, env, logs, version=version,
+                  mod=code_mod)   # a mod is for the updated main, not for 1.0.0
+    step_data(tree, game, keys, logs, firmware=firmware, shared_fonts=shared_fonts, mod=None if update else mod)
     if update:
-        step_update_data(tree, game, update, keys, logs, version=version)
+        step_update_data(tree, game, update, keys, logs, version=version, mod=mod)
+    if mod:
+        check_mod_overlays(tree, mod, version)
     step_shaders(tree, logs, version=version)
     step_shader_libs(tree, logs, version=version)
     step_binary(tree, game, keys, env, logs, version=version)
@@ -1374,12 +1704,18 @@ def main(argv):
     # macOS scans a new app the first time it runs (minutes for 16 GB, with nothing on screen): run it once here, in its
     # check-only mode, so the player's first start is immediate.
     if args.platform=='macos':
-        say('4/4 app: macOS checks the new app once (a few minutes for the 16 GB bundle)')
+        say('4/4 app: macOS checks the app once (seconds when this app folder was checked before, a few minutes for a new one)')
         t1 = time.time()
         r = subprocess.run([out / 'Contents/MacOS/TOTK', '--check'], capture_output=True, text=True, timeout=1800)
         if r.returncode: raise BuildError(f'the app does not start: {(r.stdout + r.stderr).strip()}')
         say(f'   checked in {time.time() - t1:.0f} s')
         step_warm_metal(tree, out, logs)
+        if mod and args.install_mod_romfs:
+            install_mod_romfs(mod, tree, version, out, py, logs)   # --install-mod-romfs: <data>/mods/<version> + its manifest
+        elif mod:
+            say_mod_copy_steps(mod, tree, version, out)            # the folder is the player's: only say how to fill it
+    elif mod:
+        say('4/4 app: an iPhone / iPad build loads no player mod folder, so --mod merged its code patches only')
     say(f'done in {(time.time() - t0) / 60:.0f} min: {out}')
     if args.platform=='macos':
         say('Open it from Finder. Moving it afterwards (also to /Applications) keeps the macOS check when it stays on the same '

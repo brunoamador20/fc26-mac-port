@@ -12,6 +12,18 @@ thing for macOS. The rewrites of versions 1.0.0, 1.1.2 and 1.4.3 were verified s
 inputs against the original in an emulator, with negative controls); the build checks that your rewrite is byte for
 byte the selected version (`games/totk/assets/expected-v1.0.0.json` / `expected-v1.1.2.json` / `expected-v1.4.3.json`).
 
+The rewrites are what makes the code the app's own: it is bound by SHA-256, so a patch cannot be applied while the game
+runs. A player mod that changes the code therefore merges its main-module patches *before* that step
+(`--mod <mod folder>`, `games/totk/scripts/mod_exefs.py`): an IPS / IPS32 / pchtxt patch is applied to the verified
+retail main (a `.pchtxt` says in `@nsobid-` which build of main it is for, with `@enabled` / `@disabled` switching the
+sections on and off and `@flag offset_shift 0x100` required before the first patch line; an `.ips` carries no id, so it counts as a
+main patch only when it is named `main` or after main's build id), refused if it lands on a site the app patches itself (the 60 FPS, resolution, ultrawide and cloth sites,
+and the rewriter's registered cuts - `games/totk/scripts/patch_sites.py` reads them out of the C sources, and the signed
+jump tables out of `patch_nso.py`), and the
+merged module is then rewritten and bound like the retail one. Extra code modules a mod ships are not loaded: the app
+loads the three modules below. The same build replaces the version's player mod folder with the mod's RomFS files only
+when `--install-mod-romfs` is given (`games/totk/scripts/mod_folder.py`): that folder may hold files of the player's own.
+
 The loader maps the three rewritten modules (main, sdk, subsdk0) at their original layout, resolves their imports
 against each other, and starts the game's own `nn::init::Start`.
 
