@@ -489,7 +489,7 @@ void runtime_startup_checkpoint(uintptr_t caller) {
  for(unsigned i=0;i<NM;i++){uint32_t state;memcpy(&state,modules[i].base+modules[i].ctor_flag,4);need(state==2,"constructor checkpoint state");}
  printf("{\"status\":\"pass\",\"phase\":4,\"original_nnMain_return_pc\":\"0x%x\",\"scope\":\"all DT_INIT constructor loops completed; original nnMain prefix executed; stops at focus setup\"}\n", GAME_ADDR(0xe995c4));fflush(stdout);_exit(0);
 }
-#ifndef GAME_BOTW
+#ifndef GAME_BOTW160
 static void module_finis(void) { runtime_fail("guest exited: module finalizers not yet implemented"); }
 #endif
 static void boot(void) {
@@ -497,7 +497,7 @@ static void boot(void) {
  runtime_boot_status(TOTK_UI("启动游戏运行环境","Starting the game runtime"),TOTK_UI("连接游戏代码与 macOS 系统服务","Connecting the game code to macOS system services"));
  runtime_thread_init();uint32_t main_handle=svc_thread_main_init();
 #ifdef GAME_BOTW
- /* SDK 7.3.2 (Breath of the Wild): Start(handle, arg, rtld callback, module initializers). The order inside is the one of
+ /* SDK 7.3.2 (Breath of the Wild 1.6.0): Start(handle, arg, rtld callback, module initializers). The order inside is the one of
     TOTK's SDK 15 (libc0, nnosInitialize, callback, libc1, InitializeSdkModule, nninitStartup, libc2, callback, nnMain), but
     after nnMain it calls nninitFinalizeSdkModule and quick-exits itself instead of a third callback. */
  /* Host functions called from the main thread run on a stack of their own (8 MiB, guard page), as on every other guest
@@ -506,8 +506,13 @@ static void boot(void) {
     runs on core 0 waited for the main thread's next SVC (botw.md). */
  if(!getenv("TOTK_MAIN_PREEMPT")||strcmp(getenv("TOTK_MAIN_PREEMPT"),"0")){extern void runtime_hle_stack_set(uintptr_t top);size_t n=8u<<20;void *hs=mmap(NULL,n,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
   need(hs!=MAP_FAILED&&mprotect(hs,0x4000,PROT_NONE)==0,"main thread host-service stack");runtime_hle_stack_set((uintptr_t)hs+n-64);}
+#endif
+#ifdef GAME_BOTW160
  fprintf(stderr,"[totk] ENTER original nn::init::Start (SDK 7)\n");
  ((void(*)(uint64_t,uint64_t,void(*)(void),void(*)(void)))required("_ZN2nn4init5StartEmmPFvvES2_"))(main_handle,0,loader_ready,module_inits);
+#elif defined(GAME_BOTW)   /* 1.9.0 (SDK 20.5) takes the five-argument Start of TOTK's SDK */
+ fprintf(stderr,"[totk] ENTER original nn::init::Start (SDK 20.5)\n");
+ ((void(*)(uint64_t,uint64_t,void(*)(void),void(*)(void),void(*)(void)))required("_ZN2nn4init5StartEmmPFvvES2_S2_"))(main_handle,0,loader_ready,module_inits,module_finis);
 #else
  fprintf(stderr,"[totk] ENTER original nn::init::Start sdk+0xfa060\n");
  ((void(*)(uint64_t,uint64_t,void(*)(void),void(*)(void),void(*)(void)))required("_ZN2nn4init5StartEmmPFvvES2_S2_"))(main_handle,0,loader_ready,module_inits,module_finis);
