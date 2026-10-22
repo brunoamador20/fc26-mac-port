@@ -6295,8 +6295,12 @@ static int vs_layerable(NvShader *vs) {
 static NSString *fs_src_without_depth(NvShader *fs);
 /* TOTK: samplers that clamp to a border colour Metal does not have (samp_border_custom) are emulated in the shader: the
    stage's sample calls on them return that colour when the coordinate is outside [0, 1]. border_key lists the stage's
-   bound samplers that need it (argument id and colour; nil when none), border_src rewrites the MSL. */
-static NSString *border_key(NvShader *sh, int stage, float colours[][4], int aids[], unsigned axes[], int *n) {
+   bound samplers that need it (argument id and colour; nil when none), border_src rewrites the MSL. A filtering sampler
+   (border_filtered) also blends the colour into texels near the edge, so its filter state is part of the key. */
+static int border_filtered(const samp_par *p) {   // MIN/MAX reduction is not affine in the colour: it keeps the plain test
+    return !p->reduction && (p->magf || p->minf == 1 || p->minf == 3 || p->minf == 5 || p->aniso > 1);
+}
+static NSString *border_key(NvShader *sh, int stage, float colours[][4], int aids[], unsigned axes[], samp_par params[], int *n) {
     *n = 0;
     if (!atomic_load_explicit(&g_border_custom_any, memory_order_relaxed)) return nil;
     NSMutableString *key = nil;
@@ -6307,20 +6311,22 @@ static NSString *border_key(NvShader *sh, int stage, float colours[][4], int aid
         int sid = (int)((b->kind == NVN_RB_SAMPT ? S.tex[stage][b->reg] : S.samp[stage][b->reg]) >> 20);
         if (sid <= 0 || sid >= g_nsreg || !g_sreg_ok[sid] || !samp_border_custom(&g_sreg[sid])) continue;
         memcpy(colours[*n], g_sreg[sid].border, sizeof colours[*n]); aids[*n] = b->aid;
-        const samp_par *p = &g_sreg[sid];
+        const samp_par *p = &g_sreg[sid]; params[*n] = *p;
         axes[*n] = ((p->ws == 4 || p->ws == 5) ? 1u : 0u) |
                    ((p->wt == 4 || p->wt == 5) ? 2u : 0u) |
                    ((p->wr == 4 || p->wr == 5) ? 4u : 0u);
         if (!key) key = [NSMutableString string];
-        [key appendFormat:@"%d:%u:%a,%a,%a,%a;", b->aid, axes[*n], colours[*n][0], colours[*n][1], colours[*n][2], colours[*n][3]];
+        [key appendFormat:@"%d:%u:%a,%a,%a,%a", b->aid, axes[*n], colours[*n][0], colours[*n][1], colours[*n][2], colours[*n][3]];
+        if (border_filtered(p)) [key appendFormat:@":f%u,%u,%u,%u,%u,%a,%a,%a", p->ws, p->wt, p->wr, p->magf, p->minf, p->aniso, p->lod_min, p->lod_max];
+        [key appendString:@";"];
         ++*n;
     }
     registry_unlock();
     if (key) sh->border_seen = 1;
     return key;
 }
-static NSString *border_src(NvShader *sh, NSString *src0, float colours[][4], const int aids[], const unsigned axes[], int n) {
-    NSString *src = src0; int patched = 0;
+static NSString *border_src(NvShader *sh, NSString *src0, float colours[][4], const int aids[], const unsigned axes[], const samp_par params[], int n) {
+    NSString *src = src0; int patched = 0; NSMutableString *filtered = [NSMutableString string];
     for (int i = 0; i < n; i++) {   // SPIRV-Cross: "sampler <name> [[id(<aid>)]]" in the argument struct, used as tex.sample(spvDescriptorSet0.<name>, coord, ...)
         NSString *decl = [NSString stringWithFormat:@"sampler\\s+(\\w+)\\s*\\[\\[id\\(%d\\)\\]\\]", aids[i]];
         NSTextCheckingResult *m = [[NSRegularExpression regularExpressionWithPattern:decl options:0 error:nil] firstMatchInString:src options:0 range:NSMakeRange(0, src.length)];
@@ -6328,8 +6334,29 @@ static NSString *border_src(NvShader *sh, NSString *src0, float colours[][4], co
         NSString *name = [src substringWithRange:[m rangeAtIndex:1]];
         NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:[NSString stringWithFormat:@"([\\w.]+)\\.sample\\((\\s*spvDescriptorSet0\\.%@\\s*,)", name] options:0 error:nil];
         patched += (int)[re numberOfMatchesInString:src options:0 range:NSMakeRange(0, src.length)];
-        src = [re stringByReplacingMatchesInString:src options:0 range:NSMakeRange(0, src.length)
-                                      withTemplate:[NSString stringWithFormat:@"totk_border_sample(float4(%a, %a, %a, %a), %uu, $1,$2", colours[i][0], colours[i][1], colours[i][2], colours[i][3], axes[i]]];
+        NSString *replacement = [NSString stringWithFormat:@"totk_border_sample(float4(%a, %a, %a, %a), %uu, $1,$2", colours[i][0], colours[i][1], colours[i][2], colours[i][3], axes[i]];
+        const samp_par *p = &params[i];
+        if (border_filtered(p)) {
+            // Filtering is affine in the border colour: samples with a transparent black and an opaque white border give
+            // its exact weight in the footprint (edge, mip and anisotropic filtering included), black + c * (white - black).
+            const char *address[] = {"clamp_to_edge", "repeat", "clamp_to_edge", "clamp_to_edge", "clamp_to_border", "clamp_to_border", "mirrored_repeat", "clamp_to_edge"};   // wrapm; mirror-clamp: abs() below
+            unsigned w[] = {p->ws, p->wt, p->wr};
+            NSString *state = [NSString stringWithFormat:@"coord::normalized, s_address::%s, t_address::%s, r_address::%s, mag_filter::%s, min_filter::%s, mip_filter::%s, max_anisotropy(%u), lod_clamp(%a, %a)",
+                address[w[0] < 8 ? w[0] : 1], address[w[1] < 8 ? w[1] : 1], address[w[2] < 8 ? w[2] : 1],
+                p->magf ? "linear" : "nearest", (p->minf == 1 || p->minf == 3 || p->minf == 5) ? "linear" : "nearest",
+                p->minf <= 1 ? "none" : p->minf <= 3 ? "nearest" : "linear", (unsigned)(p->aniso < 1 ? 1 : p->aniso > 16 ? 16 : p->aniso), p->lod_min < 0 ? 0.0 : (double)p->lod_min, (double)p->lod_max];
+            [filtered appendFormat:@"constexpr sampler totk_border_black_%d(%@, border_color::transparent_black);\nconstexpr sampler totk_border_white_%d(%@, border_color::opaque_white);\n", i, state, i, state];
+            for (int kind = 0; kind < 3; kind++) {
+                NSMutableString *mirror = [NSMutableString string];
+                for (int axis = 0; axis < (kind == 2 ? 3 : 2); axis++) if (w[axis] == 2 || w[axis] == 3)
+                    [mirror appendFormat:@"uv.%c = abs(uv.%c); ", "xyz"[axis], "xyz"[axis]];
+                [filtered appendFormat:@"template<typename T, typename... A> static inline vec<T, 4> totk_border_filtered_%d(%s<T> t, sampler unused, %s uv, A... a)\n{ %@float4 black = float4(t.sample(totk_border_black_%d, uv, a...)); float4 white = float4(t.sample(totk_border_white_%d, uv, a...)); return vec<T, 4>(black + float4(%a, %a, %a, %a) * (white - black)); }\n",
+                    i, kind == 2 ? "texture3d" : kind == 1 ? "texture2d_array" : "texture2d", kind == 2 ? "float3" : "float2", mirror, i, i, colours[i][0], colours[i][1], colours[i][2], colours[i][3]];
+            }
+            [filtered appendFormat:@"template<typename Tex, typename C, typename... A> static inline auto totk_border_filtered_%d(Tex t, sampler s, C uv, A... a) -> decltype(t.sample(s, uv, a...)) { return t.sample(s, uv, a...); }\n", i];   // cube, depth: as before
+            replacement = [NSString stringWithFormat:@"totk_border_filtered_%d($1,$2", i];
+        }
+        src = [re stringByReplacingMatchesInString:src options:0 range:NSMakeRange(0, src.length) withTemplate:replacement];
     }
     if (!patched) { static int warned; if (!warned++) MLOG("[totk] shader %s: a sampler clamps to a border colour Metal lacks, but no sample call to emulate it was found", sh->key); return nil; }
     NSString *helper =   // 2D, 2D array and 3D textures test the normalized coordinate; other kinds (cube, depth) sample as before
@@ -6345,7 +6372,7 @@ static NSString *border_src(NvShader *sh, NSString *src0, float colours[][4], co
     if (r.location == NSNotFound) MDIE("shader %s: no 'using namespace metal;' for the border colour helper", sh->key);
     static int logged; if (logged++ < 16) MLOG("[totk] shader %s: sampler border colour %g %g %g %g emulated in the shader (%d samples; Metal has no such border colour)",
                                               sh->key, colours[0][0], colours[0][1], colours[0][2], colours[0][3], patched);
-    return [src stringByReplacingCharactersInRange:NSMakeRange(NSMaxRange(r), 0) withString:helper];
+    return [src stringByReplacingCharactersInRange:NSMakeRange(NSMaxRange(r), 0) withString:[helper stringByAppendingString:filtered]];
 }
 /* Async variants (async shaders, Mac): the patched functions below (border colours, missing varyings, the layer index, no
    depth output, MetalFX roles) are compiled from rewritten source when a draw first needs them. They are in no prepared
@@ -6376,10 +6403,10 @@ static int variant_defer(NSString *job, void (^build)(void)) {
     return 1;
 }
 #define VARIANT_NONE ((__bridge id)kCFNull)   // cached: the border rewrite found no sample call, so no patched function
-typedef struct { float c[8][4]; int a[8]; unsigned x[8]; int n; } border_in;
+typedef struct { float c[8][4]; int a[8]; unsigned x[8]; samp_par p[8]; int n; } border_in;
 static os_unfair_lock g_bpatch_lock = OS_UNFAIR_LOCK_INIT, g_vpatch_lock = OS_UNFAIR_LOCK_INIT;   // NvShader bpatch / vpatch
 /* Border recipes: a stage's border_key text holds every input of its variant ("<argument id>:<axes>:<r>,<g>,<b>,<a>;" per
-   sampler, colours in %a), so it reads back exactly. pso_adopt records it with the pipeline (B rows) and the next start's
+   sampler, colours in %a; a filtering sampler adds ":f<ws>,<wt>,<wr>,<magf>,<minf>,<aniso>,<lod min>,<lod max>" before ';'), so it reads back exactly. pso_adopt records it with the pipeline (B rows) and the next start's
    warm-up builds the border variant and its pipeline from it (warm_worker): the pipeline only ever drawn with those
    samplers was otherwise rebuilt in every session, 25 ms each and two thirds of the pipelines made in play (2026-10-22). */
 static int border_parse(NSString *key, border_in *b) {
@@ -6389,7 +6416,16 @@ static int border_parse(NSString *key, border_in *b) {
         if (b->n >= 8) return 0;
         char *e; long aid = strtol(s, &e, 10); if (e == s || *e != ':') return 0; s = e + 1;
         unsigned long ax = strtoul(s, &e, 10); if (e == s || *e != ':' || ax > 7) return 0; s = e + 1;
-        for (int c = 0; c < 4; c++) { float v = strtof(s, &e); if (e == s || *e != (c < 3 ? ',' : ';')) return 0; b->c[b->n][c] = v; s = e + 1; }
+        for (int c = 0; c < 4; c++) { float v = strtof(s, &e); if (e == s || (*e != (c < 3 ? ',' : ';') && !(c == 3 && *e == ':'))) return 0; b->c[b->n][c] = v; s = e + 1; }
+        if (*e == ':') {
+            samp_par *p = &b->p[b->n]; unsigned long u[5]; float f[3];
+            if (*s++ != 'f') return 0;
+            for (int j = 0; j < 5; j++) { u[j] = strtoul(s, &e, 10); if (e == s || *e != ',' || u[j] > 255) return 0; s = e + 1; }
+            for (int j = 0; j < 3; j++) { f[j] = strtof(s, &e); if (e == s || *e != (j < 2 ? ',' : ';')) return 0; s = e + 1; }
+            p->ws = (uint8_t)u[0]; p->wt = (uint8_t)u[1]; p->wr = (uint8_t)u[2]; p->magf = (uint8_t)u[3]; p->minf = (uint8_t)u[4];
+            p->aniso = f[0]; p->lod_min = f[1]; p->lod_max = f[2];
+            if (!border_filtered(p)) return 0;
+        }
         b->a[b->n] = (int)aid; b->x[b->n] = (unsigned)ax; b->n++;
     }
     return b->n > 0;
@@ -6399,7 +6435,7 @@ static id<MTLFunction> fs_fn_border_with(NvShader *fs, int nodepth, NSString *ke
 static id<MTLFunction> fs_fn_border(NvShader *fs, int nodepth, NSString **recipe) {
     if (!fs || !sh_has_src(fs)) return nil;
     border_in b;
-    NSString *key = border_key(fs, 1, b.c, b.a, b.x, &b.n);
+    NSString *key = border_key(fs, 1, b.c, b.a, b.x, b.p, &b.n);
     if (!key) return nil;
     if (recipe) *recipe = key;
     return fs_fn_border_with(fs, nodepth, key, b, NULL);
@@ -6414,7 +6450,7 @@ static id<MTLFunction> fs_fn_border_with(NvShader *fs, int nodepth, NSString *bk
     if (fn) return fn == VARIANT_NONE ? nil : fn;
     id (^make)(void) = ^id {
         border_in v = b;
-        NSString *src = border_src(fs, nd ? fs_src_without_depth(fs) : sh_src(fs), v.c, v.a, v.x, v.n);
+        NSString *src = border_src(fs, nd ? fs_src_without_depth(fs) : sh_src(fs), v.c, v.a, v.x, v.p, v.n);
         id f = VARIANT_NONE;
         if (src) {
             NSError *err = nil; id<MTLLibrary> lib = variant_library(src, &err);
@@ -6437,7 +6473,7 @@ static id<MTLFunction> vs_fn_variant(NvShader *vs, NvShader *fs, int layered, NS
    samplers with a border colour Metal lacks (PSO_VBORDER). recipe: their border_key. */
 static id<MTLFunction> vs_fn_for(NvShader *vs, NvShader *fs, int layered, int border, NSString **recipe) {
     border_in b; b.n = 0;
-    NSString *bkey = border && sh_has_src(vs) ? border_key(vs, 0, b.c, b.a, b.x, &b.n) : nil;
+    NSString *bkey = border && sh_has_src(vs) ? border_key(vs, 0, b.c, b.a, b.x, b.p, &b.n) : nil;
     if (recipe) *recipe = bkey;
     return vs_fn_variant(vs, fs, layered, bkey, b, NULL);
 }
@@ -6464,7 +6500,7 @@ static id<MTLFunction> vs_fn_variant(NvShader *vs, NvShader *fs, int layered, NS
         if (layered) [add appendString:@"    uint totk_layer [[render_target_array_index]];\n"];
         NSString *head = @"struct main0_out\n{\n";
         NSString *vsrc0 = sh_src(vs);
-        if (bkey) { NSString *bs = border_src(vs, vsrc0, v.c, v.a, v.x, v.n); if (bs) vsrc0 = bs; }
+        if (bkey) { NSString *bs = border_src(vs, vsrc0, v.c, v.a, v.x, v.p, v.n); if (bs) vsrc0 = bs; }
         NSRange r = [vsrc0 rangeOfString:head];
         if (r.location == NSNotFound) MDIE("vertex shader %s: no main0_out to extend", vs->key);
         NSString *src = [vsrc0 stringByReplacingCharactersInRange:r withString:[head stringByAppendingString:add]];
@@ -6970,7 +7006,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get(NvProg *pr, MTLRen
     NSString *vrec = nil, *frec = nil;   // the border recipes of this key (pso_adopt)
     __unsafe_unretained id<MTLFunction> bfn = !g_pso_lmap && !g_mfx.role ? fs_fn_border(fs, k.dfmt == 0, &frec) : nil;   // TOTK: sampler border colour emulation
     if (bfn) k.fsfn = (__bridge void *)bfn;
-    { float bc[8][4]; int ba[8], bn; unsigned axes[8]; if (border_key(vs, 0, bc, ba, axes, &bn)) {
+    { float bc[8][4]; int ba[8], bn; unsigned axes[8]; samp_par bp[8]; if (border_key(vs, 0, bc, ba, axes, bp, &bn)) {
         k.a2c |= PSO_VBORDER;
         // The same shader can bind different border constants. Cache the actual
         // vertex variant identity, not just the fact that one exists. Persisted
