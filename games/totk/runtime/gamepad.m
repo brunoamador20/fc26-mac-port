@@ -18,7 +18,6 @@ static pthread_mutex_t gamepadLock = PTHREAD_MUTEX_INITIALIZER;
 static RuntimeGamepadState gamepadState;
 static uint64_t pressedEdges;
 static BOOL started;
-static dispatch_source_t pollTimer;
 static uint16_t controllerMap[CONTROLLER_BUTTONS];
 static uint8_t controllerModes[CONTROLLER_BUTTONS];
 static uint64_t physicalPrev;
@@ -101,14 +100,21 @@ static IOHIDManagerRef hidManager;
 static IOHIDDeviceRef hidDevice;
 static BOOL hidRefreshPending;
 static unsigned char hidButtons[16];          /* usage 1..15, 1 = pressed */
-static int hidHat = 8;                        /* 0 N, 2 E, 4 S, 6 W; 8 centred */
-static int hidX = 128, hidY = 128, hidZ = 128, hidRz = 128;   /* 0..255, 128 centred */
+static int hidHat = 8;                        /* 0 N, 1 NE, 2 E ... 7 NW; 8 centred */
+static float hidX, hidY, hidZ, hidRz;         /* -1..1, 0 centred */
 
-static int32_t hid_stick(int raw, int invert) {
-    float v = invert ? (128.0f - (float)raw) / 127.0f : ((float)raw - 128.0f) / 127.0f;
-    if (v > 1.0f) v = 1.0f;
-    if (v < -1.0f) v = -1.0f;
-    return stick_axis(v);
+/* Axes and the hat are scaled from the element's own logical range (after PR #190): pads report 8-bit sticks (0..255),
+   16-bit ones (0..65535 or -32768..32767) or a hat numbered from 1. A range the descriptor leaves empty counts as 0..255. */
+static float hid_axis(IOHIDElementRef element, int v) {
+    CFIndex lo = IOHIDElementGetLogicalMin(element), hi = IOHIDElementGetLogicalMax(element);
+    if (hi <= lo) { lo = 0; hi = 255; }
+    float f = (float)(v - lo) / (float)(hi - lo) * 2.0f - 1.0f;
+    return f > 1.0f ? 1.0f : f < -1.0f ? -1.0f : f;
+}
+static int hid_hat(IOHIDElementRef element, int v) {   /* 8 positions (or 4, every other one); outside the range: centred */
+    CFIndex lo = IOHIDElementGetLogicalMin(element), hi = IOHIDElementGetLogicalMax(element), n = hi - lo + 1;
+    if (v < lo || v > hi || (n != 8 && n != 4)) return 8;
+    return (int)(v - lo) * (n == 4 ? 2 : 1);
 }
 
 /* The same physical bits gamepad_buttons() produces, so the layout file cannot tell the two sources apart. */
@@ -138,10 +144,10 @@ static void hid_pad_compute(void) {
     }
     hidPad.present = 1;
     hidPad.buttons = buttons;
-    hidPad.lx = hid_stick(hidX, 0);
-    hidPad.ly = hid_stick(hidY, 1);    /* HID Y grows downwards, the game's grows upwards */
-    hidPad.rx = hid_stick(hidZ, 0);
-    hidPad.ry = hid_stick(hidRz, 1);
+    hidPad.lx = stick_axis(hidX);
+    hidPad.ly = stick_axis(-hidY);    /* HID Y grows downwards, the game's grows upwards */
+    hidPad.rx = stick_axis(hidZ);
+    hidPad.ry = stick_axis(-hidRz);
 }
 
 static void hid_value(void *context, IOReturn result, void *sender, IOHIDValueRef value) {
@@ -152,15 +158,15 @@ static void hid_value(void *context, IOReturn result, void *sender, IOHIDValueRe
     if (page == kHIDPage_Button && usage >= 1 && usage <= 15) {
         hidButtons[usage] = (unsigned char)(v != 0);
     } else if (page == kHIDPage_GenericDesktop && usage == kHIDUsage_GD_Hatswitch) {
-        hidHat = v;
+        hidHat = hid_hat(element, v);
     } else if (page == kHIDPage_GenericDesktop && usage == kHIDUsage_GD_X) {
-        hidX = v;
+        hidX = hid_axis(element, v);
     } else if (page == kHIDPage_GenericDesktop && usage == kHIDUsage_GD_Y) {
-        hidY = v;
+        hidY = hid_axis(element, v);
     } else if (page == kHIDPage_GenericDesktop && usage == kHIDUsage_GD_Z) {
-        hidZ = v;
+        hidZ = hid_axis(element, v);
     } else if (page == kHIDPage_GenericDesktop && usage == kHIDUsage_GD_Rz) {
-        hidRz = v;
+        hidRz = hid_axis(element, v);
     } else {
         return;
     }
@@ -175,7 +181,7 @@ static void hid_value(void *context, IOReturn result, void *sender, IOHIDValueRe
 static void hid_pad_reset(void) {
     memset(hidButtons, 0, sizeof hidButtons);
     hidHat = 8;
-    hidX = hidY = hidZ = hidRz = 128;
+    hidX = hidY = hidZ = hidRz = 0;
     hidPad = (HIDPadState){0};
 }
 
@@ -345,12 +351,6 @@ void runtime_gamepad_start(void) {
     for (GCController *controller in GCController.controllers) attach_gamepad(controller);
     [GCController startWirelessControllerDiscoveryWithCompletionHandler:nil];
     hid_pad_start();
-    /* A stick is read from the controller's current value, not only when GameController reports a change: a change it
-       never reports (or reports on the wrong element) would leave the last stick position stuck in the game. */
-    pollTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    dispatch_source_set_timer(pollTimer, DISPATCH_TIME_NOW, 8 * NSEC_PER_MSEC, NSEC_PER_MSEC);
-    dispatch_source_set_event_handler(pollTimer, ^{ if (GCController.controllers.count) refresh_gamepads(); });
-    dispatch_resume(pollTimer);
 }
 
 void runtime_gamepad_clear(void) {
