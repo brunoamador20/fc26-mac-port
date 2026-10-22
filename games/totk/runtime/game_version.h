@@ -15,6 +15,7 @@
 #define GAME_FOLDER "BotW"   /* ~/Library/Application Support/MacNativeGames/<GAME_FOLDER> (app/launcher.m) */
 #define GAME_LOG "botw"      /* ~/Library/Logs/MacNativeGames/<GAME_LOG>.log */
 #define GAME_CONTRIB_TEMPLATE "shader-list-botw.yml"   /* the issue form for this game's shared shader list (totk_shader_contrib.h) */
+#define TOTK_CONTRIB_STEP 500   /* its seed has no default variant of every shader yet: every new variant is noted */
 #define GAME_CONTRIB_TITLE "Shader list (Breath of the Wild):"   /* the title prefix of an automatically submitted contribution */
 #define TOTK_GAME_DIR "botw160"
 #define GAME_ADDR_0xe995c4 0xe53f8c   /* return address of nnMain's only call to nn::oe::SetFocusHandlingMode */
@@ -31,6 +32,7 @@
 #define GAME_FOLDER "BotW"
 #define GAME_LOG "botw"
 #define GAME_CONTRIB_TEMPLATE "shader-list-botw.yml"
+#define TOTK_CONTRIB_STEP 500
 #define GAME_CONTRIB_TITLE "Shader list (Breath of the Wild):"
 #define TOTK_GAME_DIR "botw190"
 #define GAME_ADDR_0xe995c4 0xc617e8   /* return address of nnMain's only call to nn::oe::SetFocusHandlingMode */

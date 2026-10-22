@@ -31,6 +31,8 @@ It holds no game data, only identifiers; the build turns them into shaders from 
                                                      without a title list (the original port, native-port)
   shader_list.py rename <seed>.aliases.tsv <file>... rename the variants exported warm rows name through the aliases the
                                                      seed's preparation wrote (listed variants another one serves)
+  shader_list.py prune <list> <seed folder>          drop the V rows the seed's built-in variants serve (prepare_shader_seed.py
+                                                     builtin_serves): the list keeps only non-default variants
   shader_list.py stats <list>                        check the list and count it
 """
 import json
@@ -284,6 +286,14 @@ def main(argv):
             if renamed != text:   # often a clone of the exported file: written anew, not through the shared blocks
                 Path(path).unlink()
                 Path(path).write_text(renamed)
+    elif argv[:1] == ['prune'] and len(argv) == 3:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))   # also when run with python -I
+        from prepare_shader_seed import builtin_serves   # it imports this module
+        lst = ShaderList.load(argv[1])
+        before = len(lst.variants)
+        lst.variants = {(key, deps) for key, deps in lst.variants if not builtin_serves(argv[2], key, deps)}
+        lst.save(argv[1])
+        print(f'{before - len(lst.variants)} rows the seed serves dropped; {lst.counts()}')
     elif argv[:1] == ['stats'] and len(argv) == 2:
         lst = ShaderList.load(argv[1])
         lines = [l for l in Path(argv[1]).read_text().splitlines() if l and not l.startswith('#')]

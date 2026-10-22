@@ -4,7 +4,7 @@
 The iOS app notes those shaders in Documents/shader-list-contribution.txt but never asks during play
 (third_party/d2r_gfx/gfx/nvn/totk_shader_contrib.h). While a device with the game is connected to this Mac (cable or the
 same network), `check` copies that file to ~/Library/Application Support/MacNativeGames/TOTK/ios-contributions/ and,
-every 500 new rows per device, asks once on the Mac to send it in a GitHub issue. When the GitHub CLI (gh) is installed and
+every 50 new rows per device, asks once on the Mac to send it in a GitHub issue. When the GitHub CLI (gh) is installed and
 signed in, the question offers "Submit automatically" instead of "Remind me next time": that sends this file at once (a
 secret gist and an issue that links it), without the browser. `install` runs `check` every 10 minutes as a LaunchAgent
 (build_app.py --platform ios installs it); `uninstall` removes it.
@@ -21,7 +21,7 @@ import tempfile
 import time
 from pathlib import Path
 
-STEP = 500                     # as TOTK_CONTRIB_STEP in totk_shader_contrib.h
+STEP = 50                      # as TOTK_CONTRIB_STEP in totk_shader_contrib.h
 CHECK_EVERY = 10 * 60          # the LaunchAgent's interval
 PULL_EVERY = 30 * 60           # one copy per device at most this often
 ISSUE_URL = 'https://github.com/ly05010419/MacNativeGames/issues/new?template=shader-list.yml'

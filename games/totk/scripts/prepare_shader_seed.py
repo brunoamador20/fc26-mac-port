@@ -626,6 +626,37 @@ def source_reader(romfs, modules, game='totk'):
     return read
 
 
+
+def builtin_variants(seed, key):
+    """The variants a seed made from the game code alone for a shader: its default bind state, and with compare slots
+    (shadow maps) the one with them bound to depth textures; [] when the seed has no default variant of it. A seed
+    prepared with the shared list also holds listed variants of the shader; those are not built in."""
+    index = Path(seed)/f'{key}.variants'
+    try:
+        rows = {r['variant']: r for r in json.loads(index.read_text()) if isinstance(r, dict) and 'variant' in r}
+    except (OSError, ValueError):
+        return []
+    default = rows.get(key+'-'+SUFFIX)
+    if not default:
+        return []
+    try:
+        refl = json.loads((Path(seed)/f'{key}-{SUFFIX}_b.json').read_text())
+    except (OSError, ValueError):
+        refl = {}
+    found = [default]
+    if refl.get('compare_slots'):
+        depth = answers_for({'tex': {str(s): '*_depth' for s in refl['compare_slots']}})
+        if rows.get(key+'-'+suffix(depth)):
+            found.append(rows[key+'-'+suffix(depth)])
+    return found
+
+
+def builtin_serves(seed, key, deps):
+    """Whether the seed's built-in variants serve a shared-list row (key, deps), as the runtime would pick them: such a
+    row is a default variant, which every build makes by itself (user 2026-10-22: the list keeps non-default ones)."""
+    answers = answers_for(json.loads(deps) if isinstance(deps, str) else deps)
+    return any(deps_match(v.get('deps', {}), answers) for v in builtin_variants(seed, key))
+
 def plan(shaders, startup, listed, all_default=False):
     """Translation jobs (key, answers, variant, why): the default bind state for every startup shader (every shader found
     with all_default), then each bind state the shared list names for a shader found in this game ('listed'). A listed
@@ -817,6 +848,7 @@ def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, m
     # Each completed variant's two files are links to the translation cache, whose digests it keeps; the rest are read.
     linked = {variant+end for variant in completed for end in ('_b.metal', '_b.json')}
     report = dict(**identity, shaders=len(completed), discovered=len(shaders), located=len(extra), startup_shaders=ready,
+                  all_default=GAMES[game]['all_default'],   # every shader has its default variant: the runtime contributes only other states
                   listed_variants=sum(1 for _, _, _, why in jobs if why == 'listed'), skipped=failed,
                   archives=archives, seconds=time.monotonic()-started,
                   files={p.name: cache.digest(p.name, p) if p.name in linked else digest(p.read_bytes())

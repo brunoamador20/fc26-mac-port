@@ -29,7 +29,7 @@ class ContributionFileTests(unittest.TestCase):
             self.assertTrue(rows and all(canonical(json.loads(deps)) == deps for _, _, deps in rows), 'deps as canonical() writes them')
             shared = ShaderList()
             shared.add_rows(contrib, 'm')
-            self.assertEqual(len(shared.variants), 1600)
+            self.assertEqual(len(shared.variants), 160)
             self.assertFalse(shared.warm)
             noseed = subprocess.run([str(probe), str(contrib), 'noseed'], capture_output=True, text=True)
             self.assertEqual(noseed.returncode, 0, noseed.stderr)
@@ -102,11 +102,11 @@ class MacReminderForDevicesTests(unittest.TestCase):
         self.assertEqual(watch.game_bundle({'result': {'apps': [{'name': 'TOTK', 'bundleIdentifier': 'org.macnativegames.totk'}]}}), 'org.macnativegames.totk')
         self.assertIsNone(watch.game_bundle({'result': {'apps': [{'name': 'Other', 'bundleIdentifier': 'x.y'}]}}))
 
-    def test_rows_and_every_500(self):
+    def test_rows_and_every_50(self):
         text = '# header\n' + ''.join(f'V\t{i:064x}\t{{}}\n' for i in range(3)) + f'V\t{0:064x}\t{{}}\n'
         self.assertEqual(watch.contribution_rows(text), 3)
-        self.assertFalse(watch.due(499, 0)); self.assertTrue(watch.due(500, 0))
-        self.assertFalse(watch.due(999, 500)); self.assertTrue(watch.due(1000, 500))
+        self.assertFalse(watch.due(49, 0)); self.assertTrue(watch.due(50, 0))
+        self.assertFalse(watch.due(99, 50)); self.assertTrue(watch.due(100, 50))
 
     def test_agent_runs_check_every_ten_minutes_with_the_xcode(self):
         plist = watch.agent_plist('/usr/bin/python3', Path('/x/shader_contrib_watch.py'), '/X/Xcode.app/Contents/Developer')

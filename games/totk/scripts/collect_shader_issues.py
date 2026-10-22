@@ -3,15 +3,16 @@
 issue form) into games/totk/assets/shader_list.tsv; with --game botw, Breath of the Wild's (label shader-list-botw, its own
 form) into games/botw/assets/shader_list.tsv.
 
-A player's game writes shader-list-contribution.txt (third_party/d2r_gfx/gfx/nvn/totk_shader_contrib.h) and every 500
+A player's game writes shader-list-contribution.txt (third_party/d2r_gfx/gfx/nvn/totk_shader_contrib.h) and every 50
 new rows asks the player to attach it to such an issue. "Submit automatically" (gh on the player's Mac) sends it as a
 secret gist linked from an issue titled "Shader list: ..." in the form's layout; such an issue has no label (GitHub drops
 labels set by people without write access), so issues are found by label or by that title. This tool downloads each
 attachment or gist file, keeps only V rows (shader key + bind state; anything else in a contribution is dropped) and
-reports what each issue adds. Nothing changes unless
+reports what each issue adds. With --seed (a prepared seed of the selected game version), rows its built-in variants
+serve are dropped too: the list keeps only non-default variants (user 2026-10-22). Nothing changes unless
 asked: --apply writes the list, --close also thanks each merged issue and closes it.
 
-usage: collect_shader_issues.py [--game totk|botw] [--repo owner/name] [--apply] [--close] [--issue N ...]
+usage: collect_shader_issues.py [--game totk|botw] [--repo owner/name] [--seed <seed folder>] [--apply] [--close] [--issue N ...]
 needs: the GitHub CLI (gh), signed in."""
 import argparse
 import json
@@ -24,6 +25,7 @@ from pathlib import Path
 TOTK = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOTK / 'scripts'))
 from shader_list import KEY, ShaderList, canonical  # noqa: E402
+from prepare_shader_seed import builtin_serves  # noqa: E402
 
 # Per game: the list, the issue form's label, the title prefix of the launcher's automatic submissions (GAME_CONTRIB_TITLE)
 GAMES = {'totk': (TOTK / 'assets/shader_list.tsv', 'shader-list', 'Shader list:'),
@@ -87,6 +89,7 @@ def main():
     ap.add_argument('--game', choices=sorted(GAMES), default='totk', help='whose list and issues: totk (default) or botw')
     ap.add_argument('--repo', default=REPO)
     ap.add_argument('--issue', type=int, nargs='*', help="only these issues (default: every open issue with the game's label)")
+    ap.add_argument('--seed', type=Path, help='a prepared seed (build/shader-seed/<version>): drop rows its built-in variants serve')
     ap.add_argument('--apply', action='store_true', help='write the merged rows to the shared list')
     ap.add_argument('--close', action='store_true', help='with --apply: comment on each merged issue and close it')
     args = ap.parse_args()
@@ -112,11 +115,14 @@ def main():
                 rows |= got; dropped += bad
             except (OSError, ValueError) as error:
                 problems.append(f'{url}: {error}')
+        builtin = {r for r in rows if builtin_serves(args.seed, *r)} if args.seed else set()
+        rows -= builtin
         new = rows - shared.variants
         shared.variants |= rows
         print(f"#{issue['number']} {issue['author']['login']}: {len(urls)} file(s), {len(rows)} rows, {len(new)} new"
-              + (f', {dropped} lines dropped' if dropped else '') + ''.join(f'\n  {p}' for p in problems))
-        if rows and not problems:
+              + (f', {dropped} lines dropped' if dropped else '')
+              + (f', {len(builtin)} default rows the seed makes dropped' if builtin else '') + ''.join(f'\n  {p}' for p in problems))
+        if (rows or builtin) and not problems:   # all default: still thanked and closed
             merged.append((issue['number'], len(rows), len(new)))
     print(f'shared shader list: {before} -> {len(shared.variants)} variants')
     if not args.apply:

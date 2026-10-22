@@ -338,6 +338,7 @@ class ShaderKeyScope(unittest.TestCase):
             self.assertIn(depth, asked)
             self.assertNotIn(shadow+'-'+seed.suffix(seed.answers_for(json.loads(listed[0][1]))), asked)
             self.assertEqual(manifest['shaders'], 4)   # three defaults and the derived one
+            self.assertIs(manifest['all_default'], True)   # the runtime contributes only other states then
             index = json.loads((root/'seed'/(shadow+'.variants')).read_text())
             self.assertEqual([row['deps']['tex']['3'] for row in index], ['*', '*_depth'])
             # the derived translation stays in the translation cache: a second preparation asks for nothing
@@ -373,6 +374,32 @@ class ShaderKeyScope(unittest.TestCase):
                 _, other, _ = self.prepare_with_service(root/'b', root/'b'/'seed', translator_text='another build')
             self.assertEqual(sorted(other), sorted(first))
             self.assertEqual(len([p for p in (root/'translations').iterdir() if p.is_dir()]), 2)
+
+    def test_builtin_serves_only_the_default_and_depth_bound_variants_not_listed_ones(self):
+        key, other = 'a'*64, 'b'*64
+        depth = seed.answers_for({'tex': {'3': '*_depth'}})
+        rows = [{'variant': f'{key}-{seed.SUFFIX}', 'deps': {'tex': {'3': '*'}, 'attr': {'6': 'uint'}, 'fout': {'0': 'float'}}},
+                {'variant': f'{key}-{seed.suffix(depth)}', 'deps': {'tex': {'3': '*_depth'}, 'attr': {'6': 'uint'}, 'fout': {'0': 'float'}}},
+                {'variant': f'{key}-{"c"*12}', 'deps': {'fout': {'0': 'uint'}}}]   # a listed variant the seed also made
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root/f'{key}.variants').write_text(json.dumps(rows))
+            (root/f'{key}-{seed.SUFFIX}_b.json').write_text(json.dumps({'compare_slots': [3]}))
+            self.assertTrue(seed.builtin_serves(root, key, '{"tex":{"3":"2darray"},"attr":{"6":"uint"}}'))
+            self.assertTrue(seed.builtin_serves(root, key, {'tex': {'3': '2d_depth'}}))      # the depth-bound one
+            self.assertFalse(seed.builtin_serves(root, key, {'attr': {'6': 'float'}}))      # a float input: its own variant
+            self.assertFalse(seed.builtin_serves(root, key, {'fout': {'0': 'uint'}}))      # served by a listed variant only
+            self.assertFalse(seed.builtin_serves(root, other, {}))                          # not a shader of this seed
+            lst = root/'list.tsv'
+            lst.write_text(f'V\t{key}\t{{"attr":{{"6":"uint"}},"fout":{{}},"img":{{}},"tex":{{"3":"2d"}}}}\n'
+                           f'V\t{key}\t{{"attr":{{"6":"float"}},"fout":{{}},"img":{{}},"tex":{{}}}}\n'
+                           f'V\t{other}\t{{"attr":{{}},"fout":{{}},"img":{{}},"tex":{{}}}}\n')
+            done = subprocess.run(['python3', '-I', str(ROOT/'games/totk/scripts/shader_list.py'), 'prune', str(lst), str(root)],
+                                  capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            kept = [l for l in lst.read_text().splitlines() if l.startswith('V')]
+            self.assertEqual(kept, [f'V\t{key}\t{{"attr":{{"6":"float"}},"fout":{{}},"img":{{}},"tex":{{}}}}',
+                                    f'V\t{other}\t{{"attr":{{}},"fout":{{}},"img":{{}},"tex":{{}}}}'])
 
     def test_a_new_translator_empties_the_translation_cache(self):
         with tempfile.TemporaryDirectory() as folder:

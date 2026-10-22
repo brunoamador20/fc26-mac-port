@@ -1,6 +1,7 @@
 // TOTK: what a player's game adds to the shared shader list (docs/shader-list.md).
 // The prepared seed holds every variant the list names, so a variant the Mac has to translate while playing, or that an
-// iPhone / iPad misses, is one the list does not have yet. Such a variant is written once to the player's contribution
+// iPhone / iPad misses, is one the list does not have yet. With a seed that has every shader's default variant (all_default), only states
+// those variants do not serve are written (totk_shader_rt.m contrib_wanted): the list keeps non-default variants. Such a variant is written once to the player's contribution
 // file (TOTK_SHADER_CONTRIB, set by app/launcher.m and ios/Sources/main.m; unset in development runs, which then write
 // nothing) as a shader-list V row: the shader key and the bind state, no game data. Every TOTK_CONTRIB_STEP new rows the
 // Mac launcher asks the player, before the game starts, to send the file in a GitHub issue (an iPhone / iPad never asks
@@ -12,7 +13,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define TOTK_CONTRIB_STEP 500
+#ifndef TOTK_CONTRIB_STEP   /* runtime/game_version.h keeps Breath of the Wild's at 500 */
+#define TOTK_CONTRIB_STEP 50   // 500 until 2026-10-22: with every default variant built in, a contribution holds only rare states (user)
+#endif
 #ifndef GAME_CONTRIB_TEMPLATE   /* the issue form, label and title prefix of this game's list (runtime/game_version.h sets Breath of the Wild's) */
 #define GAME_CONTRIB_TEMPLATE "shader-list.yml"
 #define GAME_CONTRIB_TITLE "Shader list:"   /* what the Mac reminder's automatic submission titles its issue with; collect_shader_issues.py finds it by this */
