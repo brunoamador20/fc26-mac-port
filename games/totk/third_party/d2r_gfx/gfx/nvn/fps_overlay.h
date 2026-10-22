@@ -26,10 +26,11 @@ int fps_overlay_scale(double view_h);
    row stride FPS_OVERLAY_TEX_W * 4). Returns the box size in pixels. */
 void fps_overlay_raster(const fps_overlay_info *info, int scale, uint8_t *out, int *box_w, int *box_h);
 void fps_overlay_text(const fps_overlay_info *info, char *out, size_t n);   /* "FPS 97  2560x1440  MetalFX on" */
-/* Compact HUD (Mac default; TOTK_HUD=corners keeps the lines in the picture's corners): the FPS, shader and load lines are
+/* Compact HUD (Mac default; TOTK_HUD=corners keeps the lines in the picture's corners): the FPS, shader, render pipeline
+   (compact only) and load lines are
    not drawn into the picture but published here, and the window's corner panel (runtime/frontend.m) shows them with the
    shortcuts in one small box. */
-enum { HUD_FPS, HUD_SHADER, HUD_LOAD, HUD_LINES };
+enum { HUD_FPS, HUD_SHADER, HUD_PSO, HUD_LOAD, HUD_LINES };
 int hud_compact(void);
 void hud_publish(int line, const char *text, int highlight);
 int hud_snapshot(int line, char *out, size_t n, int *highlight);   /* 0: the line was never published (hidden or not known yet) */
@@ -45,6 +46,7 @@ int fps_overlay_line_pixel_font(const char *text);   // 0: the line has a charac
    yellow for 3 s after something new was collected. TOTK_SHADER_OVERLAY=0 hides it (default on on the Mac, off on iOS). */
 int shader_overlay_enabled(void);
 void shader_overlay_text(char *out, size_t n, uint64_t fresh, int64_t total, uint64_t pipelines);   /* total < 0: "--" (not counted yet) */
+void pso_overlay_text(char *out, size_t n, uint64_t fresh, int64_t total);   /* "新渲染管线 N / 总计 M", the line under the shaders */
 /* Record that the game's present number `ticket` reached the screen at now_s (seconds). The rate of game presents is
    re-measured every half second; fps_overlay_value() returns it, or -1 before the first measurement. */
 void fps_overlay_note(uint64_t ticket, double now_s);

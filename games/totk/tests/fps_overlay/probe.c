@@ -124,10 +124,16 @@ int main(void) {
     CHECK(!strcmp(line, "新着色器 0 / 总计 --"), "shader box text before the cache is counted \"%s\"", line);
     shader_overlay_text(line, sizeof line, 123456, 9999999, 123456);
     CHECK(!strcmp(line, "新着色器 99999 / 总计 999999"), "shader box text clamped \"%s\"", line);
+    pso_overlay_text(line, sizeof line, 12, 3128);
+    CHECK(!strcmp(line, "新渲染管线 12 / 总计 3128"), "render pipeline line \"%s\"", line);
+    pso_overlay_text(line, sizeof line, 0, -1);
+    CHECK(!strcmp(line, "新渲染管线 0 / 总计 --"), "render pipeline line before counting \"%s\"", line);
     /* English labels (TOTK_UI_LANG=en, or a Mac whose language is not Chinese). */
     setenv("TOTK_UI_LANG", "en", 1);
     shader_overlay_text(line, sizeof line, 3, 7428, 12);
     CHECK(!strcmp(line, "New shaders 3 / total 7428"), "English shader box text \"%s\"", line);
+    pso_overlay_text(line, sizeof line, 12, 3128);
+    CHECK(!strcmp(line, "New render pipelines 12 / total 3128"), "English render pipeline line \"%s\"", line);
     CHECK(!fps_overlay_line_pixel_font(line), "English shader line \"%s\" drawn with the pixel font, which lacks its lower-case letters", line);
     CHECK(fps_overlay_line_pixel_font("FPS 60  2560x1440"), "the FPS line left the pixel font");
     fps_overlay_raster(&(fps_overlay_info){97, 2560, 1440, 1, 0, 0}, 2, px, &grown, &h);
