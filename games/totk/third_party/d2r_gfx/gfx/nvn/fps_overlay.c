@@ -201,11 +201,9 @@ int hud_snapshot(int line, char *out, size_t n, int *highlight) {
 
 int shader_overlay_enabled(void) {
     static int on = -1;
-#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
-    const int def = 0;   // the phone translates nothing (misses go to shader-requests/)
-#else
+    /* On by default on the iPhone too since it shows the render pipelines (user 2026-10-22: only the FPS was there when the
+       game was opened from the home screen); it was off there because the phone translates no shaders. */
     const int def = 1;
-#endif
     if (on < 0) { const char *e = getenv("TOTK_SHADER_OVERLAY"); on = e ? strcmp(e, "0") != 0 : def; }
     return on;
 }

@@ -113,7 +113,7 @@ static struct { char text[96]; int scale; } g_load_key[4];
 static id<MTLTexture> g_shd_tex[4];
 static id<MTLBuffer> g_shd_uv[3];
 static int g_shd_box[4][2];
-static struct { char text[48]; int hl, scale; } g_shd_key[4];
+static struct { char text[160]; int hl, scale; } g_shd_key[4];
 int g_bloom_q = -1;   // 泛光 1/4 起点（非 static：真机同进程交替直接改 0 / 1） | Bloom 1/4 starting point (non-static: real-device same-process alternation sets it to 0 / 1 directly)
 static id<MTL4ArgumentTable> g_bloomq_args;
 static id<MTLBuffer> g_bloomq_const[3];
@@ -600,7 +600,9 @@ void mtl_init(void) {
         g_fps_tex[i] = [g_dev newTextureWithDescriptor:fd];
         if (!g_fps_tex[i]) MDIE("建立帧数贴图[%d] 失败", i);
         res_add(g_fps_tex[i]);
-        g_shd_tex[i] = [g_dev newTextureWithDescriptor:fd];
+        MTLTextureDescriptor *sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:LOAD_OVERLAY_TEX_W height:FPS_OVERLAY_TEX_H mipmapped:NO];
+        sd.usage = MTLTextureUsageShaderRead; sd.storageMode = MTLStorageModeShared;   // shaders and render pipelines in one line (picture corners)
+        g_shd_tex[i] = [g_dev newTextureWithDescriptor:sd];
         if (!g_shd_tex[i]) MDIE("建立着色器计数框贴图[%d] 失败", i);
         res_add(g_shd_tex[i]);
         MTLTextureDescriptor *ld = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:LOAD_OVERLAY_TEX_W height:FPS_OVERLAY_TEX_H mipmapped:NO];
@@ -6017,8 +6019,22 @@ static int occl_skip_on(void) {
     if (on < 0) { const char *e = getenv("TOTK_OCCL_SKIP"); on = !(e && !strcmp(e, "0")); }
     return on;
 }
+/* Draws that may be skipped while their pipeline is built in the background (pso_get apso_defer): with async shaders on
+   the Mac, and on iOS too (TOTK_ASYNC_PIPELINES=0 off). The iPhone built every new pipeline on the submit thread, 1,106
+   in one session for 21.8 s of long frames (2026-10-22); there a few frames' late appearance is allowed (CLAUDE.md).
+   Draws that write memory, count samples or draw no 2D colour still wait, as on the Mac. */
+static int async_draws(void) {
+#if TARGET_OS_IPHONE
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("TOTK_ASYNC_PIPELINES"); on = !(e && !strcmp(e, "0")) && !tbdr_on();
+                  MLOG("[async-pipelines] %s", on ? "on: new pipelines of skippable draws are built in the background" : "off"); }
+    return on;
+#else
+    return async_shaders();
+#endif
+}
 static int draw_state_may_skip(void) {
-    if (!async_shaders() || !R.has_rt) return 0;
+    if (!async_draws() || !R.has_rt) return 0;
     if (g_vis_counting && (!occl_skip_on() || (S.ds.dt && S.ds.dw) || S.ds.st)) return 0;
     if (S.render_disabled || S.raster_discard) return 1;
     if (g_vis_counting && !(S.chmask.mask & (uint32_t)((1ull << (4 * (R.rt.n < 8 ? R.rt.n : 8))) - 1))) return 1;   // counts only
@@ -6057,7 +6073,7 @@ static void async_why(const NvProg *pr, uint64_t fresh_before) {
    game counts them as rendered. An unowned render target in a pool nobody tracks is uploaded again from the pool bytes on
    every use (first test: 11,304 re-uploads by frame 300, the GPU budget of 5,000 MB exceeded during the load). */
 static void async_skip_targets(void) {
-    if (!async_shaders() || !R.has_rt) return;
+    if (!async_draws() || !R.has_rt) return;
     for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i]) {
         (void)attachment_texture(R.rt.color[i], &R.rt.cview[i], R.rt.has_cview[i]);
         gpu_owned_mark(R.rt.color[i]->serial);
@@ -7629,6 +7645,10 @@ static void warm_start(void) {
         // 8,290 prepared shaders first the title came after 7-8 s even with warm caches and after about 10 minutes on a
         // Mac whose Metal cache has never seen them. Without the title list the game's manifest goes first, as before.
         if ([fm fileExistsAtPath:title]) [all addObject:title];
+        // iOS: the shared list's pipelines (shader-seed/pso_list.tsv, build_ipa.py), whose pso_manifest.tsv there is the
+        // seed's own; the Mac's export is build/pso_manifest.tsv. Before 2026-10-22 the phone warmed none of them.
+        NSString *list = [dir stringByAppendingPathComponent:@"pso_list.tsv"];
+        if ([fm fileExistsAtPath:list]) [all addObject:list];
         if ([fm fileExistsAtPath:seed]) [all addObject:seed];
         NSString *user = pso_user_path();
         if (user && [fm fileExistsAtPath:user]) [all addObject:user];
@@ -12678,25 +12698,26 @@ static int fps_overlay_prepare(int slot, MTLViewport vp, MTLViewport *ovp, float
 static int shader_overlay_prepare(int slot, MTLViewport vp, MTLViewport *ovp, float uv[8]) {
     if (!fps_overlay_full_hud() || !shader_overlay_enabled() || slot < 0 || slot > 3 || !g_shd_tex[slot]) return 0;
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-    static uint8_t px[FPS_OVERLAY_TEX_W * FPS_OVERLAY_TEX_H * 4];
+    static uint8_t px[LOAD_OVERLAY_TEX_W * FPS_OVERLAY_TEX_H * 4];
     uint64_t fresh = 0, last = 0; int64_t total = -1; totk_rt_counts(&fresh, &total, &last);
     uint64_t pso = atomic_load(&g_collect_new[1]) + atomic_load(&g_collect_new[2]), plast = atomic_load(&g_collect_last_ns);
     uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), newest = last > plast ? last : plast;
-    char text[48]; shader_overlay_text(text, sizeof text, fresh, total, pso);
+    char text[160]; shader_overlay_text(text, 48, fresh, total, pso);
     int hl = newest && now - newest < 3000000000ull, scale = fps_overlay_scale(vp.height);
+    char line[64]; pso_overlay_text(line, sizeof line, atomic_load(&g_collect_new[1]), (int64_t)g_pso.n);
     if (hud_compact()) {
         hud_publish(HUD_SHADER, text, hl);
-        char line[64]; pso_overlay_text(line, sizeof line, atomic_load(&g_collect_new[1]), (int64_t)g_pso.n);
         hud_publish(HUD_PSO, line, newest == plast && hl);   // yellow while a new render or compute pipeline was just collected
         return 0;
     }
+    size_t at = strlen(text); snprintf(text + at, sizeof text - at, "   %s", line);   // picture corners (the iPhone): one line
     pthread_mutex_lock(&mu);
     if (g_shd_key[slot].scale != scale || g_shd_key[slot].hl != hl || strcmp(g_shd_key[slot].text, text)) {
-        fps_overlay_raster_line(text, hl, scale, px, &g_shd_box[slot][0], &g_shd_box[slot][1]);
-        [g_shd_tex[slot] replaceRegion:MTLRegionMake2D(0, 0, FPS_OVERLAY_TEX_W, FPS_OVERLAY_TEX_H) mipmapLevel:0 withBytes:px bytesPerRow:FPS_OVERLAY_TEX_W * 4];
+        fps_overlay_raster_line_tex(text, hl, scale, px, LOAD_OVERLAY_TEX_W, FPS_OVERLAY_TEX_H, &g_shd_box[slot][0], &g_shd_box[slot][1]);
+        [g_shd_tex[slot] replaceRegion:MTLRegionMake2D(0, 0, LOAD_OVERLAY_TEX_W, FPS_OVERLAY_TEX_H) mipmapLevel:0 withBytes:px bytesPerRow:LOAD_OVERLAY_TEX_W * 4];
         snprintf(g_shd_key[slot].text, sizeof g_shd_key[slot].text, "%s", text); g_shd_key[slot].hl = hl; g_shd_key[slot].scale = scale;
     }
-    float bw = g_shd_box[slot][0], bh = g_shd_box[slot][1], W = FPS_OVERLAY_TEX_W, H = FPS_OVERLAY_TEX_H;
+    float bw = g_shd_box[slot][0], bh = g_shd_box[slot][1], W = LOAD_OVERLAY_TEX_W, H = FPS_OVERLAY_TEX_H;
     pthread_mutex_unlock(&mu);
     double m = 3.0 * scale;
     *ovp = (MTLViewport){vp.originX + m, vp.originY + vp.height - m - bh, bw, bh, 0, 1};   // bottom-left corner
