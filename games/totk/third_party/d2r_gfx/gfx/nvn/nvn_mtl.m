@@ -6834,8 +6834,21 @@ static uint64_t g_pp_submit_mark, g_pp_kicked, g_pp_taken;   // 本次提交是�
    again from there (keys already compiling are skipped, so each scan moves on), up to PSO_RESCANS times. A burst of new
    pipelines (265 in one frame on entering a new area) then compiles in parallel instead of mostly one after another.
    TOTK_PSO_RESCANS sets the limit (0: one scan per submission, as before). */
+/* Both prediction scans (pso_predict_rest, shader_predict_rest) took 38% of the long frames of a session without the seed
+   (2026-10-22): a frame holds several submissions, each scanned again, and a scan that found nothing new still went on
+   from the next miss. Now a scan goes on only after one that found something, and the pipeline scan gets a budget per
+   frame (TOTK_PSO_PREDICT_FRAME_US, 4000 us). The urgent shader scan has none by default (TOTK_SHADER_PREDICT_FRAME_US,
+   0 = none): at 4 ms a frame it handed 170 jobs to the urgent translators instead of 258, and the submit thread translated
+   494 variants itself instead of 360, more than the scans it saved. */
+typedef struct { uint64_t frame, used_ns; } scan_budget;
+static int scan_budget_left(scan_budget *b, int limit_us) {
+    uint64_t f = atomic_load(&g_cur_frame);
+    if (b->frame != f) { b->frame = f; b->used_ns = 0; }
+    return b->used_ns < (uint64_t)limit_us * 1000ull;
+}
+static int env_us(const char *name, int dflt) { const char *e = getenv(name); int v = e ? atoi(e) : dflt; return v < 0 ? 0 : v; }
 static int pso_rescans(void) { static int v = -1; if (v < 0) { const char *e = getenv("TOTK_PSO_RESCANS"); v = e ? atoi(e) : 32; if (v < 0) v = 0; } return v; }
-static int g_pp_more, g_pp_rescans; static uint64_t g_pp_sync;   // last scan stopped at a budget; scans after the first; pipelines compiled on the submission thread
+static int g_pp_more, g_pp_rescans; static uint64_t g_pp_sync; static scan_budget g_pp_budget;   // last scan stopped at a budget; scans after the first; pipelines compiled on the submission thread
 // Statistics line (pso_predict_rest, every 100 scans): guesses refused because the table was full, stale guesses freed,
 // time draws waited for a background compile, scans and which budget ended them.
 static uint64_t g_pp_full, g_pp_reclaimed, g_pp_waits, g_pp_wait_ns, g_pp_scans, g_pp_scan_ns, g_pp_stop[3];
@@ -6991,7 +7004,9 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get(NvProg *pr, MTLRen
     ps = g_pso_lmap ? nil : pso_pend_take(&k);
     if (ps) g_pp_taken++;
     else {
-        if (g_pp_submit_mark != g_sub_serial) { g_pp_submit_mark = g_sub_serial; g_pp_rescans = 0; g_pp_more = 0; pso_predict_rest(); }   // 本次提交第一次缺：先把后面的丢出去并行编，再同步编眼前这条 | First miss in this submission: first kick the later ones out to compile in parallel, then synchronously compile the one at hand
+        static int frame_us = -1; if (frame_us < 0) frame_us = env_us("TOTK_PSO_PREDICT_FRAME_US", 4000);
+        if (!scan_budget_left(&g_pp_budget, frame_us)) { if (g_pp_submit_mark != g_sub_serial) { g_pp_submit_mark = g_sub_serial; g_pp_rescans = 0; g_pp_more = 0; } }   // this frame's scans are spent
+        else if (g_pp_submit_mark != g_sub_serial) { g_pp_submit_mark = g_sub_serial; g_pp_rescans = 0; g_pp_more = 0; pso_predict_rest(); }   // 本次提交第一次缺：先把后面的丢出去并行编，再同步编眼前这条 | First miss in this submission: first kick the later ones out to compile in parallel, then synchronously compile the one at hand
         else if (g_pp_more && g_pp_rescans < pso_rescans()) { g_pp_rescans++; pso_predict_rest(); }   // TOTK: the last scan stopped early: go on from here
         MTLRenderPipelineDescriptor *d = pso_desc(&k, vs, fs, bfn ? bfn : g_pso_fsfn, g_pso_lmap != NULL);
         ps = pso_new(d, pso_archive_key(&k, vs, fs, g_pso_lmap != NULL), &e); g_pp_sync++;
@@ -8497,6 +8512,7 @@ static void rt_sub(const p_set_rt *r, int k, uint64_t *ser, int *lv, int *sl);
    on its budget (TOTK_SHADER_PREDICT_SCAN commands, 8192; TOTK_SHADER_PREDICT_US, 2000) may run again from the next
    miss, up to 16 per submission. */
 static uint64_t g_sp_mark, g_sp_scans, g_sp_ns, g_sp_progs, g_sp_urgent, g_sp_queued; static int g_sp_n, g_sp_more;
+static scan_budget g_sp_budget;
 static void shader_predict_rest(void) {
     static int enabled = -1, max_ops, max_us;
     if (enabled < 0) {
@@ -8538,7 +8554,8 @@ static void shader_predict_rest(void) {
         state_op(hq.op, aq);
     }
     memcpy(&S, &Ssave, sizeof S); R = Rsave; args_dirty_all(); g_pso_dirty = pso_dirty; g_dss_dirty = dss_dirty; g_prog_for_draw = for_draw;
-    g_sp_more = stop;
+    g_sp_more = stop && (progs || urgent || queued);   // go on only after a scan that found something
+    g_sp_budget.used_ns += bp_now() - started;
     g_sp_scans++; g_sp_ns += bp_now() - started; g_sp_progs += progs; g_sp_urgent += urgent; g_sp_queued += queued;
     if ((progs || urgent || queued) && (g_sp_scans <= 20 || g_sp_scans % 100 == 0)) {
         uint64_t un, uns; totk_rt_urgent_stats(&un, &uns);
@@ -8551,7 +8568,8 @@ static void shader_predict_rest(void) {
 static void shader_predict_maybe(void) {
     if (!async_shaders() || !g_exec_next) return;
     if (g_sp_mark != g_sub_serial) { g_sp_mark = g_sub_serial; g_sp_n = 0; g_sp_more = 1; }
-    if (!g_sp_more || g_sp_n >= 16) return;
+    static int frame_us = -1; if (frame_us < 0) frame_us = env_us("TOTK_SHADER_PREDICT_FRAME_US", 0);
+    if (!g_sp_more || g_sp_n >= 16 || (frame_us && !scan_budget_left(&g_sp_budget, frame_us))) return;
     g_sp_n++; shader_predict_rest();
 }
 static void pso_predict_rest(void) {
@@ -8642,7 +8660,8 @@ static void pso_predict_rest(void) {
     memcpy(&S, &Ssave, sizeof S); R = Rsave; args_dirty_all(); g_pso_dirty = pso_dirty; g_dss_dirty = dss_dirty;
     static int logged; if (g_pp_kicked > (uint64_t)kicked0 && logged++ < 20) MLOG("并行预编：本次提交余下 %d 次绘制，丢给后台 %d 条管线", draws, (int)g_pp_kicked - kicked0);
     g_pp_scans++; g_pp_scan_ns += bp_now() - started; if (stop) g_pp_stop[stop - 1]++;
-    g_pp_more = stop != 0;
+    g_pp_more = stop != 0 && g_pp_kicked > (uint64_t)kicked0;   // go on only after a scan that kicked something
+    g_pp_budget.used_ns += bp_now() - started;
     if (g_pp_scans % 100 == 0) {
         pthread_mutex_lock(&g_pp_mu); uint64_t full = g_pp_full, freed = g_pp_reclaimed, waits = g_pp_waits, wait_ns = g_pp_wait_ns; int busy = 0;
         for (int i = 0; i < PSO_PEND_MAX; i++) busy += g_pp[i].used; pthread_mutex_unlock(&g_pp_mu);
