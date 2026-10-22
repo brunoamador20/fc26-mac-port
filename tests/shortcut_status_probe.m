@@ -23,6 +23,14 @@ void shortcut_test_aspect_init(double view);
 static int fakePadType = GAMEPAD_TYPE_AUTO, fakePadDetected = GAMEPAD_TYPE_PLAYSTATION;
 int runtime_gamepad_type_cycle(void) { return fakePadType = gamepad_type_next(fakePadType); }
 int runtime_gamepad_type(int *detected) { if (detected) *detected = fakePadDetected; return fakePadType; }
+/* runtime/gamepad.m's mouse mode (key 7) without GameController; the window never has the keyboard here. */
+static int fakeMouse;
+int runtime_mouse_toggle(void) { return fakeMouse = !fakeMouse; }
+int runtime_mouse_enabled(void) { return fakeMouse; }
+void runtime_mouse_set_hook(void (*hook)(void)) { (void)hook; }
+void runtime_mouse_move(double dx, double dy) { (void)dx; (void)dy; }
+void runtime_mouse_button(int button, int down) { (void)button; (void)down; }
+void runtime_mouse_release(void) {}
 static void press(unsigned key) {
     runtime_input_key_synthetic(key, 1);
     runtime_input_key_synthetic(key, 0);
@@ -79,6 +87,11 @@ int main(int argc, const char **argv) { @autoreleasepool {
     press(22); tick(); expect(panel, @"Controller type: Switch (current");
     press(22); tick(); expect(panel, @"Controller type: auto (PlayStation)");
     fakePadDetected = -1; tick(); expect(panel, @"Controller type: auto (no controller)");
+    /* Key 7: mouse mode off -> on -> off. */
+    expect(panel, @"7  Mouse: off (current; press to switch)");
+    press(26); tick(); expect(panel, @"Mouse: on (camera, buttons; Command-Tab frees the pointer)");
+    press(26); tick(); expect(panel, @"Mouse: off");
+    press(26);   /* on for the Chinese check below */
     expect(panel, @"Aspect ratio: 16:9");
     shortcut_test_aspect_init(1.6);   /* key 4 becomes available; a 16:10 window */
     press(21); tick(); expect(panel, @"Aspect ratio: fit to window 1.60:1");
@@ -91,6 +104,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     setenv("TOTK_UI_LANG", "zh", 1); tick();
     expect(panel, @"补帧：当前 刷新率一半"); expect(panel, @"画质：当前 原生 2K");
     expect(panel, @"6  手柄类型：当前 自动（未接手柄）（按键切换）");
+    expect(panel, @"7  鼠标操作：当前 开（视角、按键，⌘Tab 释放指针）（按键切换）");
     fakePadDetected = GAMEPAD_TYPE_SWITCH; tick(); expect(panel, @"手柄类型：当前 自动（Switch）");
 
     if (hud_compact()) {
@@ -123,6 +137,6 @@ int main(int argc, const char **argv) { @autoreleasepool {
                 writeToFile:@(argv[1]) atomically:YES]);
     }
     [panel.timer invalidate];
-    puts("pass: current modes, keyboard cycling, frame latch, localization, both layouts, key 1 all/minimal/off and key 6 controller type");
+    puts("pass: current modes, keyboard cycling, frame latch, localization, both layouts, key 1 all/minimal/off, key 6 controller type and key 7 mouse");
     return 0;
 }}
