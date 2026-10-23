@@ -276,7 +276,8 @@ int main(void) {
                       'hle_nvn.c must call mtl_mark_tex_image_use on image binds')
         self.assertIn('tex_upgrade_shader_write', mtl_src,
                       'nvn_mtl.m must define tex_upgrade_shader_write')
-        self.assertRegex(mtl_src, r'tex_upgrade_shader_write\(&g_treg\[tid\]\.t,\s*t\)',
+        # the base texture, not the slot's (possibly swizzled) view: see test_nvn_image_swizzle.py
+        self.assertRegex(mtl_src, r'tex_upgrade_shader_write\(&g_treg\[tid\]\.t,\s*base\)',
                          'NVN_RB_IMG must upgrade texture to shader writable if missing usage')
 
     def test_image_slot_upgrade_logic(self):
