@@ -25,7 +25,10 @@ NVN_NOPROTO(nvnTextureBuilderGetRawStorageClass, int, const NVNtextureBuilder *b
 // copies, 0 = tightly packed. Command buffer state like the row stride (OP_COPY_STRIDE), replayed in order. ----------
 void *nvn_rec(NVNcommandBuffer *c, uint32_t op, size_t payload);   // hle_nvn.c: appends a command record
 NVN(nvnCommandBufferSetCopyImageStride, void, NVNcommandBuffer *c, ptrdiff_t st) {
-    if (st < 0) die("nvnCommandBufferSetCopyImageStride %td: negative image stride not supported by the Metal copies", st);
+    if (st < 0) {   // a stop for something the host lacks: one "[fc26-missing]" line, as every such stop (runtime/missing.c)
+        fprintf(stderr, "[fc26-missing] nvn: nvnCommandBufferSetCopyImageStride with a negative image stride (%td)\n", st);
+        die("nvnCommandBufferSetCopyImageStride %td: negative image stride not supported by the Metal copies", st);
+    }
     if (st) { static int seen; if (seen < 4) LOG("[nvn] SetCopyImageStride %td (first non-zero image strides: %d of 4 logged)", st, ++seen); }
     ((p_copy_stride *)nvn_rec(c, OP_COPY_IMG_STRIDE, sizeof(p_copy_stride)))->stride = st;
 }

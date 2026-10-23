@@ -90,6 +90,9 @@ class NvnGaps(unittest.TestCase):
         self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
         self.assertIn('nvnCommandBufferSetCopyImageStride -16: negative image stride', run.stderr)
         self.assertNotIn('not stopped', run.stdout)
+        # one grep '[fc26-missing]' over a log lists every stop for something the host lacks, this one once
+        self.assertEqual([l for l in run.stderr.splitlines() if l.startswith('[fc26-missing]')],
+                         ['[fc26-missing] nvn: nvnCommandBufferSetCopyImageStride with a negative image stride (-16)'])
 
     def test_sample_location_grid_is_stored_and_reported_once(self):
         run = self.run_case('grid-log')
