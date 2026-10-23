@@ -263,7 +263,14 @@ def use_after():
 def stat(k): stats[k] = stats.get(k, 0) + 1
 
 import collections
-CHUNK = int(os.environ.get('DM_CHUNK', '262144'))
+# DM_CHUNK 必须为 >= 64 的整数：负数会使超大函数视为空并静默跳过所有改写，0 导致崩溃，< 64 破坏 3 块 LRU 的 48 条指令回溯假设。
+# DM_CHUNK must be an integer >= 64: a negative value would silently make the giant function look empty and skip all its rewrites, 0 crashes, and values below 64 break the 48-instruction look-back assumption of the 3-chunk LRU.
+try:
+    CHUNK = int(os.environ.get('DM_CHUNK', '262144'))
+    if CHUNK < 64:
+        raise ValueError
+except ValueError:
+    raise SystemExit(f'DM_CHUNK 必须为 >= 64 的整数 | DM_CHUNK must be an integer >= 64: {os.environ.get("DM_CHUNK")!r}')
 
 # 惰性指令序列：按块反汇编与 LRU 缓存，行为与指令列表完全一致。
 # Lazy instruction sequence: chunked disassembly with LRU cache, behaving like a list.
@@ -293,7 +300,8 @@ class LazyInsns:
         c0 = self.fa + 4 * k * CHUNK
         c1 = min(c0 + 4 * CHUNK, self.fa + 4 * self.n)
         chunk = list(md.disasm(bytes(IMG[c0:c1]), c0))
-        assert len(chunk) == (c1 - c0) // 4
+        if len(chunk) != (c1 - c0) // 4:
+            raise ValueError(f'chunk length mismatch: {len(chunk)} != {(c1 - c0) // 4}')
         self.cache[k] = chunk
         if len(self.cache) > 3:
             self.cache.popitem(last=False)
@@ -302,7 +310,8 @@ class LazyInsns:
     def __getitem__(self, idx):
         if isinstance(idx, slice):
             start, stop, step = idx.indices(self.n)
-            assert step == 1, f'unsupported slice step: {step}'
+            if step != 1:
+                raise ValueError(f'unsupported slice step: {step}')
             if start >= stop:
                 return []
             res = []
