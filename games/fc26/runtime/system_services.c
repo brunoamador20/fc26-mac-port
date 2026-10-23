@@ -9,6 +9,7 @@
 #include <string.h>
 #include <time.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include "game_version.h"
 
 /* ---------- set: nn::settings ISettingsServer ---------- */
@@ -68,6 +69,125 @@ static void bsd_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
     case 2: case 3:                                                               /* Socket / SocketExempt */
         fprintf(stderr, "[totk-net] socket(%u, %u, %u) refused: offline\n", IPC_ARG(rq, uint32_t, 0), IPC_ARG(rq, uint32_t, 4), IPC_ARG(rq, uint32_t, 8));
         bsd_result(rs, -1, BSD_ENETDOWN); return;
+    case 5: case 6:                                                               /* Select / Poll (0 ready, no error) */
+        bsd_result(rs, 0, 0); return;
+    case 7:                                                                       /* Sysctl (offline: refused) */
+        bsd_result(rs, -1, BSD_ENETDOWN); return;
+    case 24:                                                                      /* Close */
+        bsd_result(rs, 0, 0); return;
+    default: ipc_unimplemented(s, rq);
+    }
+}
+
+/* ---------- time:u / time:a / ITimeZoneService ---------- */
+/* Standard horizon time services backed by the host clock and local time zone. */
+static void get_device_location_name(char out[0x24]) {
+    memset(out, 0, 0x24);
+    #if defined(__APPLE__) || defined(__linux__)
+    char link[512]; ssize_t n = readlink("/etc/localtime", link, sizeof link - 1);
+    if (n > 0) {
+        link[n] = 0; const char *z = strstr(link, "zoneinfo/");
+        snprintf(out, 0x24, "%s", z ? z + 9 : "UTC");
+        return;
+    }
+    #endif
+    snprintf(out, 0x24, "UTC");
+}
+
+typedef struct { int16_t year; int8_t month, day, hour, minute, second, pad; } IpcCalendarTime;
+typedef struct { int32_t day_of_week, day_of_year; char name[8]; uint8_t dst, pad[3]; int32_t utc_offset; } IpcCalendarInfo;
+
+static void timezone_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
+    switch (rq->cmd) {
+    case 0: {                                                                    /* GetDeviceLocationName */
+        char name[0x24]; get_device_location_name(name);
+        ipc_out(rs, name, sizeof name); return;
+    }
+    case 1: return;                                                              /* SetDeviceLocationName */
+    case 2: { uint32_t count = 1; IPC_OUT(rs, count); return; }                  /* GetTotalLocationNameCount */
+    case 3: {                                                                    /* LoadLocationNameList */
+        char name[0x24]; get_device_location_name(name); uint32_t count = 0;
+        if (rq->nb > 0 && rq->b[0].size >= sizeof name) {
+            memcpy(ipc_guest(rq->b[0].addr, sizeof name), name, sizeof name);
+            count = 1;
+        }
+        IPC_OUT(rs, count); return;
+    }
+    case 4: {                                                                    /* LoadTimeZoneRule */
+        if (rq->nb > 0) memset(ipc_guest(rq->b[0].addr, rq->b[0].size), 0, (size_t)rq->b[0].size);
+        return;
+    }
+    case 5: {                                                                    /* GetTimeZoneRuleVersion */
+        char ver[0x10] = "2024b"; ipc_out(rs, ver, sizeof ver); return;
+    }
+    case 100: case 101: {                                                        /* ToCalendarTime(WithMyRule) */
+        int64_t posix = IPC_ARG(rq, int64_t, 0);
+        time_t t = (time_t)posix; struct tm tm;
+        if (!localtime_r(&t, &tm)) gmtime_r(&t, &tm);
+        IpcCalendarTime cal = {
+            (int16_t)(tm.tm_year + 1900), (int8_t)(tm.tm_mon + 1), (int8_t)tm.tm_mday,
+            (int8_t)tm.tm_hour, (int8_t)tm.tm_min, (int8_t)tm.tm_sec, 0
+        };
+        IpcCalendarInfo info;
+        memset(&info, 0, sizeof info);
+        info.day_of_week = tm.tm_wday; info.day_of_year = tm.tm_yday;
+        #if defined(__APPLE__) || defined(__linux__)
+        snprintf(info.name, sizeof info.name, "%s", tm.tm_zone ? tm.tm_zone : "UTC");
+        info.utc_offset = (int32_t)tm.tm_gmtoff;
+        #else
+        snprintf(info.name, sizeof info.name, "UTC");
+        #endif
+        info.dst = tm.tm_isdst > 0;
+        IPC_OUT(rs, cal); IPC_OUT(rs, info); return;
+    }
+    case 201: {                                                                  /* ToPosixTimeWithMyRule */
+        IpcCalendarTime cal = IPC_ARG(rq, IpcCalendarTime, 0);
+        struct tm tm = {0};
+        tm.tm_year = cal.year - 1900; tm.tm_mon = cal.month - 1; tm.tm_mday = cal.day;
+        tm.tm_hour = cal.hour; tm.tm_min = cal.minute; tm.tm_sec = cal.second;
+        tm.tm_isdst = -1;
+        time_t t = mktime(&tm);
+        uint32_t count = 1; IPC_OUT(rs, count);
+        int64_t posix[2] = {(int64_t)t, 0};
+        IPC_OUT(rs, posix); return;
+    }
+    default: ipc_unimplemented(s, rq);
+    }
+}
+
+static void clock_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
+    switch (rq->cmd) {
+    case 0: { int64_t now = (int64_t)time(NULL); IPC_OUT(rs, now); return; }   /* GetCurrentTime */
+    case 1: return;                                                             /* SetCurrentTime */
+    case 2: {                                                                   /* GetSystemClockContext */
+        struct { int64_t offset; struct { int64_t val; uint8_t src[16]; } pt; } ctx;
+        memset(&ctx, 0, sizeof ctx); ctx.pt.val = (int64_t)time(NULL); ctx.pt.src[0] = 1;
+        IPC_OUT(rs, ctx); return;
+    }
+    case 3: return;                                                             /* SetSystemClockContext */
+    default: ipc_unimplemented(s, rq);
+    }
+}
+
+static void steady_clock_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
+    switch (rq->cmd) {
+    case 0: {                                                                   /* GetCurrentTimePoint */
+        struct { int64_t val; uint8_t src[16]; } pt;
+        memset(&pt, 0, sizeof pt); pt.val = (int64_t)time(NULL); pt.src[0] = 1;
+        IPC_OUT(rs, pt); return;
+    }
+    default: ipc_unimplemented(s, rq);
+    }
+}
+
+static void time_service_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
+    switch (rq->cmd) {
+    case 0: case 1: case 4: case 5:                                             /* GetStandardUserSystemClock / Network / Local / Ephemeral */
+        rs->move[rs->nmove++] = runtime_ipc_new_session("ISystemClock", clock_handler, NULL, NULL); return;
+    case 2:                                                                     /* GetStandardSteadyClock */
+        rs->move[rs->nmove++] = runtime_ipc_new_session("ISteadyClock", steady_clock_handler, NULL, NULL); return;
+    case 3:                                                                     /* GetTimeZoneService */
+        rs->move[rs->nmove++] = runtime_ipc_new_session("ITimeZoneService", timezone_handler, NULL, NULL); return;
     default: ipc_unimplemented(s, rq);
     }
 }
@@ -152,4 +272,8 @@ __attribute__((constructor)) static void register_system_services(void) {
     setenv("DM_NVN_GPU_CODE_MAX_MINOR", "31", 0);
     runtime_ipc_register("set", settings_handler, NULL, NULL);
     runtime_ipc_register("bsd:u", bsd_handler, NULL, NULL);
+    runtime_ipc_register("time:u", time_service_handler, NULL, NULL);
+    runtime_ipc_register("time:a", time_service_handler, NULL, NULL);
+    runtime_ipc_register("time:s", time_service_handler, NULL, NULL);
+    runtime_ipc_register("time:m", time_service_handler, NULL, NULL);
 }

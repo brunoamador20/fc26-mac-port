@@ -497,6 +497,21 @@ int svc_thread(int num, uint64_t *regs) {
         pthread_mutex_unlock(&G);
         regs[0] = (uint64_t)r; return 1;
     }
+    case 0x36: sched_yield(); regs[0] = 0; return 1;   // SynchronizePreemptionState
+    case 0x32: {                                        // SetThreadActivity(w0 thread, w1 pause)
+        pthread_mutex_lock(&G); thr_t *t = h_get((uint32_t)regs[0], O_THREAD); pthread_mutex_unlock(&G);
+        regs[0] = t ? 0 : R_BAD_HANDLE; return 1;
+    }
+    case 0x33: {                                        // GetThreadContext3(x0 out_context, w1 thread)
+        pthread_mutex_lock(&G); thr_t *t = h_get((uint32_t)regs[1], O_THREAD); pthread_mutex_unlock(&G);
+        if (!t) { regs[0] = R_BAD_HANDLE; return 1; }
+        if (regs[0]) memset((void *)(uintptr_t)regs[0], 0, 0x320);
+        regs[0] = 0; return 1;
+    }
+    case 0x2F: {                                        // GetLastThreadInfo(x0 out_context)
+        if (regs[0]) memset((void *)(uintptr_t)regs[0], 0, 0x40);
+        regs[0] = 0; return 1;
+    }
 
     case 0x45: {  // CreateEvent(→w1 写端, w2 读端) | CreateEvent(→w1 write end, w2 read end)
         event_t *e = calloc(1, sizeof *e); e->refs = 2;

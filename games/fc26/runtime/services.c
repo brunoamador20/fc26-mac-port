@@ -16,6 +16,7 @@
 
 #include <time.h>
 #include <unistd.h>
+#include <sched.h>
 #include <mach/mach_time.h>
 /* Guest address layout. The SDK encodes IPC buffer addresses with 39 bits (HIPC descriptor bits 36..38),
    so all guest memory must lie below 2^39. Darwin arm64 keeps 0x10_0000_0000..0x70_0000_0000 reserved,
@@ -368,6 +369,9 @@ uint64_t runtime_svc(unsigned num,uint64_t *r,const char *module,uint64_t offset
   if(size>HEAP_CAP||size%0x200000||size+runtime_image_bytes()>APP_POOL){r[0]=0xd401;return r[0];}
   if(size>heap_size&&mprotect(heap+heap_size,size-heap_size,PROT_READ|PROT_WRITE))runtime_fail("commit heap");
   if(size<heap_size&&mprotect(heap+size,heap_size-size,PROT_NONE))runtime_fail("decommit heap");heap_size=size;r[0]=0;r[1]=(uintptr_t)heap;return 0;}
+  case 0x07: fprintf(stderr,"[totk] guest ExitProcess\n"); exit(0);
+  case 0x2a: r[0]=0;return 0;   /* FlushProcessDataCache: coherent unified memory on Apple Silicon */
+  case 0x36: sched_yield(); r[0]=0;return 0;   /* SynchronizePreemptionState */
  case 0x0c: r[0]=0;r[1]=44;return 0;
  case 0x0e: r[0]=0;r[1]=0;r[2]=15;return 0;
  case 0x25: {uint64_t id;pthread_threadid_np(NULL,&id);r[0]=0;r[1]=id;return 0;}
