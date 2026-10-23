@@ -133,20 +133,34 @@ def module_table(work, name, pins):
         # ret may be negative (a gate in the pre-island); store it as an unsigned 64-bit offset from base, which the
         # loader adds to base (base + (uint64)ret wraps to base - |ret|), so a negative offset resolves correctly.
         gates.append(dict(ret=int(ret, 0) & ((1 << 64) - 1), timer=kind != 'svc', arg=int(arg), original=int(original, 0)))
-    # Pre-island (games/fc26/docs/ILHAS_NUVEM.md): present only when the rewrite needed a patch area before base.
-    # Its size and SHA-256 are baked into the table so the loader verifies the .pre.bin it maps (same load-time check
-    # as patched.bin's digest). pre_size 0 means no island, and the output is byte-identical to a single-area rewrite.
-    pre_size, pre_digest = layout.get('PRE_PATCH_SIZE', 0), ''
-    if pre_size:
-        pre_path = work / f'rewritten/{VERSION}/{name}.pre.bin'
-        need(pre_path.exists(), f'{pre_path} missing but {name}.fixups.tsv declares a pre-island')
-        pre_bytes = pre_path.read_bytes()
-        need(len(pre_bytes) == pre_size, f'{name}: {pre_path.name} is {len(pre_bytes)} bytes, fixups says {pre_size}')
-        need(layout.get('PRE_PATCH_OFF', 0) == -pre_size, f'{name}: PRE_PATCH_OFF {layout.get("PRE_PATCH_OFF")} != -PRE_PATCH_SIZE')
-        pre_digest = hashlib.sha256(pre_bytes).hexdigest()
+    pre_size, pre_digest = pre_island(work, name, layout, pins)
     return dict(name=name, sha256=digest, size=len(image), layout=layout, tags=tags, symbols=symbols,
                 relocs=relocs, gates=gates, ctor_flag=ctor_flag(image, tags, layout, name),
                 pre_size=pre_size, pre_digest=pre_digest)
+
+
+def pre_island(work, name, layout, pins):
+    """Pre-island (games/fc26/docs/ILHAS_NUVEM.md): present only when the rewrite needed a patch area before base.
+    Its SHA-256 is pinned like patched.bin's (rewritten_sha256.<name>.pre.bin: compared, or written by --record) and
+    baked into the table with its size, so the loader verifies the .pre.bin it maps. Returns (pre_size, pre_digest);
+    (0, '') when there is no island, and then a non-null pin for one is an error (it belongs to another rewrite)."""
+    key = f'{name}.pre.bin'
+    pre_size = layout.get('PRE_PATCH_SIZE', 0)
+    if not pre_size:
+        need(pins.data['rewritten_sha256'].get(key) is None,
+             f'{name}: {key} is pinned in {pins.path.name} but {name}.fixups.tsv declares no pre-island')
+        return 0, ''
+    pre_path = work / f'rewritten/{VERSION}/{key}'
+    need(pre_path.exists(), f'{pre_path} missing but {name}.fixups.tsv declares a pre-island')
+    pre_bytes = pre_path.read_bytes()
+    need(len(pre_bytes) == pre_size, f'{name}: {pre_path.name} is {len(pre_bytes)} bytes, fixups says {pre_size}')
+    need(layout.get('PRE_PATCH_OFF', 0) == -pre_size, f'{name}: PRE_PATCH_OFF {layout.get("PRE_PATCH_OFF")} != -PRE_PATCH_SIZE')
+    used = layout.get('PRE_PATCH_USED', 0)
+    need(0 < used <= pre_size and pre_bytes[used:] == bytes(pre_size - used),
+         f'{name}: PRE_PATCH_USED {used:#x} missing or the island past it is not zero padding')
+    pre_digest = hashlib.sha256(pre_bytes).hexdigest()
+    pins.check(['rewritten_sha256', key], pre_digest, f'pre-island {name}')
+    return pre_size, pre_digest
 
 
 def ctor_flag(image, tags, layout, name):

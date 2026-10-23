@@ -125,6 +125,60 @@ class RomfsAndPins(unittest.TestCase):
         self.assertIn('differs from the pinned', str(stop.exception))
 
 
+class PreIslandPin(unittest.TestCase):
+    """The pre-island's .pre.bin is pinned like patched.bin: a null pin needs --record, a recorded one is compared, and
+    a pin for a module whose rewrite has no island is refused."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.work = Path(self.tmp.name) / 'work'
+        (self.work / f'rewritten/{prepare_runtime.VERSION}').mkdir(parents=True)
+        self.pre = bytes(range(256)) * 16 + bytes(0x10000 - 4096)        # 4 KiB of "blocks", then zero padding
+        self.path = self.work / f'rewritten/{prepare_runtime.VERSION}/main.pre.bin'
+        self.path.write_bytes(self.pre)
+        self.layout = dict(PRE_PATCH_OFF=-0x10000, PRE_PATCH_SIZE=0x10000, PRE_PATCH_USED=4096)
+        self.pins_path = Path(self.tmp.name) / 'expected.json'
+        self.pins_path.write_text((HERE / 'assets/expected-v1.0.0.json').read_text())
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def pins(self, record):
+        return prepare_runtime.Pins(self.pins_path, record=record)
+
+    def test_null_pin_needs_record_then_is_checked(self):
+        self.assertIn('main.pre.bin', json.loads(self.pins_path.read_text())['rewritten_sha256'])
+        with self.assertRaises(SystemExit) as stop:
+            prepare_runtime.pre_island(self.work, 'main', self.layout, self.pins(False))
+        self.assertIn('--record', str(stop.exception))
+        pins = self.pins(True)
+        self.assertEqual(prepare_runtime.pre_island(self.work, 'main', self.layout, pins),
+                         (0x10000, hashlib.sha256(self.pre).hexdigest()))
+        pins.save()
+        self.assertEqual(json.loads(self.pins_path.read_text())['rewritten_sha256']['main.pre.bin'],
+                         hashlib.sha256(self.pre).hexdigest())
+        prepare_runtime.pre_island(self.work, 'main', self.layout, self.pins(False))      # pinned now
+        changed = bytearray(self.pre); changed[100] ^= 1; self.path.write_bytes(changed)  # another rewrite's island
+        with self.assertRaises(SystemExit) as stop:
+            prepare_runtime.pre_island(self.work, 'main', self.layout, self.pins(False))
+        self.assertIn('differs from the pinned', str(stop.exception))
+
+    def test_layout_is_checked(self):
+        pins = self.pins(True)
+        for bad in (dict(self.layout, PRE_PATCH_OFF=-0x8000), dict(self.layout, PRE_PATCH_SIZE=0x20000),
+                    {k: v for k, v in self.layout.items() if k != 'PRE_PATCH_USED'}, dict(self.layout, PRE_PATCH_USED=2048)):
+            with self.assertRaises(SystemExit):
+                prepare_runtime.pre_island(self.work, 'main', bad, pins)
+
+    def test_pin_without_an_island_is_refused(self):
+        self.assertEqual(prepare_runtime.pre_island(self.work, 'sdk', {}, self.pins(False)), (0, ''))   # no island, no pin
+        data = json.loads(self.pins_path.read_text()); data['rewritten_sha256']['main.pre.bin'] = '0' * 64
+        self.pins_path.write_text(json.dumps(data))
+        with self.assertRaises(SystemExit) as stop:
+            prepare_runtime.pre_island(self.work, 'main', {}, self.pins(False))
+        self.assertIn('declares no pre-island', str(stop.exception))
+
+
 def plt_stub(address, slot):
     """adrp x16, slot@page; ldr x17, [x16, slot@pageoff]; add x16, x16, slot@pageoff; br x17"""
     pages = ((slot & ~4095) - (address & ~4095)) >> 12

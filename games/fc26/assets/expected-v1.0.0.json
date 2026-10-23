@@ -12,6 +12,7 @@
     },
     "rewritten_sha256": {
         "main.patched.bin": null,
+        "main.pre.bin": null,
         "sdk.patched.bin": null
     },
     "romfs": {
