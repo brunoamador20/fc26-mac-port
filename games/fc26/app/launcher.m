@@ -11,7 +11,10 @@
    (launch_plan). `"FC 26.app/Contents/MacOS/FC 26" --dry-run` prints all of it and starts nothing.
    The game runs at a Switch 60 Hz present base (runtime/system_services.c). It has no game patch and no mod yet: the
    launcher sets none (runtime/game_patches.c, FC26_PATCHES). Not needed for story 2 (boot to nnMain): `make boot` runs
-   the runtime without it. FC26_BINARY and FC26_VERSION_DIR come from the Makefile (assets/game.json). */
+   the runtime without it. FC26_BINARY and FC26_VERSION_DIR come from the Makefile (assets/game.json); so do
+   FC26_RUNTIME_DIR, the work folder's subfolder with the runtime built for that version (the update's is build-update,
+   `make prepare runtime OUT=<work>/build-update`), and FC26_SHADER_CACHE, that runtime's shader cache relative to the work
+   folder (TOTK_SHADER_CACHE; empty: the runtime's own default, <work>/build/shader-cache, the base game's). */
 #import <Cocoa/Cocoa.h>
 #include <errno.h>
 #include <string.h>
@@ -22,6 +25,12 @@
 #endif
 #ifndef FC26_VERSION_DIR
 #define FC26_VERSION_DIR "v100"
+#endif
+#ifndef FC26_RUNTIME_DIR
+#define FC26_RUNTIME_DIR "build"
+#endif
+#ifndef FC26_SHADER_CACHE
+#define FC26_SHADER_CACHE ""
 #endif
 
 static BOOL portuguese(void) { return [NSLocale.preferredLanguages.firstObject hasPrefix:@"pt"]; }
@@ -34,7 +43,8 @@ static NSString *work_folder(void) {
     const char *e = getenv("FC26_WORK");
     return e && *e ? @(e) : [NSBundle.mainBundle objectForInfoDictionaryKey:@"FC26WorkFolder"];
 }
-static NSString *binary_path(void) { return [work_folder() stringByAppendingPathComponent:@"build/" FC26_BINARY]; }
+static NSString *binary_path_in(NSString *work) { return [work stringByAppendingPathComponent:@FC26_RUNTIME_DIR "/" FC26_BINARY]; }
+static NSString *binary_path(void) { return binary_path_in(work_folder()); }
 static NSSize screen_pixels(NSScreen *s) { CGFloat k = s.backingScaleFactor > 0 ? s.backingScaleFactor : 1; return NSMakeSize(round(s.frame.size.width * k), round(s.frame.size.height * k)); }
 static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
 
@@ -168,12 +178,17 @@ static LaunchPlan *launch_plan(NSUserDefaults *d, NSString *work, NSString *home
        an agent's test and the player's game never run together and the player's goes first (runtime/game_slot.c). */
     p.profile = [p.data stringByAppendingPathComponent:@"profile"]; p.slot = [work stringByAppendingPathComponent:@"analysis/game-slot"];
     p.input = [p.data stringByAppendingPathComponent:@"input.txt"];   // echo "shot ~/Desktop/shot.png" >> it
-    p.args = @[[work stringByAppendingPathComponent:@"build/" FC26_BINARY], @"rewritten/" FC26_VERSION_DIR, @"boot"];
+    p.args = @[binary_path_in(work), @"rewritten/" FC26_VERSION_DIR, @"boot"];
     /* Only the automatic boots are silent and headless (Makefile BOOT_ENV, tools/boot_gpu.sh): the player's game has its
        sound (audio renderer and AudioOut) and its window even when started from a terminal that has those set. FC 26 has
        no game patch yet. The RomFS verification record stays the one next to the image (the boots' own), so the app's
-       first start does not hash the 13 GB image again. */
-    p.unset = @[@"FC26_AUDIO", @"FC26_PATCHES", @"TOTK_AUDIO_OFF", @"TOTK_HEADLESS", @"TOTK_ROMFS_PROOF_DIR"];
+       first start does not hash the image again (37.8 GB for the update's merged RomFS). */
+    NSMutableArray<NSString *> *unset = [@[@"FC26_AUDIO", @"FC26_PATCHES", @"TOTK_AUDIO_OFF", @"TOTK_HEADLESS", @"TOTK_ROMFS_PROOF_DIR"] mutableCopy];
+    /* The update's runtime keeps its translations and its shader journal apart from the base game's
+       (<work>/build/shader-cache, the runtime's default), as its test boots do (tools/relatorio_update.md). */
+    if (*FC26_SHADER_CACHE) e[@"TOTK_SHADER_CACHE"] = [work stringByAppendingPathComponent:@FC26_SHADER_CACHE];
+    else [unset addObject:@"TOTK_SHADER_CACHE"];
+    p.unset = unset;
 
     e[@"DM_PRESENT_HZ"] = @"60";
     NSUInteger mi = [all indexOfObject:main_screen]; if (mi == NSNotFound) mi = 0;

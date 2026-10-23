@@ -1,13 +1,18 @@
 """The app's launcher (app/launcher.m), compiled from the source as the Makefile does: the game it starts gets the
 variables the GPU test boots use (tools/boot_gpu.sh), with the sound on, the profile and saves in a fixed place of the
 user's and the log in ~/Library/Logs/MacNativeGames; and its dry run (--dry-run, FC26_LAUNCHER_DRYRUN=1) prints that
-without starting anything. No game data, no window, no game: the work folder is a temporary one with a stand-in binary."""
+without starting anything; and it starts the version in assets/game.json (the update, v1638400) with the runtime built for
+it (<work>/build-update) and that runtime's own shader cache. No game data, no window, no game: the work folder is a
+temporary one with a stand-in binary."""
 from pathlib import Path
 import json
 import os
 import platform
+import re
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -20,6 +25,21 @@ BOOT_GPU = {'TOTK_GPU_ALLOW_SUBMIT': '1', 'TOTK_GPU_WIDEN': '1', 'TOTK_GPU_BLOCK
 # what only the automatic boots set: silent (TOTK_AUDIO_OFF, FC26_AUDIO=0), headless; and what the player's start must not
 # inherit from a terminal
 CLEARED = ['TOTK_AUDIO_OFF', 'FC26_AUDIO', 'TOTK_HEADLESS', 'FC26_PATCHES', 'TOTK_ROMFS_PROOF_DIR']
+GAME = json.loads((HERE / 'assets/game.json').read_text())
+# the update's runtime and shader cache, relative to the work folder (tools/relatorio_update.md: `make prepare runtime
+# OUT=<work>/build-update`, TOTK_SHADER_CACHE=<work>/build-update/shader-cache/rt-update in its test boot)
+RUNTIME = 'build-update'
+SHADER_CACHE = 'build-update/shader-cache/rt-update'
+
+
+def makefile_defines(out):
+    """The -D flags the Makefile compiles the launcher with (make -n: nothing is built)."""
+    r = subprocess.run(['make', '-n', '-B', '-C', str(HERE), f'{out}/launcher', f'OUT={out}', 'WORK=/nonexistent/work',
+                        f'PY={sys.executable}'], capture_output=True, text=True)
+    if r.returncode:
+        raise AssertionError(r.stdout + r.stderr)
+    command = next(line for line in r.stdout.replace('\\\n', ' ').splitlines() if 'app/launcher.m' in line)
+    return [w for w in shlex.split(command) if re.match(r'-DFC26_', w)]
 
 
 def compile_objc(sources, output, defines=()):
@@ -34,15 +54,16 @@ class Launcher(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.dir = Path(cls.tmp.name)
-        defines = ['-DFC26_BINARY="fc26-native"', '-DFC26_VERSION_DIR="v100"']
+        defines = makefile_defines(cls.dir / 'out')
         cls.harness = compile_objc([HARNESS], cls.dir / 'plan', [*defines, '-Wno-unused-function'])
         cls.launcher = compile_objc([LAUNCHER], cls.dir / 'FC 26', defines)
         cls.work = cls.dir / 'work'
-        (cls.work / 'build').mkdir(parents=True)
         cls.marker = cls.dir / 'started'
-        stand_in = cls.work / 'build/fc26-native'   # it would leave a mark if the launcher started it
-        stand_in.write_text(f'#!/bin/sh\ntouch "{cls.marker}"\n')
-        stand_in.chmod(0o755)
+        for runtime in ('build', RUNTIME):   # the base's runtime too: the launcher must not pick it
+            (cls.work / runtime).mkdir(parents=True)
+            stand_in = cls.work / runtime / GAME['binary']   # it would leave a mark if the launcher started it
+            stand_in.write_text(f'#!/bin/sh\ntouch "{cls.marker}"\n')
+            stand_in.chmod(0o755)
 
     @classmethod
     def tearDownClass(cls):
@@ -62,9 +83,17 @@ class Launcher(unittest.TestCase):
         self.assertEqual(p['set']['TOTK_SLOT_OWNER'], 'user')
         self.assertEqual(p['set']['TOTK_SLOT_PURPOSE'], 'player')
         self.assertEqual(p['cwd'], str(self.work))
-        self.assertEqual(p['args'], [str(self.work / 'build/fc26-native'), 'rewritten/v100', 'boot'])
+        self.assertEqual(p['args'][2], 'boot')
         self.assertEqual(p['slot'], str(self.work / 'analysis/game-slot'))
         self.assertEqual(p['set']['TOTK_GAME_SLOT_DIR'], p['slot'])
+
+    def test_starts_the_update_with_its_shader_cache(self):
+        self.assertEqual(GAME['version_dir'], 'v1638400')
+        p = self.plan()
+        self.assertEqual(p['args'], [str(self.work / RUNTIME / GAME['binary']), 'rewritten/v1638400', 'boot'])
+        # the update's own cache, not the base's (<work>/build/shader-cache, the runtime's default without the variable)
+        self.assertEqual(p['set']['TOTK_SHADER_CACHE'], str(self.work / SHADER_CACHE))
+        self.assertNotIn('TOTK_SHADER_CACHE', p['unset'])
 
     def test_sound_on(self):
         p = self.plan()
@@ -97,7 +126,8 @@ class Launcher(unittest.TestCase):
         self.assertEqual(self.harness.returncode, 0, self.harness.stderr)
         self.assertEqual(self.launcher.returncode, 0, self.launcher.stderr)
         env = {k: v for k, v in os.environ.items() if k not in CLEARED}
-        env.update({'FC26_WORK': str(self.work), 'TOTK_AUDIO_OFF': '1', 'FC26_AUDIO': '0', **env_extra})
+        env.update({'FC26_WORK': str(self.work), 'TOTK_AUDIO_OFF': '1', 'FC26_AUDIO': '0',
+                    'TOTK_SHADER_CACHE': '/elsewhere/shader-cache', **env_extra})
         return subprocess.run([str(self.dir / 'FC 26'), *args], capture_output=True, text=True, timeout=60, env=env)
 
     def test_dry_run_prints_and_starts_nothing(self):
@@ -111,13 +141,14 @@ class Launcher(unittest.TestCase):
             self.assertIn("export TOTK_SLOT_OWNER='user'", lines)
             self.assertIn('unset ' + ' '.join(sorted(CLEARED)), lines)
             self.assertNotIn("export TOTK_AUDIO_OFF='1'", lines)
-            self.assertTrue(any(line.startswith(f"exec '{self.work}/build/fc26-native' rewritten/v100 boot 2> '")
+            self.assertIn(f"export TOTK_SHADER_CACHE='{self.work}/{SHADER_CACHE}'", lines)
+            self.assertTrue(any(line.startswith(f"exec '{self.work}/{RUNTIME}/fc26-native' rewritten/v1638400 boot 2> '")
                                 and line.endswith("/Library/Logs/MacNativeGames/fc26.log'") for line in lines), r.stdout)
 
     def test_dry_run_says_when_the_game_is_missing(self):
         r = self.dry_run(['--dry-run'], {'FC26_WORK': str(self.dir / 'nowhere')})
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
-        self.assertIn('nowhere/build/fc26-native', r.stderr)
+        self.assertIn(f'nowhere/{RUNTIME}/fc26-native', r.stderr)
         self.assertFalse(self.marker.exists())
 
 

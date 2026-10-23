@@ -168,10 +168,14 @@ patches:
 APP ?= FC 26.app
 GAME ?=
 KEYS ?=
-$(OUT)/launcher: app/launcher.m assets/game.json Makefile   # BINARY and VERSION are compiled in
+# The app runs the runtime built for VERSION (the update, since story H1: `make prepare runtime OUT=<work>/build-update`)
+# with that runtime's own shader cache; both are relative to the work folder. The base game's stays in build/.
+APP_RUNTIME ?= build-update
+APP_SHADER_CACHE ?= $(APP_RUNTIME)/shader-cache/rt-update
+$(OUT)/launcher: app/launcher.m assets/game.json Makefile   # BINARY, VERSION, APP_RUNTIME and APP_SHADER_CACHE are compiled in
 	@mkdir -p "$(dir $@)"
 	xcrun clang -std=gnu11 -O2 -Wall -Wextra -Werror -fobjc-arc -DFC26_BINARY='"$(BINARY)"' -DFC26_VERSION_DIR='"$(VERSION)"' \
-	  app/launcher.m -framework Cocoa -o "$@"
+	  -DFC26_RUNTIME_DIR='"$(APP_RUNTIME)"' -DFC26_SHADER_CACHE='"$(APP_SHADER_CACHE)"' app/launcher.m -framework Cocoa -o "$@"
 $(OUT)/AppIcon.icns:
 	@if [ -n "$(GAME)" ] && [ -n "$(KEYS)" ]; then cd scripts && "$(PY)" extract_app_icon.py "$(GAME)" --keys "$(KEYS)" --title $(TITLE_ID) --output "$(abspath $@)"; \
 	 else echo "no GAME= / KEYS=: the app gets no icon"; fi
