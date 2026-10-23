@@ -191,6 +191,56 @@ static unsigned commit(const char *name) {
     if (save && !(getenv("TOTK_PROBE_NEGATIVE") && atoi(getenv("TOTK_PROBE_NEGATIVE")) == 23)) atomic_store(&save_dirty, 0);   /* 23: probe-save's negative control */
     return 0;
 }
+static unsigned char is_mounted(const char *name) {
+    if (!name) return 0;
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < 16; i++) {
+        if (mounts[i].kind && !strcmp(mounts[i].name, name)) {
+            pthread_mutex_unlock(&lock);
+            return 1;
+        }
+    }
+    pthread_mutex_unlock(&lock);
+    return runtime_romfs_is_mounted(name) ? 1 : 0;
+}
+
+/* Save data sizes for FC 26 proven from control.nacp (initial 62 MiB / 16 MiB journal, max 962 MiB / 32 MiB journal) */
+#define SAVE_DATA_SIZE_INIT 65011712LL
+#define SAVE_JOURNAL_SIZE_INIT 16777216LL
+#define SAVE_DATA_SIZE_MAX 1008730112LL
+#define SAVE_JOURNAL_SIZE_MAX 33554432LL
+
+static int64_t current_save_data_size = SAVE_DATA_SIZE_INIT;
+static int64_t current_save_journal_size = SAVE_JOURNAL_SIZE_INIT;
+
+static unsigned get_save_data_size_max(int64_t *out_data, int64_t *out_journal) {
+    if (!out_data || !out_journal) return R_INVALID_ARGUMENT;
+    *out_data = SAVE_DATA_SIZE_MAX;
+    *out_journal = SAVE_JOURNAL_SIZE_MAX;
+    return 0;
+}
+
+static unsigned get_save_data_size(int64_t *out_data, int64_t *out_journal, const uint64_t *uid) {
+    ready(); uint64_t me[2]; runtime_account_uid(me);
+    if (!out_data || !out_journal || !uid) return R_INVALID_ARGUMENT;
+    if (uid[0] != me[0] || uid[1] != me[1]) return R_TARGET_NOT_FOUND;
+    pthread_mutex_lock(&lock);
+    *out_data = current_save_data_size;
+    *out_journal = current_save_journal_size;
+    pthread_mutex_unlock(&lock);
+    return 0;
+}
+
+static unsigned extend_save_data(const uint64_t *uid, int64_t data_size, int64_t journal_size) {
+    ready(); uint64_t me[2]; runtime_account_uid(me);
+    if (!uid || uid[0] != me[0] || uid[1] != me[1]) return R_TARGET_NOT_FOUND;
+    if (data_size < 0 || journal_size < 0 || data_size > SAVE_DATA_SIZE_MAX || journal_size > SAVE_JOURNAL_SIZE_MAX) return R_INVALID_ARGUMENT;
+    pthread_mutex_lock(&lock);
+    if (data_size > current_save_data_size) current_save_data_size = data_size;
+    if (journal_size > current_save_journal_size) current_save_journal_size = journal_size;
+    pthread_mutex_unlock(&lock);
+    return 0;
+}
 
 /* ---------- files ---------- */
 static File *file_of(uint64_t h, int *fd, int *mode) {
@@ -389,6 +439,10 @@ void *runtime_fs_host_override(const char *name) {
         {"_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", mount_save},
         {"_ZN2nn2fs21MountSaveDataReadOnlyEPKcNS_13ApplicationIdERKNS_7account3UidE", mount_save_ro},
         {"_ZN2nn2fs18IsSaveDataExistingENS_13ApplicationIdERKNS_7account3UidE", save_exists},
+        {"_ZN2nn2fs9IsMountedEPKc", is_mounted},
+        {"_ZN2nn2fs15GetSaveDataSizeEPlS1_RKNS_7account3UidE", get_save_data_size},
+        {"_ZN2nn2fs18GetSaveDataSizeMaxEPlS1_", get_save_data_size_max},
+        {"_ZN2nn2fs14ExtendSaveDataERKNS_7account3UidEll", extend_save_data},
         {"_ZN2nn2fs21MountTemporaryStorageEPKc", mount_temp}, {"_ZN2nn2fs7UnmountEPKc", unmount}, {"_ZN2nn2fs6CommitEPKc", commit},
         {"_ZN2nn2fs14CommitSaveDataEPKc", commit}, {"_ZN2nn2fs14EnsureSaveDataERKNS_7account3UidE", ensure_save},
         {"_ZN2nn2fs18CreateCacheStorageEill", create_cache}, {"_ZN2nn2fs18DeleteCacheStorageEi", delete_cache},

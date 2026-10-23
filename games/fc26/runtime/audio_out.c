@@ -192,4 +192,16 @@ static void manager_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs
     }
 }
 
-__attribute__((constructor)) static void register_audio_out(void) { runtime_ipc_register("audout:u", manager_handler, NULL, NULL); }
+static void audio_in_manager_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
+    (void)s;
+    switch (rq->cmd) {
+    case 0: case 2: { uint32_t n = 0; IPC_OUT(rs, n); return; }   /* ListAudioIns(Auto) -> 0 devices */
+    case 4: rs->copy[rs->ncopy++] = runtime_event_readable(runtime_event_new()); return;   /* AcquireAudioDeviceNotificationForInput */
+    default: ipc_unimplemented(s, rq);
+    }
+}
+
+__attribute__((constructor)) static void register_audio_out(void) {
+    runtime_ipc_register("audout:u", manager_handler, NULL, NULL);
+    runtime_ipc_register("audin:u", audio_in_manager_handler, NULL, NULL);
+}
