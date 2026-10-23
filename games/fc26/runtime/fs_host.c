@@ -16,6 +16,7 @@
 #include <string.h>
 #include <stdatomic.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #define R_PATH_NOT_FOUND 0x202u
@@ -79,6 +80,7 @@ static void init(void) {
     make_dir(save_root);                                   /* launcher-style EnsureSaveData */
     snprintf(p, sizeof p, "%s/temp", profile); remove_tree(p); make_dir(p);
     snprintf(p, sizeof p, "%s/cache", profile); make_dir(p);
+    snprintf(p, sizeof p, "%s/cache/0", profile); make_dir(p);
     fprintf(stderr, "[totk] host save storage: %s\n", save_root);
 }
 static void ready(void) { pthread_once(&once, init); }
@@ -154,6 +156,7 @@ static unsigned mount_cache(const char *name, int index) {
     if (stat(p, &st) || !S_ISDIR(st.st_mode)) return R_TARGET_NOT_FOUND;
     return mount_add(name, M_CACHE, p);
 }
+static unsigned mount_cache_storage(const char *name) { return mount_cache(name, 0); }
 typedef struct { int32_t index; uint8_t reserved[0x1c]; } CacheStorageInfo;
 typedef struct { int list[64]; int count, next; } CacheList;
 static unsigned open_cache_list(uint64_t *out) {
@@ -240,6 +243,46 @@ static unsigned extend_save_data(const uint64_t *uid, int64_t data_size, int64_t
     if (journal_size > current_save_journal_size) current_save_journal_size = journal_size;
     pthread_mutex_unlock(&lock);
     return 0;
+}
+
+/* Cache storage sizes for FC 26 from control.nacp (data 962 MiB, journal 32 MiB, index max 0)
+   TODO(mac): verify dynamic cache quota if game requests extra cache storage at runtime */
+#define CACHE_STORAGE_SIZE 1008730112LL
+#define CACHE_STORAGE_JOURNAL_SIZE 33554432LL
+#define CACHE_STORAGE_MAX_INDEX 0
+#define CACHE_STORAGE_MAX_SIZE (CACHE_STORAGE_SIZE + CACHE_STORAGE_JOURNAL_SIZE)
+
+static unsigned get_cache_storage_max(int *out_max_index, int64_t *out_max_size) {
+    if (!out_max_index || !out_max_size) return R_INVALID_ARGUMENT;
+    /* TODO(mac): cache storage limits from control.nacp */
+    *out_max_index = CACHE_STORAGE_MAX_INDEX;
+    *out_max_size = CACHE_STORAGE_MAX_SIZE;
+    return 0;
+}
+
+static unsigned get_cache_storage_size(int64_t *out_data, int64_t *out_journal, int index) {
+    if (!out_data || !out_journal) return R_INVALID_ARGUMENT;
+    *out_data = 0;
+    *out_journal = 0;
+    if (index < 0 || index > CACHE_STORAGE_MAX_INDEX) return R_TARGET_NOT_FOUND;
+    /* TODO(mac): cache storage size from control.nacp */
+    *out_data = CACHE_STORAGE_SIZE;
+    *out_journal = CACHE_STORAGE_JOURNAL_SIZE;
+    return 0;
+}
+
+/* Add-On Content (DLC): base game has no DLC (nn::aoc count 0); real nn::fs not-found results */
+static unsigned mount_aoc(const char *name, int target_index, void *cache_buffer, size_t cache_buffer_size) {
+    (void)cache_buffer; (void)cache_buffer_size; (void)target_index;
+    if (!name || !*name || strlen(name) >= 32 || strchr(name, ':') || strchr(name, '/')) return R_INVALID_ARGUMENT;
+    return R_TARGET_NOT_FOUND;
+}
+
+static unsigned query_mount_aoc_cache_size(size_t *out, int target_index) {
+    if (!out) return R_INVALID_ARGUMENT;
+    *out = 0;
+    (void)target_index;
+    return R_TARGET_NOT_FOUND;
 }
 
 /* ---------- files ---------- */
@@ -334,7 +377,65 @@ static unsigned entry_type(int *out, const char *path) {
 typedef struct { char name[769]; uint8_t pad0[3]; int8_t type; uint8_t pad1[3]; int64_t size; } DirectoryEntry;
 _Static_assert(sizeof(DirectoryEntry) == 0x310, "nn::fs::DirectoryEntry");
 static unsigned create_directory(const char *path) { char p[1100]; unsigned r = save_change_path(path, p, sizeof p); if (r) return r; return mkdir(p, 0700) ? errno_result() : 0; }
+static unsigned delete_directory(const char *path) {
+    if (!path) return R_INVALID_PATH;
+    const char *colon = strchr(path, ':');
+    if (!colon || !colon[1] || !strcmp(colon, ":/")) return R_INVALID_PATH;
+    char p[1100]; unsigned r = save_change_path(path, p, sizeof p); if (r) return r;
+    struct stat st; if (stat(p, &st)) return R_PATH_NOT_FOUND;
+    if (!S_ISDIR(st.st_mode)) return R_PATH_NOT_FOUND;
+    if (rmdir(p)) return errno == ENOTEMPTY || errno == EEXIST ? R_NOT_EMPTY : errno_result();
+    return 0;
+}
 static unsigned delete_recursive(const char *path) { char p[1100]; unsigned r = save_change_path(path, p, sizeof p); if (r) return r; struct stat st; if (stat(p, &st)) return R_PATH_NOT_FOUND; return remove_tree(p) ? R_INVALID_ARGUMENT : 0; }
+static unsigned rename_directory(const char *from, const char *to) {
+    if (!from || !to) return R_INVALID_PATH;
+    const char *c1 = strchr(from, ':');
+    const char *c2 = strchr(to, ':');
+    if (!c1 || !c2 || (c1 - from) != (c2 - to) || strncmp(from, to, (size_t)(c1 - from)) != 0) return R_INVALID_ARGUMENT;
+    char a[1100], b[1100];
+    unsigned r = save_change_path(from, a, sizeof a);
+    if (!r) r = host_path(to, b, sizeof b);
+    if (r) return r;
+    struct stat st;
+    if (stat(a, &st)) return R_PATH_NOT_FOUND;
+    if (!S_ISDIR(st.st_mode)) return R_PATH_NOT_FOUND;
+    if (!stat(b, &st)) return R_ALREADY_EXISTS;
+    return rename(a, b) ? errno_result() : 0;
+}
+static unsigned get_free_space_size(int64_t *out, const char *path) {
+    if (!out) return R_INVALID_ARGUMENT;
+    *out = 0;
+    if (!path) return R_INVALID_PATH;
+    char p[1100];
+    char temp_path[1100];
+    const char *use_path = path;
+    const char *colon = strchr(path, ':');
+    if (colon && colon[1] == '\0') {
+        snprintf(temp_path, sizeof temp_path, "%s/", path);
+        use_path = temp_path;
+        colon = strchr(use_path, ':');
+    }
+    unsigned r = host_path(use_path, p, sizeof p);
+    if (r) return r;
+    struct statvfs st;
+    if (statvfs(p, &st)) {
+        pthread_mutex_lock(&lock);
+        char root[1024] = {0};
+        size_t n = colon ? (size_t)(colon - use_path) : 0;
+        for (int i = 0; i < 16; i++) {
+            if (mounts[i].kind && strlen(mounts[i].name) == n && !strncmp(mounts[i].name, use_path, n)) {
+                strcpy(root, mounts[i].root);
+                break;
+            }
+        }
+        pthread_mutex_unlock(&lock);
+        if (!*root || statvfs(root, &st)) return errno_result();
+    }
+    uint64_t bsize = st.f_frsize ? st.f_frsize : st.f_bsize;
+    *out = (int64_t)(st.f_bavail * bsize);
+    return 0;
+}
 struct RomEntry { char name[769]; int is_dir; int64_t size; };
 typedef struct { struct RomEntry *list; int64_t n, cap; } RomList;
 static void rom_add(void *ctx, const char *name, int is_dir, int64_t size) {
@@ -381,6 +482,37 @@ static unsigned read_directory(int64_t *count, DirectoryEntry *out, uint64_t h, 
         memset(&out[n], 0, sizeof *out); strcpy(out[n].name, e->d_name); out[n].type = is_dir ? 0 : 1; out[n].size = is_dir ? 0 : st.st_size; n++;
     }
     *count = n; return 0;
+}
+static unsigned directory_entry_count(int64_t *out, uint64_t h) {
+    if (!out) return R_INVALID_ARGUMENT;
+    *out = 0;
+    if (h < DIR_BASE || h >= DIR_BASE + NDIRS) return R_INVALID_ARGUMENT;
+    pthread_mutex_lock(&lock);
+    Dir *d = &dirs[h - DIR_BASE];
+    if (!d->dir && !d->rom) { pthread_mutex_unlock(&lock); return R_INVALID_ARGUMENT; }
+    if (d->rom) {
+        *out = d->nrom;
+        pthread_mutex_unlock(&lock);
+        return 0;
+    }
+    char path[1024];
+    int mode = d->mode;
+    strcpy(path, d->path);
+    pthread_mutex_unlock(&lock);
+
+    DIR *dp = opendir(path);
+    if (!dp) return errno_result();
+    int64_t count = 0;
+    struct dirent *e;
+    while ((e = readdir(dp))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || strlen(e->d_name) > 768) continue;
+        char child[2048]; snprintf(child, sizeof child, "%s/%s", path, e->d_name); struct stat st; if (stat(child, &st)) continue;
+        int is_dir = S_ISDIR(st.st_mode); if (!(mode & (is_dir ? 1 : 2))) continue;
+        count++;
+    }
+    closedir(dp);
+    *out = count;
+    return 0;
 }
 static void close_directory(uint64_t h) {
     if (h < DIR_BASE || h >= DIR_BASE + NDIRS || (!dirs[h - DIR_BASE].dir && !dirs[h - DIR_BASE].rom)) runtime_fail("close invalid directory handle");
@@ -432,9 +564,12 @@ void *runtime_fs_host_override(const char *name) {
         {"_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", write_file},
         {"_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl", set_file_size}, {"_ZN2nn2fs9FlushFileENS0_10FileHandleE", flush_file},
         {"_ZN2nn2fs10CreateFileEPKcl", create_file}, {"_ZN2nn2fs10DeleteFileEPKc", delete_file}, {"_ZN2nn2fs10RenameFileEPKcS2_", rename_file},
-        {"_ZN2nn2fs15CreateDirectoryEPKc", create_directory}, {"_ZN2nn2fs26DeleteDirectoryRecursivelyEPKc", delete_recursive},
+        {"_ZN2nn2fs15CreateDirectoryEPKc", create_directory}, {"_ZN2nn2fs15DeleteDirectoryEPKc", delete_directory},
+        {"_ZN2nn2fs26DeleteDirectoryRecursivelyEPKc", delete_recursive}, {"_ZN2nn2fs15RenameDirectoryEPKcS2_", rename_directory},
+        {"_ZN2nn2fs16GetFreeSpaceSizeEPlPKc", get_free_space_size},
         {"_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci", open_directory},
         {"_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandleEl", read_directory},
+        {"_ZN2nn2fs22GetDirectoryEntryCountEPlNS0_15DirectoryHandleE", directory_entry_count},
         {"_ZN2nn2fs14CloseDirectoryENS0_15DirectoryHandleE", close_directory},
         {"_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", mount_save},
         {"_ZN2nn2fs21MountSaveDataReadOnlyEPKcNS_13ApplicationIdERKNS_7account3UidE", mount_save_ro},
@@ -446,10 +581,15 @@ void *runtime_fs_host_override(const char *name) {
         {"_ZN2nn2fs21MountTemporaryStorageEPKc", mount_temp}, {"_ZN2nn2fs7UnmountEPKc", unmount}, {"_ZN2nn2fs6CommitEPKc", commit},
         {"_ZN2nn2fs14CommitSaveDataEPKc", commit}, {"_ZN2nn2fs14EnsureSaveDataERKNS_7account3UidE", ensure_save},
         {"_ZN2nn2fs18CreateCacheStorageEill", create_cache}, {"_ZN2nn2fs18DeleteCacheStorageEi", delete_cache},
+        {"_ZN2nn2fs17MountCacheStorageEPKc", mount_cache_storage},
         {"_ZN2nn2fs17MountCacheStorageEPKci", mount_cache},
+        {"_ZN2nn2fs18GetCacheStorageMaxEPiPl", get_cache_storage_max},
+        {"_ZN2nn2fs19GetCacheStorageSizeEPlS1_i", get_cache_storage_size},
         {"_ZN2nn2fs20OpenCacheStorageListEPNS0_22CacheStorageListHandleE", open_cache_list},
         {"_ZN2nn2fs20ReadCacheStorageListEPiPNS0_16CacheStorageInfoENS0_22CacheStorageListHandleEi", read_cache_list},
         {"_ZN2nn2fs21CloseCacheStorageListENS0_22CacheStorageListHandleE", close_cache_list},
+        {"_ZN2nn2fs17MountAddOnContentEPKciPvm", mount_aoc},
+        {"_ZN2nn2fs31QueryMountAddOnContentCacheSizeEPmi", query_mount_aoc_cache_size},
         {"_ZN2nn2fs26SetPriorityOnCurrentThreadENS0_8PriorityE", set_priority},
     };
     for (size_t i = 0; i < sizeof map / sizeof *map; i++) if (!strcmp(name, map[i].name)) return map[i].fn;
