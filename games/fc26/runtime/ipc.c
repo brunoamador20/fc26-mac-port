@@ -295,6 +295,18 @@ int runtime_ipc_svc(unsigned num, uint64_t *r) {
         trace_fp = r[29]; trace_lr = r[30];
         dispatch(s, m); r[0] = 0; return 1;
     }
+    case 0x23: {                                             /* SendAsyncRequestWithUserBuffer(x1 buf, x2 size, w3 h) -> w1 event */
+        uint32_t h = (uint32_t)r[3];
+        IpcSession *s = runtime_handle_get(h, 1);
+        if (!s) { r[0] = 0xe401; return 1; }
+        uint32_t *m = (uint32_t *)(uintptr_t)r[1];
+        if (!m || r[2] < MSG_BYTES) runtime_fail("IPC async message buffer");
+        trace_fp = r[29]; trace_lr = r[30];
+        dispatch(s, m);
+        uint32_t hw = runtime_event_new();
+        runtime_event_signal(hw);
+        r[0] = 0; r[1] = runtime_event_readable(hw); return 1;
+    }
     case 0x15: {                                             /* CreateTransferMemory(x1 addr, x2 size, w3 perm) -> w1 */
         IpcTransferMemory *t = malloc(sizeof *t);
         if (!t) runtime_fail("transfer memory allocation");

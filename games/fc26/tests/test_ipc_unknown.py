@@ -41,6 +41,41 @@ class UnknownIpc(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn('GetLanguageCode result 0 code en-US', run.stdout)
 
+    def test_bsd_select_poll_sysctl(self):
+        run = self.run_case('bsd-cmd', '5')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn('bsd cmd 5: ret 0 err 0', run.stdout)
+
+        run = self.run_case('bsd-cmd', '6')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn('bsd cmd 6: ret 0 err 0', run.stdout)
+
+        run = self.run_case('bsd-cmd', '7')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn('bsd cmd 7: ret -1 err 50', run.stdout)
+
+    def test_time_service_and_timezone(self):
+        run = self.run_case('time-open')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn('time ok: timezone location', run.stdout)
+
+    def test_ipc_svcs(self):
+        run = self.run_case('svc-test')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn('svc test ok', run.stdout)
+
+    def test_unimplemented_svc_stops_with_missing_tag(self):
+        # As 8 SVCs sem suporte real devem cair no caminho padrão e falhar visivelmente com [fc26-missing]
+        for svc_num in [0x13, 0x14, 0x50, 0x51, 0x52, 0x4b, 0x40, 0x41]:
+            with self.subTest(svc=hex(svc_num)):
+                run = self.run_case('svc', hex(svc_num))
+                self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+                self.assertIn(f'[totk] unimplemented SVC {hex(svc_num)} at main+0x1234', run.stderr)
+                self.assertIn(f'[fc26-missing] svc: number {hex(svc_num)} at main+0x1234', run.stderr)
+                self.assertIn('[totk] FAIL: system service not implemented', run.stderr)
+                self.assertEqual([l for l in run.stderr.splitlines() if l.startswith('[fc26-missing]')],
+                                 [f'[fc26-missing] svc: number {hex(svc_num)} at main+0x1234'])
+
     def test_unknown_service_is_named(self):
         for name in ['ldr:ro', 'ro:1', 'ldn:u', 'pctl:a', 'hwopus']:
             for mode in ['service', 'tipc-service']:
