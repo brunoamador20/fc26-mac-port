@@ -47,4 +47,7 @@ make runtime probe PY=$PY WORK=$WORK
 make boot PY=$PY WORK=$WORK BOOT_ENV="TOTK_HEADLESS=1 TOTK_AUDIO_OFF=1 FC26_AUDIO=0 TOTK_VERIFY_STARTUP=nnmain"
 ```
 
-O app (`make app`, "FC 26.app") existe, mas não é necessário antes de o jogo desenhar.
+O app (`make app WORK=$WORK APP="<pasta>/FC 26.app" GAME=<NSP> KEYS=<prod.keys>`, "FC 26.app") é só o lançador: roda
+`$WORK/build/fc26-native` na pasta de trabalho que o Info.plist nomeia (FC26WorkFolder), com as variáveis de GPU do boot
+de teste, som ligado, perfil e saves em `~/Library/Application Support/MacNativeGames/FC26/profile` e log em
+`~/Library/Logs/MacNativeGames/fc26.log`. `"FC 26.app/Contents/MacOS/FC 26" --dry-run` mostra tudo isso sem abrir o jogo.
