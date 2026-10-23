@@ -61,6 +61,20 @@ class Wrap(unittest.TestCase):
         self.assertEqual(kinds, sorted([1027] * 5 + [257] * 2 + [1025] * 2 + [1031] * 2 + [1026] * 2))
         self.assertEqual(nsoimg.func_starts(image, 0x4000), sorted(synth.CODE))
 
+    @unittest.skipUnless(HAVE_LZ4, 'lz4 is needed for compressed (ExeFS-style) segments')
+    def test_compressed_nso_decodes_like_the_kit(self):
+        import lz4.block
+        out, body = bytearray(self.nso[:0x100]), bytearray()
+        for i in range(3):
+            _, memory, size = struct.unpack_from('<III', self.nso, 0x10 + 0x10 * i)
+            packed = lz4.block.compress(self.nro[memory:memory + size], store_size=False)
+            struct.pack_into('<I', out, 0x10 + 0x10 * i, 0x100 + len(body)); struct.pack_into('<I', out, 0x60 + 4 * i, len(packed))
+            body += packed
+        struct.pack_into('<I', out, 0xc, 0x3f)
+        compressed = bytes(out + body)
+        self.assertEqual(tool.nso_image(compressed)[0], self.nro + bytes(synth.BSS_SIZE))
+        self.assertEqual(tool.module_symbols(compressed), tool.module_symbols(self.nro))
+
     def test_relocations_through_the_nso_image(self):
         image, _, _ = tool.nso_image(self.nso)
         _, tags, needed = tool.parse_dynamic(image, synth.MOD0)
@@ -97,6 +111,28 @@ class Wrap(unittest.TestCase):
                 tool.wrap(data)
         with self.assertRaises(ValueError):
             tool.unwrap(b'NSO0' + bytes(0xfc))
+
+
+class Inspect(unittest.TestCase):
+    def test_symbols_of_the_nro_and_of_its_nso(self):
+        nro = synth.make_nro()
+        for data in (nro, tool.wrap(nro)):
+            listing = tool.module_symbols(data)
+            self.assertEqual(listing['imports'], sorted(n for n, _, _, v in synth.SYMBOLS if v is None))
+            self.assertEqual([e['name'] for e in listing['exports']], ['nro_export_data', 'nro_export_fn', 'nro_tls_var'])
+            self.assertEqual(tool.module_symbols(data, '_ZN2nn')['imports'], ['_ZN2nn3mem17StandardAllocator8AllocateEm'])
+
+    def test_nrr_listing(self):
+        nro = synth.make_nro()
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'm.nro'; path.write_bytes(nro)
+            info = tool.describe_nrr(synth.make_nrr(synth.other_hashes(3) + [hashlib.sha256(nro).digest()]), [path])
+            self.assertEqual((info['program_id'], info['hashes'], info['sorted'], info['kind']), ('01004ff021942000', 4, True, 0))
+            self.assertTrue(info['nros'][str(path)]['listed'] and info['size_matches_file'])
+            self.assertFalse(tool.describe_nrr(synth.make_nrr(synth.other_hashes(3)), [path])['nros'][str(path)]['listed'])
+        unsorted = bytearray(synth.make_nrr(synth.other_hashes(2)))
+        unsorted[0x350:0x370], unsorted[0x370:0x390] = unsorted[0x370:0x390], unsorted[0x350:0x370]
+        self.assertFalse(tool.describe_nrr(bytes(unsorted))['sorted'])
 
 
 class Register(unittest.TestCase):

@@ -10,6 +10,8 @@ and MOD0 (inside the copied bytes) is untouched. third_party/d2r/patch_nso.py th
   unwrap <nso> <nro>           the NRO again from such an NSO
   register <nro> <dir> <name>  after `patch_nso.py <nso> <dir> <name>`: check that the rewrite kept what must not change
                                and record the image in <dir>/nro_manifest.tsv under the NRO's SHA-256 (read by runtime/ro)
+  symbols <module> [--prefix]  imports and exports of an NRO or NSO (ExeFS ones too; compressed segments need lz4)
+  nrr <nrr> [<nro>...]         an NRR's header, whether its hash list is sorted, and whether each NRO is listed in it
 
 Layouts: switchbrew NRO0, NSO0, MOD and NRR0 pages. Only the files named on the command line are read.
 """
@@ -184,17 +186,21 @@ def wrap(data):
 
 
 def nso_image(nso):
-    """The NSO's memory image as patch_nso.py builds it (segments at their offsets, then zero bss); uncompressed only."""
+    """The NSO's memory image as patch_nso.py / nsoimg.py build it: segments at their offsets, then zero bss."""
     require(nso[:4] == b'NSO0', 'not an NSO')
     flags = struct.unpack_from('<I', nso, 0xc)[0]
-    require(not flags & 7, 'compressed NSO: use nsoimg.load')
     segs = [struct.unpack_from('<III', nso, 0x10 + 0x10 * i) for i in range(3)]
     bss = struct.unpack_from('<I', nso, 0x3c)[0]
     stored = struct.unpack_from('<III', nso, 0x60)
     image = bytearray(segs[2][1] + segs[2][2] + bss)
     for i, (file_offset, memory, size) in enumerate(segs):
-        require(stored[i] == size and file_offset + size <= len(nso), f'NSO segment {i} truncated')
-        image[memory:memory + size] = nso[file_offset:file_offset + size]
+        require(file_offset + stored[i] <= len(nso), f'NSO segment {i} truncated')
+        raw = nso[file_offset:file_offset + stored[i]]
+        if flags >> i & 1:
+            import lz4.block   # only compressed (ExeFS) modules need it; it is in requirements.txt
+            raw = lz4.block.decompress(raw, uncompressed_size=size)
+        require(len(raw) == size, f'NSO segment {i} has {len(raw):#x} bytes, header says {size:#x}')
+        image[memory:memory + size] = raw
     return bytes(image), segs, bss
 
 
@@ -205,6 +211,37 @@ def unwrap(nso):
     nro = image[:segs[2][1] + segs[2][2]]
     require(nro[0x10:0x14] == b'NRO0', 'the NSO text does not start with an NRO header (not made by wrap)')
     return nro
+
+
+def module_symbols(data, prefix=''):
+    """Imports (undefined dynamic symbols) and exports of an NRO or NSO, optionally only names starting with prefix."""
+    if data[0x10:0x14] == b'NRO0':
+        h = parse_nro(data)
+        image = data[:h['size']] + bytes(h['bss_size'])
+    else:
+        image = nso_image(data)[0]
+    mod0 = struct.unpack_from('<I', image, 4)[0]
+    require(image[mod0:mod0 + 4] == b'MOD0', 'no MOD0 at the offset given at +4')
+    _, tags, needed = parse_dynamic(image, mod0)
+    syms = [s for s in symbols(image, tags)[1:] if s['name'].startswith(prefix)]
+    return dict(imports=sorted(s['name'] for s in syms if not s['defined']),
+                exports=sorted((dict(name=s['name'], value=hex(s['value']), type=s['type']) for s in syms if s['defined']),
+                               key=lambda s: s['name']), needed=needed)
+
+
+def describe_nrr(data, nros=()):
+    require(len(data) >= 0x350 and data[:4] == b'NRR0', 'not an NRR')
+    program_id, size, kind = struct.unpack_from('<QIB', data, 0x330)
+    offset, count = struct.unpack_from('<II', data, 0x340)
+    require(offset >= 0x350 and offset + 32 * count <= len(data), 'NRR hash list outside the file')
+    hashes = [data[offset + 32 * i:offset + 32 * i + 32] for i in range(count)]
+    listed = {}
+    for path in nros:
+        nro = Path(path).read_bytes()
+        digest = hashlib.sha256(nro[:parse_nro(nro)['size']]).digest()
+        listed[str(path)] = dict(sha256=digest.hex(), listed=digest in hashes)
+    return dict(program_id=f'{program_id:016x}', size=size, size_matches_file=size == len(data), kind=kind,
+                hash_offset=hex(offset), hashes=count, sorted=hashes == sorted(hashes), nros=listed)
 
 
 def read_layout(path):
@@ -281,6 +318,8 @@ def main():
     p = sub.add_parser('wrap'); p.add_argument('nro', type=Path); p.add_argument('nso', type=Path)
     p = sub.add_parser('unwrap'); p.add_argument('nso', type=Path); p.add_argument('nro', type=Path)
     p = sub.add_parser('register'); p.add_argument('nro', type=Path); p.add_argument('dir', type=Path); p.add_argument('name')
+    p = sub.add_parser('symbols'); p.add_argument('module', type=Path); p.add_argument('--prefix', default='')
+    p = sub.add_parser('nrr'); p.add_argument('nrr', type=Path); p.add_argument('nros', type=Path, nargs='*')
     a = parser.parse_args()
     if a.command == 'info':
         print(json.dumps(describe(a.nro.read_bytes()), indent=2))
@@ -294,6 +333,10 @@ def main():
                               bss=h['bss_size'], round_trip='byte-identical')))
     elif a.command == 'unwrap':
         a.nro.write_bytes(unwrap(a.nso.read_bytes()))
+    elif a.command == 'symbols':
+        print(json.dumps(module_symbols(a.module.read_bytes(), a.prefix), indent=2))
+    elif a.command == 'nrr':
+        print(json.dumps(describe_nrr(a.nrr.read_bytes(), a.nros), indent=2))
     else:
         print(json.dumps(dict(status='pass', **register(a.nro, a.dir, a.name))))
 
