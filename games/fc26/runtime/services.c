@@ -1,4 +1,5 @@
-/* Horizon services reached by the current TOTK startup. Unknown operations fail. */
+/* Horizon services reached by the startup (the TotK host's, carried over through the kit's earlier fork). Unknown operations
+   fail with their number (SVC, GetInfo id) or name (IPC service and command, ipc.c). */
 #include "runtime.h"
 #include <TargetConditionals.h>
 #include "ipc.h"
@@ -57,11 +58,12 @@ static unsigned char alias_stale[ALIAS_SIZE_MAX/4096];
 static uint64_t alias_bytes;
 static uint8_t user_exception_context[0x1000] __attribute__((aligned(0x1000)));
 #define SYSTEM_RESOURCE_BUDGET (32ULL<<20)
-#define HEAP_CAP (4ULL<<30)   /* 1.4.3 sets a 2.2 GiB heap during nninitStartup */
+#define HEAP_CAP (4ULL<<30)   /* TotK 1.4.3 sets a 2.2 GiB heap during nninitStartup. TODO(mac): FC 26's SetHeapSize (TOTK_MEM_LOG=1) */
 #define APP_POOL app_pool()
 static uint64_t app_pool(void){static uint64_t v;if(!v){const char *e=getenv("TOTK_APP_POOL");uint64_t extra=(runtime_output_res_extra_bytes()+0x1fffff)&~0x1fffffULL;
  v=e?strtoull(e,NULL,0):0xcd500000ULL+extra;if(!e&&extra)fprintf(stderr,"[totk] application pool %#llx: +%llu MiB for the true-2K texture heaps (TOTK_OUTPUT_RES)\n",(unsigned long long)v,(unsigned long long)(extra>>20));}return v;}
-/* TOTK: application memory pool reported to the game (default: retail 3.2 GiB; TOTK_OUTPUT_RES adds what its HeapDef overlay gives the texture heaps) */
+/* Application memory pool reported to the game (default: the retail 3.2 GiB the kit's earlier games ran with; TOTK_OUTPUT_RES adds what
+   TotK's HeapDef overlay gives the texture heaps). TODO(mac): whether FC 26 asks for more (its main.npdm, and LimitReached in the log). */
 #define ALIAS_START ((uintptr_t)alias_space)
 #define STACK_START ((uintptr_t)low_space+STACK_OFF)
 #define ASLR_START ((uintptr_t)low_space)
@@ -222,7 +224,7 @@ static void observed_os_init(uint64_t h,uint64_t args) {
 }
 static void observed_sdk_init(void) { fprintf(stderr,"[totk] ENTER nninitInitializeSdkModule\n");((void(*)(void))runtime_symbol("nninitInitializeSdkModule"))();fprintf(stderr,"[totk] RETURN nninitInitializeSdkModule\n"); }
 static void observed_startup(void) { fprintf(stderr,"[totk] ENTER nninitStartup\n");((void(*)(void))runtime_symbol("nninitStartup"))();fprintf(stderr,"[totk] RETURN nninitStartup\n"); }
-static void observed_main(void) { fprintf(stderr,"[totk] ENTER nnMain\n");((void(*)(void))runtime_symbol("nnMain"))();fprintf(stderr,"[totk] RETURN nnMain\n"); }
+static void observed_main(void) { runtime_startup_checkpoint_nnmain((uintptr_t)__builtin_return_address(0));fprintf(stderr,"[totk] ENTER nnMain\n");((void(*)(void))runtime_symbol("nnMain"))();fprintf(stderr,"[totk] RETURN nnMain\n"); }
 static void cpu_boost(int mode) { if(mode<0||mode>2)runtime_fail("unknown CPU boost mode");fprintf(stderr,"[totk] CPU boost request %d: macOS manages CPU frequency\n",mode); }
 /* TOTK_OPERATION_MODE=handheld reports the Switch handheld mode (oe OperationMode 0, PerformanceMode Normal 0) instead of
    docked (1, Boost 1): the game then uses its own handheld settings (1280x720 output, lower internal resolution), which
@@ -243,7 +245,7 @@ static uint32_t performance_configuration[2];
 static void performance_config(int mode,int cfg) {if(mode<0||mode>1)runtime_fail("invalid performance mode");performance_configuration[mode]=(uint32_t)cfg;fprintf(stderr,"[totk] performance request mode=%d cfg=%x: native macOS scheduling\n",mode,(uint32_t)cfg);}
 /* The game's language: TOTK_LANG as given (a Switch language code), otherwise from a locale: TOTK_LOCALE, which the
    launcher sets to the app's first preferred language (BCP 47, e.g. "pt-BR"; it follows a per-app language), or else
-   the Mac's current locale. Brazil maps to "pt-BR" only in the 1.4.3 build, whose RomFS has the official USpt text. */
+   the Mac's current locale. */
 uint64_t runtime_desired_language(void) {
  const char *explicit=getenv("TOTK_LANG");char code[8]={0};
  if(explicit){if(strlen(explicit)>7)runtime_fail("language code too long");memcpy(code,explicit,strlen(explicit));}
@@ -261,11 +263,9 @@ uint64_t runtime_desired_language(void) {
    value=CFLocaleGetValue(locale,kCFLocaleCountryCode);
    if(value)CFStringGetCString(value,region,sizeof(region),kCFStringEncodingUTF8);CFRelease(locale);
   }
-#ifdef TOTK_GAME_V143
-  const char *portuguese=!strcmp(region,"BR")?"pt-BR":"pt";
-#else
+  /* TODO(mac): "pt-BR" for a Brazilian Mac only if FC 26's control data (NACP) lists Brazilian Portuguese among its
+     languages, as the Switch picks the desired language from those; until then "pt", as the kit's earlier games had. */
   const char *portuguese="pt";
-#endif
   const char *selected=!strcmp(language,"ja")?"ja":!strcmp(language,"de")?"de":!strcmp(language,"fr")?"fr":!strcmp(language,"es")?"es":!strcmp(language,"it")?"it":!strcmp(language,"nl")?"nl":!strcmp(language,"ru")?"ru":!strcmp(language,"ko")?"ko":!strcmp(language,"zh")?"zh-Hans":!strcmp(language,"pt")?portuguese:"en-US";
   memcpy(code,selected,strlen(selected));
  }
@@ -274,11 +274,7 @@ uint64_t runtime_desired_language(void) {
 static uint32_t observed_region(uint64_t *out,uint64_t size){
  uint8_t *fn=runtime_symbol("_ZN2nn2os21AllocateAddressRegionEPmm");uint32_t r=((uint32_t(*)(uint64_t *,uint64_t))fn)(out,size);
  fprintf(stderr,"[totk] AllocateAddressRegion size=%llx result=%x address=%llx\n",(unsigned long long)size,r,(unsigned long long)(r?0:*out));
- if(r&&getenv("TOTK_TRACE_VAMM")){
-  uint8_t *sdk=fn-0x12ca60;uint64_t root;memcpy(&root,sdk+0xd16bb8,8);uint64_t *v=(void *)(uintptr_t)(root+0x418);
-  for(unsigned i=0;i<10;i++)fprintf(stderr,"[totk] VAMM +%x=%llx\n",i*8,(unsigned long long)v[i]);
-  if(v[8]){uint64_t *a=(void *)(uintptr_t)v[8];for(unsigned i=0;i<12;i++)fprintf(stderr,"[totk] allocator +%x=%llx\n",i*8,(unsigned long long)a[i]);if(a[2]){uint64_t *node=(void *)(uintptr_t)a[2];for(unsigned i=0;i<12;i++)fprintf(stderr,"[totk] node +%x=%llx\n",i*8,(unsigned long long)node[i]);}}
- }
+ /* (TotK's TOTK_TRACE_VAMM dump read its own sdk at fixed offsets; it is not carried over.) */
  return r;
 }
 static uint32_t observed_pages(uint64_t addr,uint64_t size){uint32_t r=((uint32_t(*)(uint64_t,uint64_t))runtime_symbol("_ZN2nn2os19AllocateMemoryPagesEmm"))(addr,size);fprintf(stderr,"[totk] AllocateMemoryPages address=%llx size=%llx result=%x\n",(unsigned long long)addr,(unsigned long long)size,r);return r;}
@@ -299,7 +295,7 @@ void *runtime_override(const char *name) {
   {"_ZN2nn3err26InitializeContextWriterApiEv",host_error_init},{"_ZN2nn2fs24InitializeForApplicationEv",host_fs_init},
   {"_ZN2nn4pctl10InitializeEv",host_pctl_init},{"_ZN2nn4diag34InitializeApplicationAbortObserverEv",host_abort_init}};
  for(size_t i=0;i<sizeof(entries)/sizeof(entries[0]);i++)if(!strcmp(name,entries[i].name))return entries[i].fn;
- void *by3=runtime_by3_override(name);if(by3)return by3;
+ void *game=runtime_game_override(name);if(game)return game;
  void *input=runtime_input_override(name);if(input)return input;void *font=runtime_font_override(name);if(font)return font;void *codec=runtime_codec_override(name);if(codec)return codec;void *movie=runtime_movie_override(name);if(movie)return movie;void *clock=runtime_time_override(name);if(clock)return clock;void *applet=runtime_applet_override(name);if(applet)return applet;void *swkbd=runtime_swkbd_override(name);if(swkbd)return swkbd;void *account=runtime_account_override(name);if(account)return account;void *fs=runtime_fs_override(name);if(fs)return fs;void *front=runtime_front_override(name);return front?front:runtime_gfx_override(name);
 }
 void runtime_core_checkpoint(void);

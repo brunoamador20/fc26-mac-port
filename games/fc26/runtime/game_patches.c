@@ -5,11 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Bayonetta 3: the player's 1.2.0 exefs patches (60 fps, 900p, LOD, film grain), applied to main after relocation and
-   before its text is sealed. scripts/prepare_patches.py turns each .pchtxt into patches/<slug>.tsv ("offset new orig",
-   hex), already checked against the original image and the rewrite; here every site is checked again against the loaded
-   bytes, and a mismatch stops the start (a wrong version or a rewritten word must never be patched).
-   BY3_PATCHES=<slug>,<slug>,... picks them (the launcher sets it from the settings; unset or empty: none). */
+/* Game-code patches for main, applied after relocation and before its text is sealed. The mechanism only: FC 26 has no
+   patch yet, so nothing is applied unless FC26_PATCHES names one. scripts/prepare_patches.py turns each .pchtxt into
+   patches/<slug>.tsv ("offset new orig", hex), already checked against the original image and the rewrite; here every
+   site is checked again against the loaded bytes, and a mismatch stops the start (a wrong version or a rewritten word
+   must never be patched). FC26_PATCHES=<slug>,<slug>,... picks them (unset or empty: none). */
 static int hexbytes(const char *s, uint8_t *out, size_t cap, size_t *n) {
     size_t k = 0;
     for (; s[0] && s[1] && s[0] != '\t' && s[0] != '\n'; s += 2) {
@@ -21,7 +21,7 @@ static int hexbytes(const char *s, uint8_t *out, size_t cap, size_t *n) {
 static void apply_file(Module *m, const char *slug) {
     char path[512]; snprintf(path, sizeof path, "patches/%s.tsv", slug);
     FILE *f = fopen(path, "r");
-    if (!f) { fprintf(stderr, "[by3] patch %s: %s missing (scripts/prepare_patches.py)\n", slug, path); runtime_fail("game patch table missing"); }
+    if (!f) { fprintf(stderr, "[fc26] patch %s: %s missing (scripts/prepare_patches.py)\n", slug, path); runtime_fail("game patch table missing"); }
     char line[4096]; unsigned applied = 0;
     while (fgets(line, sizeof line, f)) {
         if (line[0] == '#' || line[0] == '\n') continue;
@@ -31,18 +31,18 @@ static void apply_file(Module *m, const char *slug) {
             runtime_fail("malformed game patch table");
         if (off + nn > m->text_end && off < m->ro_off) runtime_fail("game patch in the rewrite area");
         if (off + nn > m->file_size) runtime_fail("game patch beyond main");
-        if (memcmp(m->base + off, was, nw)) { fprintf(stderr, "[by3] patch %s at main+%#llx: original bytes differ\n", slug, (unsigned long long)off); runtime_fail("game patch does not match this game version"); }
+        if (memcmp(m->base + off, was, nw)) { fprintf(stderr, "[fc26] patch %s at main+%#llx: original bytes differ\n", slug, (unsigned long long)off); runtime_fail("game patch does not match this game version"); }
         memcpy(m->base + off, now, nn); sys_icache_invalidate(m->base + off, nn); applied++;
     }
     fclose(f);
-    fprintf(stderr, "[by3] game patch %s: %u sites\n", slug, applied);
+    fprintf(stderr, "[fc26] game patch %s: %u sites\n", slug, applied);
 }
 void runtime_game_patches(Module *main_module) {
-    const char *list = getenv("BY3_PATCHES");
-    if (!list || !*list) { fprintf(stderr, "[by3] game patches: none (BY3_PATCHES)\n"); return; }
+    const char *list = getenv("FC26_PATCHES");
+    if (!list || !*list) { fprintf(stderr, "[fc26] game patches: none (FC26_PATCHES)\n"); return; }
     char buf[1024]; snprintf(buf, sizeof buf, "%s", list);
     for (char *save = NULL, *s = strtok_r(buf, ",", &save); s; s = strtok_r(NULL, ",", &save)) {
-        for (const char *c = s; *c; c++) if (!((*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') || *c == '-')) runtime_fail("BY3_PATCHES: bad patch name");
+        for (const char *c = s; *c; c++) if (!((*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') || *c == '-')) runtime_fail("FC26_PATCHES: bad patch name");
         apply_file(main_module, s);
     }
 }

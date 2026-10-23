@@ -87,8 +87,8 @@ static uint32_t show_controller_support(ControllerSupportResult *out,const void 
  static int once;if(!once++)fprintf(stderr,"[totk] controller support applet: one player on controller %#x\n",pad_id());
  return 0;
 }
-/* Bayonetta 3 reads one state at a time (GetNpadState), has a touch screen (no touches here: the Mac has none), and sets
-   the handheld activation mode. */
+/* Single-state reads (GetNpadState), the touch screen (no touches here: the Mac has none) and the handheld activation
+   mode, met first with an SDK 13.3.2 game (the kit's earlier fork). */
 static void full_state(NpadState *out,const uint32_t *id){full_states(out,1,id);}
 static void handheld_state(NpadState *out,const uint32_t *id){handheld_states(out,1,id);}
 static void disconnected_state(NpadState *out,const uint32_t *id){disconnected_states(out,1,id);}

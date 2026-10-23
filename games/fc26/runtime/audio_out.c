@@ -1,9 +1,10 @@
-/* audout:u — nn::audio AudioOut, which Bayonetta 3's Wwise uses for its final mix (TOTK only uses the audio renderer,
-   audren:u). Commands and layouts follow the public switchbrew description ("Audio services": IAudioOutManager, IAudioOut).
+/* audout:u — nn::audio AudioOut, for a game that mixes its own sound and hands the final mix to AudioOut (TOTK only uses
+   the audio renderer, audren:u). FC 26's audio is Frostbite's own (BRIEFING); which of the two it opens is seen at boot.
+   Commands and layouts follow the public switchbrew description ("Audio services": IAudioOutManager, IAudioOut).
    Each AudioOut is a Core Audio AudioQueue: an appended buffer's samples are copied and enqueued; when the device has
    played it, the queue's callback gives the buffer back (GetReleasedAudioOutBuffers) and signals the buffer event, so
    the game is paced by the real output. 5.1 output is mixed down to stereo (Switch order FL FR FC LFE BL BR).
-   BY3_AUDIO=0 keeps the silent real-time sink (each buffer held for its duration) for tests without a sound device. */
+   FC26_AUDIO=0 keeps the silent real-time sink (each buffer held for its duration) for tests without a sound device. */
 #include "runtime.h"
 #include "ipc.h"
 #include <AudioToolbox/AudioToolbox.h>
@@ -58,7 +59,7 @@ static void *silent_playback(void *arg) {
     }
 }
 static void open_device(AudioOut *o) {
-    const char *e = getenv("BY3_AUDIO");
+    const char *e = getenv("FC26_AUDIO");
     o->silent = e && !strcmp(e, "0");
     if (!o->silent) {
         AudioStreamBasicDescription f = {.mSampleRate = o->rate, .mFormatID = kAudioFormatLinearPCM,

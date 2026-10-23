@@ -46,7 +46,7 @@ int runtime_core_away(void);          /* runtime/threads.c: a guest thread gives
 void runtime_core_back(int *away);
 void runtime_save_probe(void);
 int runtime_fs_save_busy(void);   /* runtime/fs_host.c: the game is writing save data (window close waits) */
-uint8_t *runtime_module_base(const char *name);   /* runtime/loader.c: "main", "subsdk0", "sdk" (probes) */
+uint8_t *runtime_module_base(const char *name);   /* runtime/loader.c: a module of assets/game.json ("main", "sdk"), NULL if not loaded */
 uint64_t runtime_module_permission(uint64_t address,uint64_t size,unsigned permission);
 uint64_t runtime_module_lock_permission(uint64_t address,uint64_t size,unsigned mask,unsigned attribute);
 int runtime_module_query(uint64_t address,uint64_t *base,uint64_t *size,unsigned *state,unsigned *permission,unsigned *attribute);
@@ -66,6 +66,7 @@ void runtime_fs_probe(void);
 void *runtime_observer(const char *name);
 
 void runtime_startup_checkpoint(uintptr_t caller);
+void runtime_startup_checkpoint_nnmain(uintptr_t caller);   /* loader.c: TOTK_VERIFY_STARTUP=nnmain */
 
 uint64_t runtime_now_ns(void);
 uint32_t svc_thread_main_init(void);
@@ -101,7 +102,7 @@ void *runtime_front_override(const char *name);
 int runtime_front_focus(void);
 void runtime_shortcut_help_toggle(void);
 int fps_overlay_toggle_hints(void);   /* shared key 1 toggle for FPS, shader and system-load overlays */
-int runtime_aspect_toggle(void);   /* runtime/aspect_patch.h: key 4, 16:9 <-> ultrawide (Mac, 1.2.1 / 1.4.3); 0 where unavailable */
+int runtime_aspect_toggle(void);   /* game_patches.c: key 4, 16:9 <-> ultrawide in TotK; 0 here (unavailable) */
 float runtime_aspect_now(void);     /* the ratio in force, 0 = the game's own 16:9 */
 int hud_compact(void);   /* gfx/nvn/fps_overlay.c: the overlay lines go to the window's corner panel (TOTK_HUD=corners: in the picture) */
 int hud_snapshot(int line, char *out, size_t n, int *highlight);   /* line 0..2: FPS, shaders, load; 0 = not published */
@@ -117,7 +118,7 @@ void runtime_input_key(unsigned code,int down);
 void runtime_input_clear(void);
 int runtime_handheld_mode(void);   /* TOTK_OPERATION_MODE=handheld (runtime/services.c) */
 void *runtime_input_override(const char *name);
-void *runtime_by3_override(const char *name);   /* runtime/system_services.c: Bayonetta 3 network and system functions */
+void *runtime_game_override(const char *name);   /* runtime/system_services.c: offline network and system functions */
 typedef struct { uint64_t buttons; int32_t lx,ly,rx,ry; int connected; } RuntimeGamepadState;
 void runtime_gamepad_start(void);
 void runtime_gamepad_read(RuntimeGamepadState *out);

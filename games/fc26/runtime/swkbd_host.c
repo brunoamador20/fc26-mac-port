@@ -198,7 +198,7 @@ void runtime_swkbd_selftest(void) {
 
 /* ---------- probe (make probe-swkbd): guest SDK arguments, main's PLT stub, no window ---------- */
 #include "game_version.h"
-enum { MAIN_PLT_SHOW_KEYBOARD = 0, MAIN_GOT_SHOW_KEYBOARD = 0 };   /* Bayonetta 3: main's ShowKeyboard PLT/GOT not mapped yet; the probe refuses to run */
+enum { MAIN_PLT_SHOW_KEYBOARD = 0, MAIN_GOT_SHOW_KEYBOARD = 0 };   /* FC 26: main's ShowKeyboard PLT/GOT not mapped yet; the probe refuses to run. TODO(mac): map them when the game shows a keyboard (story 5) */
 static unsigned checks;
 static void need(int ok, const char *what) { checks++; if (!ok) { fprintf(stderr, "swkbd probe: %s\n", what); runtime_fail("software keyboard probe failed"); } }
 static void *sym(const char *name) { void *p = runtime_symbol(name); if (!p) { fprintf(stderr, "swkbd probe: no %s\n", name); runtime_fail("software keyboard probe: guest symbol"); } return p; }
@@ -220,7 +220,7 @@ static void *probe_thread(void *unused) {
     SetText initial = (SetText)sym("_ZN2nn5swkbd14SetInitialTextEPNS0_15ShowKeyboardArgEPKDs");
     Size string_size = (Size)sym("_ZN2nn5swkbd27GetRequiredStringBufferSizeEv");
     WorkSize work_size = (WorkSize)sym("_ZN2nn5swkbd25GetRequiredWorkBufferSizeEb");
-    if (!MAIN_PLT_SHOW_KEYBOARD) runtime_fail("software keyboard probe: Bayonetta 3 PLT addresses are not mapped");
+    if (!MAIN_PLT_SHOW_KEYBOARD) runtime_fail("software keyboard probe: FC 26 PLT addresses are not mapped");
     uint8_t *main_base = runtime_module_base("main");
     need(main_base != NULL, "main module base");
     void *got; memcpy(&got, main_base + MAIN_GOT_SHOW_KEYBOARD, 8);
@@ -233,13 +233,13 @@ static void *probe_thread(void *unused) {
     need(arg && str[0] && wbuf, "allocations");
     uint16_t *out = (uint16_t *)(uintptr_t)str[0];
     struct { int preset; uint32_t type, max, min, disabled; int utf8; const char *initial, *answer, *want; unsigned result; } cases[] = {
-        {2, 0, 9, 0, 0x12c, 0, NULL, "Epona", "Epona", 0},                       /* TOTK's horse naming */
+        {2, 0, 9, 0, 0x12c, 0, NULL, "Abcde", "Abcde", 0},                       /* a short name */
         {2, 0, 9, 0, 0x12c, 0, NULL, "ABCDEFGHIJKL", "ABCDEFGHI", 0},             /* at most 9 */
         {2, 0, 9, 0, 0x12c, 0, NULL, "a@b%c\\d e/f", "abcd e/f", 0},             /* '@' '%' '\' disabled */
         {2, 0, 9, 0, 0x12c, 0, NULL, "<cancel>", "", SWKBD_CANCELED},
         {0, 2, 0, 0, 0, 1, NULL, "小马Ab", "小马Ab", 0},                          /* UTF-8 out (checked below) */
         {0, 2, 3, 0, 0, 0, NULL, "小马🐴", "小马", 0},                            /* no half surrogate pair */
-        {0, 2, 0, 0, 0, 0, "Zelda", "<initial>", "Zelda", 0},                     /* initial text from the work buffer */
+        {0, 2, 0, 0, 0, 0, "Fghij", "<initial>", "Fghij", 0},                     /* initial text from the work buffer */
         {0, 1, 0, 0, 0, 0, NULL, "a1b2c3", "123", 0},                            /* number pad */
         {0, 2, 9, 3, 0, 0, NULL, "ab", "", SWKBD_CANCELED},                       /* shorter than the minimum */
     };

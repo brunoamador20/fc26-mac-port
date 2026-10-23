@@ -390,7 +390,7 @@ int runtime_module_offset(uint64_t pc,const char **name,uint64_t *off) {
  return 0;
 }
 uintptr_t runtime_frame_controller_return_pc(void) {
- return 0; /* The graphics diagnostic reads TotK's frame controller; Bayonetta 3 has none. */
+ return 0; /* The graphics diagnostic reads TotK's frame controller; FC 26 has none. */
 }
 uint64_t runtime_image_bytes(void) { uint64_t total=0;for(unsigned i=0;i<NM;i++)total+=modules[i].key_off;return page_up(total); }
 static void loader_ready(void) { fprintf(stderr,"[totk] rtld callback: modules linked\n"); }
@@ -399,6 +399,15 @@ static void module_inits(void) {
  for(unsigned i=0;i<NM;i++){char detail[128];snprintf(detail,sizeof detail,TOTK_UI("运行 %s 游戏模块初始化代码（%u/%u）","Running the %s game module initializers (%u/%u)"),modules[i].name,i+1,(unsigned)NM);runtime_boot_status(TOTK_UI("初始化游戏模块","Initializing game modules"),detail);fprintf(stderr,"[totk] ENTER %s DT_INIT\n",modules[i].name);((void(*)(void))(modules[i].base+modules[i].init))();uint32_t state;memcpy(&state,modules[i].base+modules[i].ctor_flag,4);need(state==2,"DT_INIT deferred or skipped constructors");
  fprintf(stderr,"[totk] RETURN %s DT_INIT state=%u init_array_count=%llu\n",modules[i].name,state,(unsigned long long)(modules[i].init_size/8));}
 }
+/* TOTK_VERIFY_STARTUP=nnmain: stop at the entry of the original nnMain (called through sdk's PLT, services.c observer)
+   once every module's DT_INIT finished its constructors: the story-2 goal, independent of what nnMain calls first. */
+void runtime_startup_checkpoint_nnmain(uintptr_t caller) {
+ const char *e=getenv("TOTK_VERIFY_STARTUP");if(!e||strcmp(e,"nnmain"))return;
+ for(unsigned i=0;i<NM;i++){uint32_t state;memcpy(&state,modules[i].base+modules[i].ctor_flag,4);need(state==2,"constructor checkpoint state");}
+ char where[96];runtime_describe_address(caller,where,sizeof where);
+ printf("{\"status\":\"pass\",\"phase\":3,\"modules\":%u,\"nnmain_caller\":\"%s\",\"scope\":\"all DT_INIT constructor loops completed; original nnMain entered, not run\"}\n",(unsigned)NM,where);fflush(stdout);_exit(0);
+}
+/* TOTK_VERIFY_STARTUP=1 (any other value): stop when nnMain sets the focus handling mode (services.c focus_mode). */
 void runtime_startup_checkpoint(uintptr_t caller) {
  if(!getenv("TOTK_VERIFY_STARTUP"))return;
 
@@ -410,8 +419,9 @@ static void boot(void) {
  fprintf(stderr,"[totk] game version %s\n", TOTK_GAME_VERSION);
  runtime_boot_status(TOTK_UI("启动游戏运行环境","Starting the game runtime"),TOTK_UI("连接游戏代码与 macOS 系统服务","Connecting the game code to macOS system services"));
  runtime_thread_init();uint32_t main_handle=svc_thread_main_init();
- fprintf(stderr,"[totk] ENTER original nn::init::Start sdk+0xfa060\n");
- ((void(*)(uint64_t,uint64_t,void(*)(void),void(*)(void),void(*)(void)))required("_ZN2nn4init5StartEmmPFvvES2_S2_"))(main_handle,0,loader_ready,module_inits,module_finis);
+ void *start=required("_ZN2nn4init5StartEmmPFvvES2_S2_");char where[96];runtime_describe_address((uintptr_t)start,where,sizeof where);
+ fprintf(stderr,"[totk] ENTER original nn::init::Start %s\n",where);
+ ((void(*)(uint64_t,uint64_t,void(*)(void),void(*)(void),void(*)(void)))start)(main_handle,0,loader_ready,module_inits,module_finis);
  runtime_fail("SDK Start unexpectedly returned");
 }
 /* Host aborts (e.g. Metal validation assertions) print the host call stack before the process ends. */
@@ -421,7 +431,7 @@ static void abort_report(int num) {
  signal(SIGABRT,SIG_DFL);raise(SIGABRT);
 }
 int main(int argc,char **argv) {
- need(argc==3,"usage: totk-native rewritten-dir probe|boot");
+ need(argc==3,"usage: fc26-native rewritten-dir probe|boot");
  /* One game or GPU probe at a time (memory, GPU time): wait for the slot before anything is loaded. */
  if(!strcmp(argv[2],"boot")||!strncmp(argv[2],"probe-gpu",9))runtime_game_slot_acquire(argv[2]);
  if(strcmp(argv[2],"boot"))setenv("TOTK_PROBE_GPU","1",1);   /* standalone probes submit GPU work; the game does not unless TOTK_GPU_ALLOW_SUBMIT=1 */

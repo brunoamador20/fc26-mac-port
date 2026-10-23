@@ -249,7 +249,7 @@ static unsigned mount_rom(const char *name,void *cache,uint64_t size) {
  (void)cache;(void)size;runtime_fs_init();if(!name||!path_ok(name)||strlen(name)>=sizeof(mount_name)||strchr(name,'/')||strchr(name,':'))return INVALID;
  if(*mount_name&&strcmp(name,mount_name))runtime_fail("second RomFS mount not implemented");strcpy(mount_name,name);return 0;
 }
-static unsigned mount_rom_name(const char *name) {return mount_rom(name,NULL,0);}   /* SDK 13 MountRom without a cache buffer (Bayonetta 3) */
+static unsigned mount_rom_name(const char *name) {return mount_rom(name,NULL,0);}   /* the one-argument MountRom, without a cache buffer (met first with SDK 13.3.2) */
 static unsigned cache_size(uint64_t *out) {if(!out)return INVALID;*out=0;return 0;}
 /* TOTK_FS_LOG=1: log every RomFS open with the time since start (shows how far the game gets without a picture). */
 static void fs_log(const char *what,const char *path){static int on=-1;static uint64_t t0;if(on<0){on=getenv("TOTK_FS_LOG")!=NULL;t0=runtime_now_ns();}if(on)fprintf(stderr,"[totk-fs] %8.3f %s %s\n",(runtime_now_ns()-t0)/1e9,what,path);}
@@ -290,7 +290,7 @@ unsigned runtime_romfs_entry_type(int *out,const char *path) {
  if(!out)return INVALID;const char *p=rom_path(path);if(!p)return NOT_FOUND;if(file_index(p)!=UINT64_MAX){*out=1;return 0;}
  char dir[4096];if(snprintf(dir,sizeof(dir),"%s/",p)>=(int)sizeof(dir))return INVALID;if(folder_exists(dir)){*out=0;return 0;}return NOT_FOUND;
 }
-/* Directory listing (Bayonetta 3 lists Contents:/): the immediate children of a folder, from the sorted index and the
+/* Directory listing (a game may list its mount root, e.g. Contents:/): the immediate children of a folder, from the sorted index and the
    added files. A name with no further '/' is a file; the first segment of a longer one is a subfolder, and the sorted
    order keeps a subfolder's paths together, so each is reported once per source. */
 static void list_source(const char *prefix,size_t n,int mode,const char *(*name_at)(uint64_t),uint64_t (*size_at)(uint64_t),uint64_t from,uint64_t to,

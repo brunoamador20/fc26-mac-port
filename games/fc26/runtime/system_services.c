@@ -1,11 +1,15 @@
-/* Horizon services Bayonetta 3 reaches that TotK never did, answered in-process over IPC (ipc.c). Command numbers and
-   layouts follow the public switchbrew descriptions. Unknown commands still stop the runtime with their id. */
+/* Horizon services the TotK host never needed, answered in-process over IPC (ipc.c), and SDK functions answered by name
+   (runtime_game_override): offline settings, sockets, network and account answers carried over from the kit's
+   earlier fork, where each one was met. FC 26 imports the same libraries (BRIEFING: os, fs, hid, friends, account, socket, oe,
+   nifm, time, ...); whether it calls each of these is to be seen at boot. Command numbers and layouts follow the public
+   switchbrew descriptions. Unknown services and commands still stop the runtime with their name and id (ipc.c). */
 #include "runtime.h"
 #include "ipc.h"
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <stdlib.h>
+#include "game_version.h"
 
 /* ---------- set: nn::settings ISettingsServer ---------- */
 /* nn::settings::Language order -> language code (switchbrew "Settings services", LanguageCode). */
@@ -68,7 +72,7 @@ static void bsd_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
     }
 }
 
-/* ---------- SDK functions answered by name (runtime_by3_override) ----------
+/* ---------- SDK functions answered by name (runtime_game_override) ----------
    Network-facing libraries answer as a Switch without a connection. The failure results are generic ones of each
    library's module (nifm 110, ssl 123, account 124), not a specific console error: the game only needs "unavailable". */
 #define RESULT(module, description) ((uint32_t)(module) | ((uint32_t)(description) << 9))
@@ -85,8 +89,9 @@ static void nifm_request(void) { static int once; if (!once++) fprintf(stderr, "
 static int64_t network_clock_now(void) { return (int64_t)time(NULL); }   /* time_point: seconds since the epoch */
 static void environment_identifier(char *out) { if (!out) runtime_fail("nsd environment output"); memset(out, 0, 8); memcpy(out, "lp1", 3); }
 static void execute_program(int index, const void *param, uint64_t size) {
-    (void)param; fprintf(stderr, "[totk] nn::oe::ExecuteProgram(%d, %llu bytes)\n", index, (unsigned long long)size);
-    runtime_fail("the game asked to start its program index 1 (title 01004A4010FEA001), which is not supported yet");
+    (void)param; fprintf(stderr, "[totk] nn::oe::ExecuteProgram(%d, %llu bytes): program title %016llX\n", index, (unsigned long long)size,
+                         (unsigned long long)(GAME_TITLE_ID + (uint64_t)index));
+    runtime_fail("the game asked to start another program of its title (nn::oe::ExecuteProgram), which is not supported yet");
 }
 /* Open users kept across a program jump (PushOpenUsers before ExecuteProgram, PopOpenUsers in the next program). A
    fresh start has none; the game then opens its user the usual way (runtime/account.c). */
@@ -94,7 +99,7 @@ static void push_open_users(void) {}
 static uint32_t pop_open_users(int32_t *count, void *handles, int32_t max) {
     (void)handles; (void)max; if (!count) runtime_fail("PopOpenUsers count pointer"); *count = 0; return 0;
 }
-void *runtime_by3_override(const char *name) {
+void *runtime_game_override(const char *name) {
     static const struct { const char *name; void *fn; } entries[] = {
         {"_ZN2nn2oe13MuteRecordingEv", nop}, {"_ZN2nn2oe15UnmuteRecordingEv", nop},
         {"_ZN2nn2oe15EnableRecordingEv", nop}, {"_ZN2nn2oe16DisableRecordingEv", nop},
@@ -125,20 +130,22 @@ void *runtime_by3_override(const char *name) {
 }
 
 __attribute__((constructor)) static void register_system_services(void) {
-    /* Bayonetta 3 makes one 1348 MiB NVN memory pool at start; the shared graphics layer refuses zero-copy GPU buffers
-       above 1 GiB unless told otherwise (nvn_mtl.m pool_buffer_max). A value the user set wins. */
-    setenv("DM_POOL_BUFFER_MAX_MIB", "2048", 0);
-    /* Present pacing as on the Switch: a 60 Hz base, the game's present interval on top (1 = 60 fps, 2 = 30 fps). The
+    /* Graphics-layer settings. Each one is the earlier fork's choice, kept because it is not about one game:
+       TODO(mac): confirm each for FC 26 at the first frame (story 4). The earlier fork also set DM_POOL_BUFFER_MAX_MIB=2048
+       for its game's 1348 MiB NVN memory pool; FC 26's largest pool is not known, so the layer's default (1024 MiB) stands and
+       a larger pool stops the game with its size and this variable's name (nvn_mtl.m pool_range_check).
+       Present pacing as on the Switch: a 60 Hz base, the game's present interval on top (1 = 60 fps, 2 = 30 fps). The
        TotK host follows the display (120 Hz on ProMotion) and runs uncapped, which relies on TotK's real-time frame step
        patch; without it a game that advances per frame would run twice as fast. */
     setenv("DM_PRESENT_HZ", "60", 0);
     setenv("TOTK_UNCAPPED", "0", 0);
-    /* It draws a depth pre-pass, then the colour pass with a LEQUAL test: positions must match bit for bit between the two
-       (nvn_mtl.m totk_precise_opts, preserveInvariance). */
+    /* A depth pre-pass followed by a colour pass with a LEQUAL test needs positions that match bit for bit between the
+       two (nvn_mtl.m totk_precise_opts, preserveInvariance). Whether FC 26 draws such a pair is not known yet. */
     setenv("DM_PRESERVE_INVARIANCE", "1", 0);
-    /* Its shader binaries mix GLSLC GPU code versions (1.15 and 1.16 seen first); the graphics layer's measured driver
-       table stops at 1.14. The layer reads only three control-section fields (code length, stage, compute group size)
-       and stops on implausible values, so a newer layout would show at once. */
+    /* Shader binaries newer than the graphics layer's measured driver table (1.14) were met in the earlier fork (SDK 13.3.2:
+       1.15, 1.16); FC 26's SDK 19.3.4 is newer still. TODO(mac): read the GPU code version of FC 26's shaders (VSO header
+       bytes 6/7, in the shaderBlockDepot of the .cas files). The layer reads only three control-section fields (code
+       length, stage, compute group size) and stops on implausible values, so a newer layout would show at once. */
     setenv("DM_NVN_GPU_CODE_MAX_MINOR", "31", 0);
     runtime_ipc_register("set", settings_handler, NULL, NULL);
     runtime_ipc_register("bsd:u", bsd_handler, NULL, NULL);

@@ -176,7 +176,7 @@ static void unmount(const char *name) {
     pthread_mutex_unlock(&lock);
     if (!runtime_romfs_owns(name)) runtime_fail("unmount of unknown fs mount");
 }
-/* EnsureSaveData(uid) (Bayonetta 3): the profile's save folder is made when storage starts; only the local account owns one. */
+/* EnsureSaveData(uid) (met first with an SDK 13.3.2 game): the profile's save folder is made when storage starts; only the local account owns one. */
 static unsigned ensure_save(const uint64_t *uid) {
     ready(); uint64_t me[2]; runtime_account_uid(me);
     if (!uid || uid[0] != me[0] || uid[1] != me[1]) runtime_fail("EnsureSaveData for an unknown account");
@@ -390,7 +390,7 @@ void *runtime_fs_host_override(const char *name) {
         {"_ZN2nn2fs21MountSaveDataReadOnlyEPKcNS_13ApplicationIdERKNS_7account3UidE", mount_save_ro},
         {"_ZN2nn2fs18IsSaveDataExistingENS_13ApplicationIdERKNS_7account3UidE", save_exists},
         {"_ZN2nn2fs21MountTemporaryStorageEPKc", mount_temp}, {"_ZN2nn2fs7UnmountEPKc", unmount}, {"_ZN2nn2fs6CommitEPKc", commit},
-        {"_ZN2nn2fs14CommitSaveDataEPKc", commit}, {"_ZN2nn2fs14EnsureSaveDataERKNS_7account3UidE", ensure_save},   /* Bayonetta 3 */
+        {"_ZN2nn2fs14CommitSaveDataEPKc", commit}, {"_ZN2nn2fs14EnsureSaveDataERKNS_7account3UidE", ensure_save},
         {"_ZN2nn2fs18CreateCacheStorageEill", create_cache}, {"_ZN2nn2fs18DeleteCacheStorageEi", delete_cache},
         {"_ZN2nn2fs17MountCacheStorageEPKci", mount_cache},
         {"_ZN2nn2fs20OpenCacheStorageListEPNS0_22CacheStorageListHandleE", open_cache_list},
