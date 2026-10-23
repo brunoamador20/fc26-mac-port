@@ -106,9 +106,10 @@ def answer(work, version, runtime_dir, extract=False):
     rewritten = work / f'rewritten/{version}'
     report = dict(work=str(work), version=version)
 
-    modules = {p.name: module_image(p.read_bytes()) for p in sorted(exefs.iterdir())
-               if p.is_file() and (p.name in ('main', 'sdk', 'rtld') or p.name.startswith('subsdk'))}
-    listing = {n: tool.module_symbols(img, '') for n, img in modules.items() if n != 'rtld'}
+    raw = {p.name: p.read_bytes() for p in sorted(exefs.iterdir())
+           if p.is_file() and (p.name in ('main', 'sdk', 'rtld') or p.name.startswith('subsdk'))}
+    modules = {n: module_image(data) for n, data in raw.items()}
+    listing = {n: tool.module_symbols(data, '') for n, data in raw.items() if n != 'rtld'}
     exports = {e['name'] for n, l in listing.items() for e in l['exports']}
 
     # P1: nn::ro the game calls, and where the library is

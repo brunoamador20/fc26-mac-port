@@ -3,10 +3,16 @@ image with the video module, its NRR and its ELF twin (.nrs), a registered rewri
 from pathlib import Path
 import hashlib
 import json
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+
+try:
+    import lz4.block
+except ImportError:
+    lz4 = None
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'games/fc26/scripts'))
@@ -40,6 +46,22 @@ def work_folder(directory, rtld_strings=RO_DETAIL.encode() + b'\0', nrs=True):
     runtime = directory / 'runtime'; runtime.mkdir()
     (runtime / 'host.c').write_text('static const char *const names[] = {"__cxa_guard_acquire", "nnMain"};\n')
     return nro, runtime
+
+
+def exefs_nso(data, compress=True):
+    raw = bytearray(data)
+    raw[0x110:0x114] = b'\0\0\0\0'   # ExeFS NSOs do not have NRO0 magic in text
+    if not (compress and lz4):
+        return bytes(raw)
+    out, body = bytearray(raw[:0x100]), bytearray()
+    for i in range(3):
+        file_offset, memory, size = struct.unpack_from('<III', raw, 0x10 + 0x10 * i)
+        packed = lz4.block.compress(raw[file_offset:file_offset + size], store_size=False)
+        struct.pack_into('<I', out, 0x10 + 0x10 * i, 0x100 + len(body))
+        struct.pack_into('<I', out, 0x60 + 4 * i, len(packed))
+        body += packed
+    struct.pack_into('<I', out, 0xc, 0x3f)
+    return bytes(out + body)
 
 
 class Questions(unittest.TestCase):
@@ -96,6 +118,18 @@ class Questions(unittest.TestCase):
             report = json.loads((work / 'analysis/estoria3_perguntas.json').read_text())
             self.assertEqual(report['P5']['imports'], 5)
             self.assertEqual(run.stdout, (work / 'analysis/estoria3_perguntas.md').read_text() + '\n')
+
+    def test_answer_with_exefs_nso_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            _, runtime = work_folder(work)
+            exefs = work / 'extracted/v100/exefs'
+            (exefs / 'main').write_bytes(exefs_nso((exefs / 'main').read_bytes()))
+            (exefs / 'sdk').write_bytes(exefs_nso((exefs / 'sdk').read_bytes()))
+            r = questions.answer(work, 'v100', runtime)
+            self.assertEqual(r['P1']['main_imports_nn_ro'], sorted(RO_API + ['_ZN2nn2ro9OtherCallEv']))
+            self.assertEqual(r['P1']['main_nn_ro_not_in_sdk'], ['_ZN2nn2ro9OtherCallEv'])
+            self.assertEqual(r['P3']['sdk'], {'ldr:ro': 1, 'ro:1': 0})
 
 
 if __name__ == '__main__':
