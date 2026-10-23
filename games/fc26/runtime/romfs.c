@@ -318,6 +318,7 @@ unsigned runtime_romfs_list(const char *path,int mode,void (*add)(void *ctx,cons
  last[0]=0;list_source(prefix,n,mode,added_name,added_size,lo,nadded,add,ctx,last);
  return 0;
 }
+int runtime_romfs_is_mounted(const char *name) {return name&&*mount_name&&!strcmp(mount_name,name);}
 int runtime_romfs_owns(const char *path) {size_t n=strlen(mount_name);return n&&path&&!strncmp(path,mount_name,n)&&path[n]==':';}
 int runtime_romfs_handle(uint64_t h) {return h>0x100000000ULL&&h<0x100000000ULL+NH;}
 unsigned runtime_romfs_read_options(uint64_t *out,uint64_t h,int64_t off,void *buf,uint64_t size) {return runtime_romfs_read(out,h,off,buf,size);}

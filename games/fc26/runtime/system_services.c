@@ -100,6 +100,7 @@ static void push_open_users(void) {}
 static uint32_t pop_open_users(int32_t *count, void *handles, int32_t max) {
     (void)handles; (void)max; if (!count) runtime_fail("PopOpenUsers count pointer"); *count = 0; return 0;
 }
+static int list_audio_ins(void *out, int max) { (void)out; (void)max; return 0; }
 void *runtime_game_override(const char *name) {
     static const struct { const char *name; void *fn; } entries[] = {
         {"_ZN2nn2oe13MuteRecordingEv", nop}, {"_ZN2nn2oe15UnmuteRecordingEv", nop},
@@ -125,6 +126,7 @@ void *runtime_game_override(const char *name) {
         {"_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", nop},
         {"_ZN2nn7account13PushOpenUsersEv", push_open_users},
         {"_ZN2nn7account12PopOpenUsersEPiPNS0_10UserHandleEi", pop_open_users},
+        {"_ZN2nn5audio12ListAudioInsEPNS0_11AudioInInfoEi", list_audio_ins},
     };
     for (size_t i = 0; i < sizeof entries / sizeof *entries; i++) if (!strcmp(name, entries[i].name)) return entries[i].fn;
     return NULL;
