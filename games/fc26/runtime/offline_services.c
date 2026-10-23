@@ -287,8 +287,10 @@ static void nim_ecas(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {    
 
 __attribute__((constructor)) static void register_offline_services(void) {
     runtime_ipc_register("aoc:u", aoc_handler, NULL, NULL);
-    static const char *const pctl[] = {"pctl", "pctl:a", "pctl:s", "pctl:r"};
-    for (size_t i = 0; i < sizeof pctl / sizeof *pctl; i++) runtime_ipc_register(pctl[i], pctl_factory, NULL, NULL);
+    runtime_ipc_register("pctl", pctl_factory, NULL, NULL);
+    runtime_ipc_register("pctl:a", pctl_factory, NULL, NULL);
+    runtime_ipc_register("pctl:s", pctl_factory, NULL, NULL);
+    runtime_ipc_register("pctl:r", pctl_factory, NULL, NULL);
     runtime_ipc_register("ldn:u", ldn_user_creator, NULL, NULL);
     runtime_ipc_register("ldn:s", ldn_system_creator, NULL, NULL);
     runtime_ipc_register("ldn:m", ldn_monitor_creator, NULL, NULL);
