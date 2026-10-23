@@ -3,6 +3,7 @@
 ALLOWED names those places and why; docs/ESTORIA2_NUVEM.md lists every residue left there."""
 from pathlib import Path
 import re
+import subprocess
 import unittest
 
 HERE = Path(__file__).resolve().parents[1]
@@ -18,12 +19,21 @@ ALLOWED = {
 }
 
 
+def source_files():
+    """What git tracks here, plus new files it does not ignore: never the work folder, the RomFS or anything ignored."""
+    run = subprocess.run(['git', '-C', str(HERE), 'ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', '.'],
+                         capture_output=True, text=True)
+    if run.returncode:
+        raise unittest.SkipTest('git is needed to list the source files')
+    return sorted(HERE / name for name in run.stdout.split('\0') if name)
+
+
 class Residue(unittest.TestCase):
     def test_no_other_game_outside_the_allowed_places(self):
         found = []
-        for path in sorted(HERE.rglob('*')):
+        for path in source_files():
             rel = path.relative_to(HERE).as_posix()
-            if not path.is_file() or any(rel == a or rel.startswith(a) for a in ALLOWED) or path.suffix in ('.pyc',):
+            if not path.is_file() or any(rel == a or rel.startswith(a) for a in ALLOWED):
                 continue
             try:
                 text = path.read_text()

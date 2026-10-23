@@ -113,7 +113,7 @@ static int pid_is_game(pid_t pid) {
     char path[PROC_PIDPATHINFO_MAXSIZE];
     if (proc_pidpath(pid, path, sizeof path) <= 0) return 0;
     const char *b = strrchr(path, '/'); b = b ? b + 1 : path;
-    return !strncmp(b, "totk-native", 11);   /* also renamed copies such as totk-native.base */
+    return !strncmp(b, "totk-native", 11) || !strncmp(b, "fc26-native", 11);   /* also renamed copies such as totk-native.base; FC 26's binary */
 }
 
 /* Live waiters in the queue (dead ones are removed). Returns how many; *head gets the oldest one's file name. */

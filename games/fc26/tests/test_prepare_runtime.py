@@ -136,7 +136,11 @@ def plt_stub(address, slot):
 
 class RequiredSymbols(unittest.TestCase):
     def modules(self, names):
-        return [dict(name='main', symbols=[dict(name=n, defined=1) for n in names]), dict(name='sdk', symbols=[])]
+        # main defines the names; sdk references nnMain by GLOB_DAT (what loader.c verify_identity checks) and PLT
+        sdk_symbols = [dict(name='', defined=0), dict(name='nnMain', defined=0)]
+        sdk_relocs = [dict(kind=prepare_runtime.R_GLOB_DAT, symbol=1), dict(kind=prepare_runtime.R_JUMP_SLOT, symbol=1)]
+        return [dict(name='main', symbols=[dict(name=n, defined=1) for n in names], relocs=[]),
+                dict(name='sdk', symbols=sdk_symbols, relocs=sdk_relocs)]
 
     def test_all_present(self):
         prepare_runtime.check_required(self.modules(list(prepare_runtime.REQUIRED)))

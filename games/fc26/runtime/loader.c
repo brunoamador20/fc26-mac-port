@@ -214,7 +214,8 @@ static void relocate(Module *m) {
   if(r->kind==1027) { need(r->addend>=0&&(uint64_t)r->addend<m->key_off,"relative addend");v=(uintptr_t)m->base+r->addend;m->relative++; }
   else {
    need(r->kind==257||r->kind==1025||r->kind==1026,"relocation kind");
-   const Symbol *s=&m->symbols[r->symbol];void *p=r->kind==1026?runtime_observer(s->name):NULL;
+   /* An observer wraps a function that exists: a weak import nobody defines keeps its 0 slot, which the SDK tests. */
+   const Symbol *s=&m->symbols[r->symbol];void *p=r->kind==1026&&runtime_symbol(s->name)?runtime_observer(s->name):NULL;
    if(!p)p=runtime_override(s->name);
    if(p)p=runtime_hle_wrap_named(p,s->name);   /* host replacements run on the thread's host stack */
    if(!p)p=s->defined?(s->value<m->key_off?m->base+s->value:NULL):runtime_symbol(s->name);

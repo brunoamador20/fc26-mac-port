@@ -18,6 +18,11 @@ MODULES := $(shell $(GAME_CONFIG) modules)
 BINARY := $(shell $(GAME_CONFIG) binary)
 TITLE_ID := $(shell $(GAME_CONFIG) title_id)
 DISPLAY_VERSION := $(shell $(GAME_CONFIG) display_version)
+# An empty answer (a wrong PY=, e.g. "~" that zsh leaves unexpanded after "=") would turn rewrite into a no-op and clean
+# into rm -rf <work>/build/: stop instead.
+ifneq ($(words $(VERSION) $(BINARY) $(firstword $(MODULES))),3)
+$(error scripts/game_config.py gave no values with PY=$(PY): check PY (in zsh use $$HOME, not ~, after =))
+endif
 OUT := $(WORK)/build
 NATIVE_OPT ?= -O2
 
@@ -67,6 +72,11 @@ rewrite:
 	  echo "rewrite $$m"; \
 	  env $$($(GAME_CONFIG) rewrite-env) "$(PY)" third_party/d2r/patch_nso.py "$(WORK)/extracted/$(VERSION)/exefs/$$m" "$(WORK)/rewritten/$(VERSION)" $$m || exit 1; \
 	done
+
+# Analysis ELF of every ExeFS module (assets/game.json analysis_modules) for reading the code: <work>/extracted/<version>/elf.
+.PHONY: analysis
+analysis:
+	"$(PY)" scripts/prepare_modules.py "$(WORK)/extracted/$(VERSION)/exefs" --output "$(WORK)/extracted/$(VERSION)/elf"
 
 # The runtime shader translation the graphics layer starts on first use: <work>/build/shader-service/totk_xlate (the
 # repository's prebuilt NativeAOT translator, checked against its SHA-256) and <work>/build/spirv-cross/spirv-cross,

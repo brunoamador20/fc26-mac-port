@@ -629,7 +629,7 @@ static uint64_t pool_buffer_max(void) {
 }
 #define POOL_BUFFER_MAX pool_buffer_max()
 static void pool_range_check(uintptr_t a, uintptr_t b, const void *mem, uint64_t size) {
-    if (b - a > POOL_BUFFER_MAX) MDIE("memory pool %p+%#llx: %llu MiB zero-copy GPU buffer refused (limit %llu MiB)", mem, (unsigned long long)size,
+    if (b - a > POOL_BUFFER_MAX) MDIE("memory pool %p+%#llx: %llu MiB zero-copy GPU buffer refused (limit %llu MiB, DM_POOL_BUFFER_MAX_MIB)", mem, (unsigned long long)size,
                                       (unsigned long long)((b - a) >> 20), POOL_BUFFER_MAX >> 20);
     for (mach_vm_address_t at = a; at < b;) {
         mach_vm_address_t ra = at; mach_vm_size_t rs = 0; vm_region_basic_info_data_64_t ri; mach_msg_type_number_t rc = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t ro = MACH_PORT_NULL;

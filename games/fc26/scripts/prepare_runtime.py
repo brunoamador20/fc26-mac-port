@@ -200,12 +200,26 @@ def check_required(modules):
         similar = sorted(n for n in defined if stem in n)[:5]
         missing.append(f'{name} ({why}) is defined by none of {[m["name"] for m in modules]}; similar: {similar or "none"}')
     # TODO(mac): a different nn::init::Start signature in SDK 19.3.4 is fixed in runtime/loader.c boot() and here.
+    # loader.c verify_identity (every mode, probe included) compares nnMain's address in the relocations that name it
+    # without the PLT (ABS64 / GLOB_DAT) with the definition, and needs at least one.
+    refs = [(m['name'], RELOC_NAMES[r['kind']]) for m in modules for r in m['relocs']
+            if r['kind'] in (R_ABS64, R_GLOB_DAT) and m['symbols'][r['symbol']]['name'] == 'nnMain']
+    if not refs:
+        missing.append('no ABS64 / GLOB_DAT relocation names nnMain, which runtime/loader.c verify_identity needs '
+                       '(TODO(mac): find how the SDK reaches nnMain and adapt verify_identity)')
     need(not missing, '; '.join(missing))
+    # The story-2 checkpoint (TOTK_VERIFY_STARTUP=nnmain) and the "ENTER nnMain" log come from the observer the loader
+    # puts on the JUMP_SLOT relocations of nnMain (the SDK calling it through its PLT). Without one they never show.
+    calls = [m['name'] for m in modules for r in m['relocs'] if r['kind'] == R_JUMP_SLOT and m['symbols'][r['symbol']]['name'] == 'nnMain']
+    if not calls:
+        # TODO(mac): without a PLT call of nnMain, stop at its entry another way (TOTK_VERIFY_STARTUP=1 stops later).
+        print('warning: no module calls nnMain through its PLT: TOTK_VERIFY_STARTUP=nnmain will not fire', file=sys.stderr)
+    return dict(nnmain_references=refs, nnmain_plt_callers=calls)
 
 
 def runtime_tables(work, out, pins):
     modules = [module_table(work, n, pins) for n in MODULES]
-    check_required(modules)
+    nnmain = check_required(modules)
     main = modules[0]
     image = (work / f'rewritten/{VERSION}/main.patched.bin').read_bytes()
     plt, slot = probe_plt(main, image)
@@ -236,7 +250,7 @@ def runtime_tables(work, out, pins):
     (work / 'analysis').mkdir(exist_ok=True)
     (work / 'analysis/runtime-layout.json').write_text(json.dumps(modules, indent=2) + '\n')
     return dict(modules=[m['name'] for m in modules], relocations=sum(len(m['relocs']) for m in modules),
-                symbols=sum(len(m['symbols']) for m in modules), main_plt=hex(plt), tables_bytes=len(text))
+                symbols=sum(len(m['symbols']) for m in modules), main_plt=hex(plt), tables_bytes=len(text), **nnmain)
 
 
 def build_id(work):
@@ -246,7 +260,12 @@ def build_id(work):
 
 
 def exefs_pins(work, pins):
-    """Every ExeFS file (rtld and main.npdm too, which the runtime does not load) and main's build ID."""
+    """Every ExeFS file (rtld and main.npdm too, which the runtime does not load), main's build ID, and the size of the
+    NSP the extraction read (extraction-manifest.json, written by scripts/extract_exefs.py next to exefs/)."""
+    manifest = work / f'extracted/{VERSION}/extraction-manifest.json'
+    need(manifest.exists(), f'{manifest} missing (scripts/extract_exefs.py writes it)')
+    source = json.loads(manifest.read_text()).get('source_size')
+    need(source == pins.data['source_nsp_size'], f'the ExeFS came from a {source}-byte file, pinned NSP is {pins.data["source_nsp_size"]} bytes')
     for name in sorted(pins.data['exefs_sha256']):
         path = work / f'extracted/{VERSION}/exefs/{name}'
         need(path.exists(), f'{path} missing (scripts/extract_exefs.py)')
@@ -308,6 +327,8 @@ def main():
     work = args.work.resolve()
     out = work / 'build'
     out.mkdir(parents=True, exist_ok=True)
+    for stale in ('runtime_tables.h', 'romfs_config.h', 'shared_fonts_config.h'):   # a failed run leaves none of them,
+        (out / stale).unlink(missing_ok=True)                                     # so make runtime cannot mix two runs
     pins = Pins(game_config.EXPECTED_PATH, args.record)
     romfs = romfs_config(work, out, pins)
     exefs_pins(work, pins)

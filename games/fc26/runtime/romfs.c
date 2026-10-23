@@ -49,7 +49,8 @@ static uint64_t handles[NH]; /* file index + 1; 0 is free */
    <data>/mods/<version>; no manifest there = none). Each file can be replaced once. An overlay file is opened when the
    game opens it, so a mod can replace thousands of files (a dub's voice streams) without holding a descriptor each; the
    file's identity (device, inode, size, modification time) is kept from the start check, and an open that finds another
-   file there stops the game instead of serving bytes nobody checked. scripts/make_mod_manifest.py writes a mod's manifest.
+   file there stops the game instead of serving bytes nobody checked. (The kit's make_mod_manifest.py writes a mod's
+   manifest; FC 26 has no mod, so it is not copied here.)
    A line whose original SHA-256 is "-" adds a file the RomFS lacks (issue #48: The Second Quest adds 874): it is numbered
    after the RomFS's own files (file_count + k, k in path order, added[]), opens and reads like a replacement, and its
    folders exist for runtime_romfs_entry_type. The RomFS has no directory listing here, so nothing else needs to know. */

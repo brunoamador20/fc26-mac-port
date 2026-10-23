@@ -8,16 +8,20 @@ import platform
 import shutil
 import subprocess
 import tempfile
+import sys
 import unittest
 
 HERE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(HERE / 'scripts'))
+import game_config  # noqa: E402
 PORTABLE = ['applet_host.c', 'audio_effects.c', 'audio_reverb.c', 'autoload.c', 'gfx_probe.c', 'hid_feedback.c', 'hle_stack.c',
             'input.c', 'ipc.c', 'motion_fusion.c', 'system_services.c', 'world_survey.c']
 STAND_INS = {
     'runtime_tables.h': '''static const Reloc reloc_0[] = {{0ULL,1027,0,0LL},};
 static const Symbol symbol_0[] = {{"",0ULL,0ULL,0,0,0},};
 static const Gate gate_0[] = {{0,0,0,0},};
-static Module modules[] = {{.name="main",.digest="",.file_size=0,.symbols=symbol_0,.nsym=1,.relocs=reloc_0,.nreloc=1,.gates=gate_0,.ngate=1}};
+static Module modules[] = {''' + ','.join(f'{{.name="{m}",.digest="",.symbols=symbol_0,.nsym=1,.relocs=reloc_0,.nreloc=1,.gates=gate_0,.ngate=1}}'
+                            for m in game_config.MODULES) + '''};
 #define PROBE_PLT 0ULL
 #define PROBE_SLOT 0ULL
 ''',

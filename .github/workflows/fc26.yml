@@ -40,7 +40,8 @@ jobs:
       - name: Synthetic generated headers (what make prepare writes from the game)
         run: |
           W="$RUNNER_TEMP/work/build"; mkdir -p "$W"
-          printf '%s\n' '/* CI stub: no game data */' 'static Module modules[] = {{.name="main"},{.name="sdk"}};' \
+          init=""; for m in $(python scripts/game_config.py modules); do init="$init{.name=\"$m\"},"; done   # assets/game.json
+          printf '%s\n' '/* CI stub: no game data */' "static Module modules[] = {$init};" \
             '#define PROBE_PLT 0ULL' '#define PROBE_SLOT 0ULL' > "$W/runtime_tables.h"
           printf '%s\n' '#define ROMFS_IMAGE_SIZE 0ULL' '#define ROMFS_IMAGE_SHA256 ""' '#define ROMFS_INDEX_SHA256 ""' > "$W/romfs_config.h"
           printf '%s\n' '#define SHARED_FONT_COUNT 6' \

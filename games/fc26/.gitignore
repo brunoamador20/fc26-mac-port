@@ -12,7 +12,9 @@ FC26_build/
 *.nsp
 *.nsz
 *.xci
+*.xcz
 *.nca
+*.ncz
 *.tik
 *.keys
 romfs.bin
@@ -24,6 +26,10 @@ runtime-index.bin
 *.nrr
 *.nrs
 *.nso
+# loose ExeFS modules (they have no extension)
+main
+sdk
+rtld
 *.npdm
 *.cas
 *.cat
