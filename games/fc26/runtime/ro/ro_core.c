@@ -368,7 +368,7 @@ int ro_relocs_each(const uint8_t *image, uint64_t size, const RoDynamic *d, uint
         for (uint64_t at = tables[t][0]; at < tables[t][0] + tables[t][1]; at += 24) {
             uint64_t info = rd64(image + at + 8);
             RoReloc reloc = {rd64(image + at), (int64_t)rd64(image + at + 16), (uint32_t)info, (uint32_t)(info >> 32)};
-            if (reloc.where < lo || reloc.where > hi - 8) return fail(err, errn, "relocation outside data: %#llx", (unsigned long long)reloc.where);
+            if ((reloc.where & 7) || reloc.where < lo || reloc.where > hi - 8) return fail(err, errn, "relocation outside data: %#llx", (unsigned long long)reloc.where);
             if (reloc.symbol >= d->nsym) return fail(err, errn, "relocation symbol %u of %u", reloc.symbol, d->nsym);
             if ((r = visit(ctx, &reloc))) return r;
         }

@@ -29,10 +29,16 @@ static uint32_t check_range(uint64_t address, uint64_t size, int nonzero) {
     return 0;
 }
 
-static uint32_t register_process(RoSession *s, const IpcRequest *rq, uint64_t pid) {
+static uint32_t register_process(RoSession *owner, int has_pid, uint32_t process_h) {
     if (context.owner) return RO_INVALID_SESSION;
-    if (!rq->ncopy) return RO_INVALID_PROCESS;
-    context.owner = s; context.pid = pid; context.process = rq->copy[0];
+    if (!has_pid || process_h == 0) return RO_INVALID_PROCESS;
+    context.owner = owner; context.pid = 1; context.process = process_h;
+    return 0;
+}
+
+static uint32_t check_session(RoSession *owner, int has_pid, uint32_t process_h) {
+    if (!context.owner || context.owner != owner) return RO_INVALID_PROCESS;
+    if (!has_pid || process_h == 0 || process_h != context.process) return RO_INVALID_PROCESS;
     return 0;
 }
 
@@ -117,19 +123,23 @@ static void ro_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
     RoSession *session = s->state;
     if (rq->cmd > 4 && rq->cmd != 10) ipc_unimplemented(s, rq);
     /* Every command starts with the u64 pid placeholder; the pid itself comes in the PID descriptor. */
-    uint64_t pid = rq->has_pid ? rq->pid : 0, a[4] = {0};
+    uint64_t a[4] = {0};
     for (unsigned i = 0; i < 4 && 8 * (i + 2) <= rq->data_size; i++) a[i] = IPC_ARG(rq, uint64_t, 8 * (i + 1));
     uint64_t out = 0;
     uint32_t r;
     pthread_mutex_lock(&lock);
-    if (rq->cmd == 4) r = register_process(session, rq, pid);
-    else if (context.owner != session || context.pid != pid) r = RO_INVALID_PROCESS;
-    else switch (rq->cmd) {
-    case 0: r = map_nro(a[0], a[1], a[2], a[3], &out); break;
-    case 1: r = unmap_nro(a[0]); break;
-    case 2: r = register_nrr(a[0], a[1], RO_NRR_USER); break;                 /* [7.0.0+] User only */
-    case 3: r = unregister_nrr(a[0]); break;
-    default: r = rq->ncopy ? register_nrr(a[0], a[1], session->kind) : RO_INVALID_PROCESS; break;   /* 10 */
+    if (rq->cmd == 4) {
+        r = register_process(session, rq->has_pid, rq->ncopy ? rq->copy[0] : 0);
+    } else {
+        uint32_t proc = (rq->cmd == 10) ? (rq->ncopy ? rq->copy[0] : 0) : context.process;
+        r = check_session(session, rq->has_pid, proc);
+        if (!r) switch (rq->cmd) {
+        case 0: r = map_nro(a[0], a[1], a[2], a[3], &out); break;
+        case 1: r = unmap_nro(a[0]); break;
+        case 2: r = register_nrr(a[0], a[1], RO_NRR_USER); break;                 /* [7.0.0+] User only */
+        case 3: r = unregister_nrr(a[0]); break;
+        default: r = register_nrr(a[0], a[1], session->kind); break;             /* 10 */
+        }
     }
     pthread_mutex_unlock(&lock);
     fprintf(stderr, "[fc26-ro] %s %s(%#llx, %#llx, %#llx, %#llx) -> %#x", session->name, command_name(rq->cmd),
@@ -148,8 +158,14 @@ static void *open_jit(void) { RoSession *s = calloc(1, sizeof *s); if (!s) runti
 static void close_session(void *state) {
     pthread_mutex_lock(&lock);
     if (context.owner == state) {
-        for (unsigned i = 0; i < RO_MAX_NRR; i++) free(context.nrr[i].hashes);
-        memset(&context, 0, sizeof context);
+        for (unsigned i = 0; i < RO_MAX_NRR; i++) {
+            free(context.nrr[i].hashes);
+            context.nrr[i].hashes = NULL;
+        }
+        memset(context.nrr, 0, sizeof context.nrr);
+        context.owner = NULL;
+        context.pid = 0;
+        context.process = 0;
     }
     pthread_mutex_unlock(&lock);
     free(state);

@@ -29,6 +29,10 @@ void *ro_module_symbol(uint64_t base, const char *name);   /* a definition the m
    per module on stdout; returns how many modules have a strong import that main / sdk do not export. */
 int ro_module_probe(void);
 
+/* Initialize the 5 nn::ro::detail globals exported by the sdk to point to host-owned storage: sentinels for
+   g_pAutoLoadList / g_pManualLoadList, debug flag, and function pointer slots (Achado 2). */
+void ro_module_init_sdk(void);
+
 /* ---------- Hooks: each answers only for addresses inside a loaded module ---------- */
 /* runtime_dispatch: handle a gate of a loaded module as loader.c handles its own (a timer gate writes the 19.2 MHz count,
    an svc gate goes to runtime_svc with the module's name and the svc's original offset). 0: not a module gate. */

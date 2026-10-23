@@ -253,6 +253,10 @@ static void dynamic_and_link(const uint8_t *nro_bytes, const RoNro *n) {
     linker.resolve = resolve; memcpy(work, image, size);
     uint64_t target = expect("init_array"); memcpy(work + d.rela, &target, 8);
     CHECK(ro_link(work, size, base, &d, n->data_off, size, &linker, &st, err, sizeof err) != 0 && strstr(err, "twice"));
+    /* An unaligned RELA entry: refused with error */
+    memcpy(work, image, size);
+    uint64_t unaligned = expect("init_array") + 1; memcpy(work + d.rela, &unaligned, 8);
+    CHECK(ro_link(work, size, base, &d, n->data_off, size, &linker, &st, err, sizeof err) != 0 && strstr(err, "outside data"));
     free(work); free(image);
 }
 

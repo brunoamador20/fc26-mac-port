@@ -47,7 +47,7 @@ def module_image(data):
 
 def counted_strings(image, names):
     """How many times each name appears as a whole C string."""
-    return {n.decode(): len(re.findall(rb'(?<![\x21-\x7e])' + re.escape(n) + rb'\x00', image)) for n in names}
+    return {n.decode(): len(re.findall(re.escape(n) + rb'\x00', image)) for n in names}
 
 
 def elf_info(data):
@@ -61,17 +61,20 @@ def elf_info(data):
         for v, o, n in loads:
             if v <= vaddr < v + n: return o + vaddr - v
         raise ValueError(f'ELF address {vaddr:#x} outside the loaded segments')
+    def parse_notes(offset, filesz):
+        o = offset
+        while o + 12 <= offset + filesz:
+            namesz, descsz, kind = struct.unpack_from('<III', data, o)
+            name = data[o + 12:o + 12 + namesz]
+            desc = data[o + 12 + (namesz + 3 & ~3):][:descsz]
+            if kind == 3 and name.rstrip(b'\0') == b'GNU': return desc.hex()
+            o += 12 + (namesz + 3 & ~3) + (descsz + 3 & ~3)
+        return None
     out = dict(tls=None, build_id=None, tlsdesc=[], program_headers=len(phdrs))
     for p_type, _, offset, vaddr, _, filesz, memsz, align in phdrs:
         if p_type == 7: out['tls'] = dict(vaddr=hex(vaddr), filesz=filesz, memsz=memsz, align=align)
         if p_type == 4:   # notes: namesz, descsz, type, name, desc (4-byte aligned)
-            o = offset
-            while o + 12 <= offset + filesz:
-                namesz, descsz, kind = struct.unpack_from('<III', data, o)
-                name = data[o + 12:o + 12 + namesz]
-                desc = data[o + 12 + (namesz + 3 & ~3):][:descsz]
-                if kind == 3 and name.rstrip(b'\0') == b'GNU': out['build_id'] = desc.hex()
-                o += 12 + (namesz + 3 & ~3) + (descsz + 3 & ~3)
+            out['build_id'] = parse_notes(offset, filesz)
         if p_type == 2:
             tags = {}
             for o in range(offset, offset + filesz - 15, 16):
@@ -91,6 +94,17 @@ def elf_info(data):
                         start = at(strtab) + name_off
                         name = data[start:data.index(0, start)].decode()
                     out['tlsdesc'].append(dict(symbol=name, addend=addend))
+    if out['build_id'] is None and len(data) >= 0x40:
+        shoff, = struct.unpack_from('<Q', data, 0x28)
+        shentsize, shnum = struct.unpack_from('<HH', data, 0x3a)
+        if shoff and shentsize and shnum:
+            for i in range(shnum):
+                sh_type, _, _, sh_offset, sh_size = struct.unpack_from('<IQQQQ', data, shoff + shentsize * i + 4)
+                if sh_type == 7:   # SHT_NOTE
+                    bid = parse_notes(sh_offset, sh_size)
+                    if bid:
+                        out['build_id'] = bid
+                        break
     return out
 
 

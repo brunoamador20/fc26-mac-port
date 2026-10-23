@@ -29,6 +29,7 @@ FRAGMENTS = {
     'crash_pc': DIAG % ('pc', '{write(2,mn,strlen(mn));signal_hex(" offset=",mo);}'),
     'crash_frame': DIAG % ('frame[1]', '{write(2,mn,strlen(mn));signal_hex(" offset=",mo);}'),
     'set_dir': 'ro_module_set_dir(argv[1]);',
+    'init_sdk': 'ro_module_init_sdk();',
     'probe': 'if(!strcmp(argv[2],"probe-ro"))return ro_module_probe()?1:0;',
     'svc_query': 'else if(ro_module_query(addr,&base,&size,&state,&perm,&attr)){}',
 }
@@ -54,6 +55,7 @@ EDITS = {
         (' need(argc==3,', None),   # set_dir goes at the end of main's argument check line (see edit())
         (' for(unsigned i=0;i<NM;i++){seal(&modules[i]);check_permissions(&modules[i]);}\n',
          ' for(unsigned i=0;i<NM;i++){seal(&modules[i]);check_permissions(&modules[i]);}\n'
+         f' {F["init_sdk"]}   /* initialize nn::ro::detail globals in sdk */\n'
          f' {F["probe"]}   /* every image of nro_manifest.tsv: map, imports */\n'),
     ],
     'runtime/services.c': [

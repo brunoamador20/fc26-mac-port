@@ -131,6 +131,35 @@ class Questions(unittest.TestCase):
             self.assertEqual(r['P1']['main_nn_ro_not_in_sdk'], ['_ZN2nn2ro9OtherCallEv'])
             self.assertEqual(r['P3']['sdk'], {'ldr:ro': 1, 'ro:1': 0})
 
+    def test_counted_strings_without_printable_lookbehind(self):
+        # Achado 3: In real FC 26 sdk, 'ldr:ro\0' at 0x936d6a is preceded by 0x49 ('I').
+        # The old regex (?<![\x21-\x7e]) falsely rejected it.
+        blob = b'prefixIldr:ro\0ro:1\0'
+        counts = questions.counted_strings(blob, [b'ldr:ro', b'ro:1'])
+        self.assertEqual(counts, {'ldr:ro': 1, 'ro:1': 1})
+
+    def test_elf_info_build_id_from_section_headers(self):
+        # Achado 3: In PlatformNvn.nrs, GNU build-id is only in SHT_NOTE section headers, not PT_NOTE.
+        nro = synth.make_nro()
+        build_id = nro[0x40:0x54]
+        note = struct.pack('<III', 4, len(build_id), 3) + b'GNU\0' + build_id
+        note += bytes(-len(note) % 4)
+        dynamic = struct.unpack_from('<i', nro, synth.MOD0 + 4)[0] + synth.MOD0
+        phdrs = [(1, 5, 0x1000, 0, 0, len(nro), len(nro), 0x1000),
+                 (2, 6, 0x1000 + dynamic, dynamic, dynamic, 0x200, 0x200, 8),
+                 (7, 4, 0x1000 + synth.DATA, synth.DATA, synth.DATA, 0x10, 0x40, 0x10)]
+        head = bytearray(0x1000)
+        head[0:16] = b'\x7fELF\x02\x01\x01' + bytes(9)
+        # e_shoff = 0x400, e_shentsize = 64, e_shnum = 2
+        struct.pack_into('<HHIQQQIHHHHHH', head, 16, 3, 183, 1, 0, 0x40, 0x400, 0, 64, 56, len(phdrs), 64, 2, 0)
+        for i, p in enumerate(phdrs): struct.pack_into('<IIQQQQQQ', head, 0x40 + 56 * i, *p)
+        head[0x200:0x200 + len(note)] = note
+        # Section header 1 at 0x440: SHT_NOTE (7) pointing to note at 0x200
+        struct.pack_into('<IIQQQQIIQQ', head, 0x440, 0, 7, 0, 0, 0x200, len(note), 0, 0, 4, 0)
+        elf_data = bytes(head) + nro
+        info = questions.elf_info(elf_data)
+        self.assertEqual(info['build_id'], build_id.hex())
+
 
 if __name__ == '__main__':
     unittest.main()

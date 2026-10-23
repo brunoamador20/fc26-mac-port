@@ -31,7 +31,7 @@ int f_offset(uint64_t pc, const char **name, uint64_t *off) { @offset@ }
 void f_describe(uint64_t a, char *out, size_t n) { @describe@ snprintf(out, n, "0x%llx", (unsigned long long)a); }
 void f_trace(uint64_t lr) { @trace@ }
 void f_crash(uint64_t pc) { uint64_t frame[2] = {0, pc}; @crash_pc@ @crash_frame@ }
-int f_main(int argc, char **argv) { (void)argc; @set_dir@ @probe@ return 0; }
+int f_main(int argc, char **argv) { (void)argc; @set_dir@ @init_sdk@ @probe@ return 0; }
 void f_svc_query(uint64_t addr) { uint64_t base = 0, size = 0; unsigned state = 0, perm = 0, attr = 0; if (!addr) {} @svc_query@
     (void)base; (void)size; (void)state; (void)perm; (void)attr; }
 '''

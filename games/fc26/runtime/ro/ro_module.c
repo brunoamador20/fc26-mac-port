@@ -237,6 +237,7 @@ static void probe_add(Probe *p, unsigned list, const char *name) {
     item[n++] = '"'; item[n] = 0;
     int w = snprintf(p->lists[list] + p->used[list], sizeof p->lists[list] - p->used[list], "%s%s", p->used[list] ? "," : "", item);
     if (w > 0 && (size_t)w < sizeof p->lists[list] - p->used[list]) p->used[list] += (size_t)w;
+    else p->lists[list][p->used[list]] = '\0';
 }
 
 static int probe_reloc(void *ctx, const RoReloc *r) {
@@ -298,6 +299,45 @@ int ro_module_probe(void) {
     if (ro_catalog_each(manifest, probe_row, &failed, err, sizeof err)) setup_error("nro_manifest.tsv", err);
     free(manifest);
     return (int)failed;
+}
+
+/* nn::ro::detail globals in sdk exported by the Horizon SDK (Achado 2).
+   In the console rtld initializes these before main. On MacNativeGames, loader.c
+   does not run rtld, so the host initializes them after static modules are mapped. */
+typedef struct RoListEntry {
+    struct RoListEntry *next;
+    struct RoListEntry *prev;
+} RoListEntry;
+
+static RoListEntry s_auto_list = { &s_auto_list, &s_auto_list };
+static RoListEntry s_manual_list = { &s_manual_list, &s_manual_list };
+static uint8_t s_ro_debug_flag = 0;
+static void *s_lookup_manual_fn = NULL;
+static void *s_lookup_auto_fn = NULL;
+
+static void *ro_lookup_global_auto(const char *name) {
+    if (!name) return NULL;
+    void *p = runtime_override(name);
+    if (p) return runtime_hle_wrap_named(p, name);
+    return runtime_symbol(name);
+}
+
+void ro_module_init_sdk(void) {
+    RoListEntry **p_auto = (RoListEntry **)runtime_symbol("_ZN2nn2ro6detail15g_pAutoLoadListE");
+    RoListEntry **p_manual = (RoListEntry **)runtime_symbol("_ZN2nn2ro6detail17g_pManualLoadListE");
+    void ***p_lookup_auto = (void ***)runtime_symbol("_ZN2nn2ro6detail34g_pLookupGlobalAutoFunctionPointerE");
+    void ***p_lookup_manual = (void ***)runtime_symbol("_ZN2nn2ro6detail36g_pLookupGlobalManualFunctionPointerE");
+    uint8_t **p_debug = (uint8_t **)runtime_symbol("_ZN2nn2ro6detail14g_pRoDebugFlagE");
+
+    if (p_auto) *p_auto = &s_auto_list;
+    if (p_manual) *p_manual = &s_manual_list;
+    if (p_debug) *p_debug = &s_ro_debug_flag;
+    if (p_lookup_manual) *p_lookup_manual = &s_lookup_manual_fn;
+    if (p_lookup_auto) {
+        if (!s_lookup_auto_fn)
+            s_lookup_auto_fn = runtime_hle_wrap_named((void *)ro_lookup_global_auto, "ro_lookup_global_auto");
+        *p_lookup_auto = &s_lookup_auto_fn;
+    }
 }
 
 /* Guest permission changes land on whole 16 KiB host pages: each gets the union of its four guest pages (loader.c). */

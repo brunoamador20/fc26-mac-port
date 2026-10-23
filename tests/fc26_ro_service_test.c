@@ -20,6 +20,11 @@
 pthread_key_t runtime_keys[8];
 _Noreturn void runtime_fail(const char *message) { fprintf(stderr, "[test] runtime_fail: %s\n", message); fflush(stderr); exit(3); }
 static uint64_t stub_class_type_info[4], stub_allocate;
+static void *fake_g_pAutoLoadList = NULL;
+static void *fake_g_pManualLoadList = NULL;
+static void *fake_g_pLookupGlobalAutoFunctionPointer = NULL;
+static void *fake_g_pLookupGlobalManualFunctionPointer = NULL;
+static void *fake_g_pRoDebugFlag = NULL;
 static void stub_mutex_lock(void) {}
 static void stub_guard_override(void) {}
 void *runtime_symbol(const char *name) {
@@ -29,6 +34,11 @@ void *runtime_symbol(const char *name) {
     if (!strcmp(name, "_ZTVN10__cxxabiv117__class_type_infoE")) return stub_class_type_info;
     if (!strcmp(name, "_ZN2nn3mem17StandardAllocator8AllocateEm")) return &stub_allocate;
     if (!strcmp(name, "__cxa_guard_acquire")) return (void *)stub_mutex_lock;   /* overridden below: must not be used */
+    if (!strcmp(name, "_ZN2nn2ro6detail15g_pAutoLoadListE")) return &fake_g_pAutoLoadList;
+    if (!strcmp(name, "_ZN2nn2ro6detail17g_pManualLoadListE")) return &fake_g_pManualLoadList;
+    if (!strcmp(name, "_ZN2nn2ro6detail34g_pLookupGlobalAutoFunctionPointerE")) return &fake_g_pLookupGlobalAutoFunctionPointer;
+    if (!strcmp(name, "_ZN2nn2ro6detail36g_pLookupGlobalManualFunctionPointerE")) return &fake_g_pLookupGlobalManualFunctionPointer;
+    if (!strcmp(name, "_ZN2nn2ro6detail14g_pRoDebugFlagE")) return &fake_g_pRoDebugFlag;
     return NULL;
 }
 void *runtime_override(const char *name) { return !strcmp(name, "__cxa_guard_acquire") ? (void *)stub_guard_override : NULL; }
@@ -108,17 +118,20 @@ static IpcSession open_session(const char *name) {
     fprintf(stderr, "service %s not registered\n", name); exit(2);
 }
 /* One request: pid in the PID descriptor, the u64 placeholder, then the command's u64 arguments. */
-static uint32_t call(IpcSession *s, unsigned cmd, uint64_t pid, int handle, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, unsigned nargs, uint64_t *out) {
+static uint32_t call_opt(IpcSession *s, unsigned cmd, int has_pid, uint64_t pid, int handle, uint32_t copy_h, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, unsigned nargs, uint64_t *out) {
     uint64_t words[5] = {0, a0, a1, a2, a3};
     IpcRequest rq; memset(&rq, 0, sizeof rq);
-    rq.type = 4; rq.cmd = cmd; rq.has_pid = 1; rq.pid = pid;
-    if (handle) { rq.ncopy = 1; rq.copy[0] = 0xffff8001u; }   /* CUR_PROCESS_HANDLE */
+    rq.type = 4; rq.cmd = cmd; rq.has_pid = has_pid; rq.pid = pid;
+    if (handle) { rq.ncopy = 1; rq.copy[0] = copy_h ? copy_h : 0xffff8001u; }   /* CUR_PROCESS_HANDLE */
     rq.data = (const uint8_t *)words; rq.data_size = 8 * (1 + nargs);
     IpcResponse rs; memset(&rs, 0, sizeof rs);
     s->handler(s, &rq, &rs);
     if (out) { *out = 0; if (rs.data_size == 8) memcpy(out, rs.data, 8); }
     if (rs.result) CHECK_EQ(rs.data_size, 0);
     return rs.result;
+}
+static uint32_t call(IpcSession *s, unsigned cmd, uint64_t pid, int handle, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, unsigned nargs, uint64_t *out) {
+    return call_opt(s, cmd, 1, pid, handle, 0, a0, a1, a2, a3, nargs, out);
 }
 #define PID 0x51
 static uint64_t ptr(const void *p) { return (uint64_t)(uintptr_t)p; }
@@ -197,6 +210,43 @@ static void link_by_host(void) {
     free(nro); free(nrr); free(bss);
 }
 
+static void test_sdk_init(void) {
+    CHECK(fake_g_pAutoLoadList == NULL);
+    CHECK(fake_g_pManualLoadList == NULL);
+    CHECK(fake_g_pLookupGlobalAutoFunctionPointer == NULL);
+    CHECK(fake_g_pLookupGlobalManualFunctionPointer == NULL);
+    CHECK(fake_g_pRoDebugFlag == NULL);
+
+    ro_module_init_sdk();
+
+    CHECK(fake_g_pAutoLoadList != NULL);
+    struct { void *next; void *prev; } *al = fake_g_pAutoLoadList;
+    CHECK(al->next == (void *)al && al->prev == (void *)al);
+
+    CHECK(fake_g_pManualLoadList != NULL);
+    struct { void *next; void *prev; } *ml = fake_g_pManualLoadList;
+    CHECK(ml->next == (void *)ml && ml->prev == (void *)ml);
+
+    CHECK(fake_g_pRoDebugFlag != NULL);
+    uint8_t *df = (uint8_t *)fake_g_pRoDebugFlag;
+    CHECK_EQ(*df, 0);
+
+    CHECK(fake_g_pLookupGlobalManualFunctionPointer != NULL);
+    void **mf = (void **)fake_g_pLookupGlobalManualFunctionPointer;
+    *mf = (void *)0x12345678ULL;
+    CHECK_EQ(*mf, (void *)0x12345678ULL);
+
+    CHECK(fake_g_pLookupGlobalAutoFunctionPointer != NULL);
+    void **af_slot = (void **)fake_g_pLookupGlobalAutoFunctionPointer;
+    CHECK(af_slot != NULL && *af_slot != NULL);
+    typedef void *(*LookupFn)(const char *);
+    LookupFn lookup = (LookupFn)(*af_slot);
+
+    CHECK_EQ(lookup("__cxa_guard_acquire"), (void *)stub_guard_override);
+    CHECK_EQ(lookup("pthread_mutex_lock"), (void *)stub_mutex_lock);
+    CHECK_EQ(lookup("nonexistent_symbol_42"), NULL);
+}
+
 static void flow(void) {
     size_t nro_size, user_size, jit_size, other_size, without_size;
     uint8_t *nro = load("m.nro", &nro_size), *user = load("user.nrr", &user_size), *jit = load("jit.nrr", &jit_size);
@@ -211,7 +261,7 @@ static void flow(void) {
     CHECK_EQ(call(&u, 4, PID, 1, 0, 0, 0, 0, 0, NULL), RO_INVALID_SESSION);
     CHECK_EQ(call(&j, 4, PID, 1, 0, 0, 0, 0, 0, NULL), RO_INVALID_SESSION);                    /* one context per process */
     CHECK_EQ(call(&j, 2, PID, 0, ptr(user), user_size, 0, 0, 2, NULL), RO_INVALID_PROCESS);
-    CHECK_EQ(call(&u, 2, PID + 1, 0, ptr(user), user_size, 0, 0, 2, NULL), RO_INVALID_PROCESS);
+    CHECK_EQ(call_opt(&u, 2, 0, PID, 0, 0, ptr(user), user_size, 0, 0, 2, NULL), RO_INVALID_PROCESS); /* missing PID descriptor */
 
     CHECK_EQ(call(&u, 2, PID, 0, ptr(user) + 8, user_size, 0, 0, 2, NULL), RO_INVALID_ADDRESS);
     CHECK_EQ(call(&u, 2, PID, 0, ptr(user), 0, 0, 0, 2, NULL), RO_INVALID_SIZE);
@@ -219,7 +269,7 @@ static void flow(void) {
     CHECK_EQ(call(&u, 2, PID, 0, ptr(other), other_size, 0, 0, 2, NULL), RO_INVALID_NRR);        /* another program's NRR */
     CHECK_EQ(call(&u, 2, PID, 0, ptr(without), without_size, 0, 0, 2, NULL), 0);
     CHECK_EQ(call(&u, 0, PID, 0, ptr(nro), nro_size, ptr(bss), bss_size, 4, &base), RO_NOT_AUTHORIZED);
-    CHECK_EQ(call(&u, 2, PID, 0, ptr(user), user_size, 0, 0, 2, NULL), 0);
+    CHECK_EQ(call(&u, 2, 0, 0, ptr(user), user_size, 0, 0, 2, NULL), 0);                          /* uninitialized/zero pid accepted if has_pid */
     CHECK_EQ(call(&u, 0, PID, 0, ptr(nro), nro_size, ptr(bss), bss_size + 0x1000, 4, &base), RO_INVALID_NRO);
     CHECK_EQ(call(&u, 0, PID, 0, ptr(nro) + 0x10, nro_size, ptr(bss), bss_size, 4, &base), RO_INVALID_ADDRESS);
     CHECK_EQ(call(&u, 0, PID, 0, ptr(nro), nro_size, ptr(bss) + 1, bss_size, 4, &base), RO_INVALID_ADDRESS);
@@ -244,13 +294,25 @@ static void flow(void) {
     u.close(u.state);                                     /* the context goes with its session */
     CHECK_EQ(call(&j, 4, PID, 1, 0, 0, 0, 0, 0, NULL), 0);
     CHECK_EQ(call(&j, 10, PID, 0, ptr(jit), jit_size, 0, 0, 2, NULL), RO_INVALID_PROCESS);       /* needs the process handle */
+    CHECK_EQ(call_opt(&j, 10, 1, PID, 1, 0x1234, ptr(jit), jit_size, 0, 0, 2, NULL), RO_INVALID_PROCESS); /* wrong process handle */
     CHECK_EQ(call(&j, 10, PID, 1, ptr(user), user_size, 0, 0, 2, NULL), RO_INVALID_NRR_KIND);     /* ro:1 takes JitPlugin */
     CHECK_EQ(call(&j, 10, PID, 1, ptr(jit), jit_size, 0, 0, 2, NULL), 0);
     CHECK_EQ(call(&j, 0, PID, 0, ptr(nro), nro_size, ptr(bss), bss_size, 4, &base), 0);
-    CHECK_EQ(call(&j, 1, PID, 0, base, 0, 0, 0, 1, NULL), 0);
+
+    /* Achado 4 test: close session leaves context.nro[] intact */
     j.close(j.state);
+    IpcSession u2 = open_session("ldr:ro");
+    CHECK_EQ(call(&u2, 4, PID, 1, 0, 0, 0, 0, 0, NULL), 0);
+    CHECK_EQ(call(&u2, 2, PID, 0, ptr(user), user_size, 0, 0, 2, NULL), 0);
+    uint64_t remapped;
+    CHECK_EQ(call(&u2, 0, PID, 0, ptr(nro), nro_size, ptr(bss), bss_size, 4, &remapped), RO_ALREADY_LOADED);
+    CHECK_EQ(call(&u2, 1, PID, 0, base, 0, 0, 0, 1, NULL), 0);
+    CHECK_EQ(call(&u2, 1, PID, 0, base, 0, 0, 0, 1, NULL), RO_NOT_LOADED);
+    u2.close(u2.state);
+
     free(nro); free(user); free(jit); free(other); free(without); free(bss);
     link_by_host();
+    test_sdk_init();
 }
 
 /* An NRO the game may load (its hash is in the NRR) but that has no image: the runtime stops, naming it. */
