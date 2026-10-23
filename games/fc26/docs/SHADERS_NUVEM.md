@@ -186,7 +186,7 @@ ligado, a camada gráfica se comporta exatamente como antes.
 
 | Checagem | Resultado |
 |---|---|
-| `make test` (Linux, Python 3.13): 22 testes da lógica C + 8 das ferramentas + os 25 que a base já tinha | OK (55) |
+| `make test` (Linux, Python 3.13): 22 testes da lógica C + 8 das ferramentas + os 30 que a base já tinha | OK (60) |
 | Os 22 testes da lógica C com o arnês compilado com ASan + UBSan + LSan (gcc) | OK, sem erro de memória nem vazamento na biblioteca |
 | `runtime/shader_cache.c` com clang 18 e gcc, `-std=c11 -Wall -Wextra -Werror` | OK |
 | `runtime/shader_cache_mac.m` contra cabeçalhos Foundation de mentira (só sintaxe e tipos) | OK |
