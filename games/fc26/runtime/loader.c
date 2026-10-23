@@ -22,6 +22,7 @@
 #include "runtime_tables.h"
 #include "game_patches.h"
 #include "game_version.h"
+#include "ro/ro_module.h"   /* nn::ro modules loaded at run time (runtime/ro, story 3) */
 #define NM (sizeof(modules)/sizeof(modules[0]))
 pthread_key_t runtime_keys[8];
 static uint64_t timer_calls, svc_calls;
@@ -106,7 +107,7 @@ uint64_t runtime_module_permission(uint64_t address,uint64_t size,unsigned permi
   fprintf(stderr,"[totk] %s data permission +%#llx size=%#llx perm=%u\n",m->name,(unsigned long long)off,(unsigned long long)size,permission);
   return 0;
  }
- return 0xd401;
+ return ro_module_permission(address,size,permission);
 }
 uint64_t runtime_module_lock_permission(uint64_t address,uint64_t size,unsigned mask,unsigned attribute){
  if(address&4095)return 0xcc01;
@@ -122,7 +123,7 @@ uint64_t runtime_module_lock_permission(uint64_t address,uint64_t size,unsigned 
   for(uint64_t p=0;p<size/4096;p++)module_permissions[i][first+p]|=16;
   pthread_mutex_unlock(&module_permission_lock);return 0;
  }
- return 0xd401;
+ return ro_module_lock_permission(address,size,mask,attribute);
 }
 int runtime_module_query(uint64_t address,uint64_t *base,uint64_t *size,unsigned *state,unsigned *permission,unsigned *attribute){
  for(unsigned i=0;i<NM;i++){
@@ -137,14 +138,15 @@ int runtime_module_query(uint64_t address,uint64_t *base,uint64_t *size,unsigned
   pthread_mutex_unlock(&module_permission_lock);
   *base=start+lo;*size=hi-lo;*state=data?4:3;*permission=perm&7;*attribute=perm&16;return 1;
  }
- return 0;
+ return ro_module_query(address,base,size,state,permission,attribute);
 }
-void runtime_describe_address(uint64_t a,char *out,size_t n){for(unsigned i=0;i<NM;i++)if(a>=(uintptr_t)modules[i].base-modules[i].pre_size&&a<(uintptr_t)modules[i].base+modules[i].size){char o[MODULE_OFFSET_HEX];module_offset_hex(o,a-(uintptr_t)modules[i].base);snprintf(out,n,"%s%s",modules[i].name,o);return;}Dl_info di;if(dladdr((void *)(uintptr_t)a,&di)&&di.dli_sname){snprintf(out,n,"%s+0x%llx",di.dli_sname,(unsigned long long)(a-(uintptr_t)di.dli_saddr));return;}snprintf(out,n,"0x%llx",(unsigned long long)a);}
+void runtime_describe_address(uint64_t a,char *out,size_t n){for(unsigned i=0;i<NM;i++)if(a>=(uintptr_t)modules[i].base-modules[i].pre_size&&a<(uintptr_t)modules[i].base+modules[i].size){char o[MODULE_OFFSET_HEX];module_offset_hex(o,a-(uintptr_t)modules[i].base);snprintf(out,n,"%s%s",modules[i].name,o);return;}{const char *mn;uint64_t mo;if(ro_module_offset(a,&mn,&mo)){snprintf(out,n,"%s+0x%llx",mn,(unsigned long long)mo);return;}}Dl_info di;if(dladdr((void *)(uintptr_t)a,&di)&&di.dli_sname){snprintf(out,n,"%s+0x%llx",di.dli_sname,(unsigned long long)(a-(uintptr_t)di.dli_saddr));return;}snprintf(out,n,"0x%llx",(unsigned long long)a);}
 /* Guest frame-pointer chain. Guest threads run on guest stacks (not the host pthread stack), so frames are read with
    mach_vm_read_overwrite (a bad pointer ends the walk instead of faulting); the chain must grow upwards. */
 void runtime_trace_guest(uint64_t fp,uint64_t lr) {
  for(unsigned n=0;n<16;n++) {
   for(unsigned i=0;i<NM;i++)if(lr>=(uintptr_t)modules[i].base-modules[i].pre_size&&lr<(uintptr_t)modules[i].base+modules[i].size){char o[MODULE_OFFSET_HEX];module_offset_hex(o,lr-(uintptr_t)modules[i].base);fprintf(stderr,"[totk] caller %s%s\n",modules[i].name,o);}   /* main+0x1234, or main-0x40 in the pre-island (scripts/symbolize.py reads both) */
+  {const char *mn;uint64_t mo;if(ro_module_offset(lr,&mn,&mo))fprintf(stderr,"[totk] caller %s+0x%llx\n",mn,(unsigned long long)mo);}
   if(!fp||fp%8)break;uint64_t f[2];mach_vm_size_t got=0;
   if(mach_vm_read_overwrite(mach_task_self(),fp,16,(uintptr_t)f,&got)!=KERN_SUCCESS||got!=16)break;
   lr=f[1];if(f[0]<=fp||f[0]-fp>(64u<<20))break;fp=f[0];
@@ -350,6 +352,7 @@ void runtime_dispatch(uint64_t ret,uint64_t *regs) {
    need(g->arg<31&&g->arg!=18,"timer target register");regs[g->arg]=(uint64_t)(ns*12/625);__atomic_fetch_add(&timer_calls,1,__ATOMIC_RELAXED);return;}
   __atomic_fetch_add(&svc_calls,1,__ATOMIC_RELAXED);runtime_svc(g->arg,regs,modules[i].name,g->original);return;
  }
+ if(ro_module_dispatch(ret,regs))return;   /* a gate of a module loaded through nn::ro */
  runtime_fail("unknown gate return address");
 }
 /* Signal diagnostics use only stack buffers + write; no guest continuation. */
@@ -380,8 +383,9 @@ static void crash(int num,siginfo_t *info,void *context) {
  {mach_vm_address_t ra=(uintptr_t)info->si_addr;mach_vm_size_t rs=0;vm_region_basic_info_data_64_t ri;mach_msg_type_number_t rc=VM_REGION_BASIC_INFO_COUNT_64;mach_port_t ro=0;
   if(mach_vm_region(mach_task_self(),&ra,&rs,VM_REGION_BASIC_INFO_64,(vm_region_info_t)&ri,&rc,&ro)==KERN_SUCCESS){signal_hex("region=",ra);signal_hex("region size=",rs);signal_hex("region prot=",(uint64_t)ri.protection|((uint64_t)ri.max_protection<<8));}}signal_hex("pc=",pc);signal_hex("lr=",u->uc_mcontext->__ss.__lr);signal_hex("fp=",fp);
  for(unsigned i=0;i<NM;i++)if(pc>=(uintptr_t)modules[i].base-modules[i].pre_size&&pc<(uintptr_t)modules[i].base+modules[i].size){write(2,modules[i].name,strlen(modules[i].name));signal_offset(pc-(uintptr_t)modules[i].base);}
+ {const char *mn;uint64_t mo;if(ro_module_offset(pc,&mn,&mo)){write(2,mn,strlen(mn));signal_hex(" offset=",mo);}}
  for(unsigned i=0;i<29;i++)signal_hex("x=",u->uc_mcontext->__ss.__x[i]);signal_hex("sp=",u->uc_mcontext->__ss.__sp);
- for(unsigned depth=0;depth<24&&fp&&!(fp&15);depth++){uint64_t frame[2];mach_vm_size_t got=0;if(mach_vm_read_overwrite(mach_task_self(),fp,16,(uintptr_t)frame,&got)!=KERN_SUCCESS||got!=16)break;signal_hex("frame lr=",frame[1]);for(unsigned i=0;i<NM;i++)if(frame[1]>=(uintptr_t)modules[i].base-modules[i].pre_size&&frame[1]<(uintptr_t)modules[i].base+modules[i].size){write(2,modules[i].name,strlen(modules[i].name));signal_offset(frame[1]-(uintptr_t)modules[i].base);}if(frame[0]==fp)break;fp=frame[0];   /* host-stack switch: frames may move between stacks */}
+ for(unsigned depth=0;depth<24&&fp&&!(fp&15);depth++){uint64_t frame[2];mach_vm_size_t got=0;if(mach_vm_read_overwrite(mach_task_self(),fp,16,(uintptr_t)frame,&got)!=KERN_SUCCESS||got!=16)break;signal_hex("frame lr=",frame[1]);for(unsigned i=0;i<NM;i++)if(frame[1]>=(uintptr_t)modules[i].base-modules[i].pre_size&&frame[1]<(uintptr_t)modules[i].base+modules[i].size){write(2,modules[i].name,strlen(modules[i].name));signal_offset(frame[1]-(uintptr_t)modules[i].base);}{const char *mn;uint64_t mo;if(ro_module_offset(frame[1],&mn,&mo)){write(2,mn,strlen(mn));signal_hex(" offset=",mo);}}if(frame[0]==fp)break;fp=frame[0];   /* host-stack switch: frames may move between stacks */}
  /* TOTK_CRASH_MEM=<reg>[:<signed offset>[:<bytes>]]: dump words at register+offset; TOTK_CRASH_MEM_FOLLOW=k1,k2,...: for each
     listed word index, dump 0x100 bytes at that pointer and the ASCII of every readable pointer inside it (data-structure faults). */
  {const char *e=getenv("TOTK_CRASH_MEM");if(e){unsigned r=(unsigned)strtoul(e,NULL,0);const char *c=strchr(e,':');int64_t off=c?strtoll(c+1,NULL,0):0;const char *c2=c?strchr(c+1,':'):NULL;
@@ -445,7 +449,7 @@ static void probe(void) {
    module_offset_hex (gfx_bridge.c) or an explicit sign (hle_nvn.c, nvn_mtl.m), never as a plain %llx. */
 int runtime_module_offset(uint64_t pc,const char **name,uint64_t *off) {
  for(unsigned i=0;i<NM;i++)if(pc>=(uintptr_t)modules[i].base-modules[i].pre_size&&pc<(uintptr_t)modules[i].base+modules[i].size){*name=modules[i].name;*off=pc-(uintptr_t)modules[i].base;return 1;}
- return 0;
+ return ro_module_offset(pc,name,off);
 }
 uintptr_t runtime_frame_controller_return_pc(void) {
  return 0; /* The graphics diagnostic reads TotK's frame controller; FC 26 has none. */
@@ -493,7 +497,7 @@ static void abort_report(int num) {
  signal(SIGABRT,SIG_DFL);raise(SIGABRT);
 }
 int main(int argc,char **argv) {
- need(argc==3,"usage: fc26-native rewritten-dir probe|boot");
+ need(argc==3,"usage: fc26-native rewritten-dir probe|boot");ro_module_set_dir(argv[1]);   /* NRO images sit next to main's */
  /* One game or GPU probe at a time (memory, GPU time): wait for the slot before anything is loaded. */
  if(!strcmp(argv[2],"boot")||!strncmp(argv[2],"probe-gpu",9))runtime_game_slot_acquire(argv[2]);
  if(strcmp(argv[2],"boot"))setenv("TOTK_PROBE_GPU","1",1);   /* standalone probes submit GPU work; the game does not unless TOTK_GPU_ALLOW_SUBMIT=1 */
@@ -512,5 +516,7 @@ int main(int argc,char **argv) {
 #endif
  verify_identity(!strcmp(argv[2],"probe-identity-negative"));
  for(unsigned i=0;i<NM;i++){seal(&modules[i]);check_permissions(&modules[i]);}
+ ro_module_init_sdk();   /* initialize nn::ro::detail globals in sdk */
+ if(!strcmp(argv[2],"probe-ro"))return ro_module_probe()?1:0;   /* every image of nro_manifest.tsv: map, imports */
  if(!strcmp(argv[2],"probe-gpu-pool-retire")||!strcmp(argv[2],"probe-gpu-tex-slots")||!strcmp(argv[2],"probe-gpu-arg-epoch")||!strcmp(argv[2],"probe-gpu-anomaly")||!strcmp(argv[2],"probe-gpu-vertex-streams")||!strcmp(argv[2],"probe-gpu-layer-merge")||!strcmp(argv[2],"probe-gpu-cube-merge")||!strcmp(argv[2],"probe-gpu-texture-retire")||!strcmp(argv[2],"probe-gpu-linear-rt")||!strcmp(argv[2],"probe-gpu-storage-view")||!strcmp(argv[2],"probe-gpu-compressed-alias")||!strcmp(argv[2],"probe-gpu-upload-batch")||!strcmp(argv[2],"probe-gpu-ds-clear")||!strcmp(argv[2],"probe-gpu-ub-rename")||!strcmp(argv[2],"probe-gpu-ubo-snapshot")||!strcmp(argv[2],"probe-gpu-drv-c0")||!strcmp(argv[2],"probe-gpu-dispatch-chain")||!strcmp(argv[2],"probe-gpu-copy-alias")||!strcmp(argv[2],"probe-gpu-srgb-view")||!strcmp(argv[2],"probe-gpu-depth-output"))runtime_gpu_path_probe(argv[2]);else if(!strcmp(argv[2],"probe-memory"))runtime_memory_probe();else if(!strcmp(argv[2],"probe-gfx"))runtime_gfx_probe(0);else if(!strcmp(argv[2],"probe-vpool"))runtime_vpool_probe();else if(!strcmp(argv[2],"probe-gpu-widen")||!strcmp(argv[2],"probe-gpu-blockrt")||!strcmp(argv[2],"probe-gpu-midclear")||!strcmp(argv[2],"probe-gpu-winding")||!strcmp(argv[2],"probe-gpu-tile"))runtime_gpu_path_probe(argv[2]);else if(!strcmp(argv[2],"probe-audio"))runtime_audio_probe();else if(!strcmp(argv[2],"probe-gfx-negative"))runtime_gfx_probe(1);else if(!strcmp(argv[2],"probe"))probe();else if(!strcmp(argv[2],"probe-fs"))runtime_fs_probe();else if(!strcmp(argv[2],"probe-swkbd"))runtime_swkbd_probe();else if(!strcmp(argv[2],"probe-save"))runtime_save_probe();else if(!strcmp(argv[2],"boot")){if(getenv("TOTK_VERIFY_STARTUP")||getenv("TOTK_HEADLESS"))boot();else runtime_front_run(boot);}else runtime_fail("unknown mode");return 0;
 }

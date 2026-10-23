@@ -1,6 +1,7 @@
 /* Horizon services reached by the startup (the TotK host's, carried over through the kit's earlier fork). Unknown operations
    fail with their number (SVC, GetInfo id) or name (IPC service and command, ipc.c). */
 #include "runtime.h"
+#include "ro/ro_module.h"
 #include <TargetConditionals.h>
 #include "ipc.h"
 #include "game_version.h"
@@ -345,6 +346,7 @@ uint64_t runtime_svc(unsigned num,uint64_t *r,const char *module,uint64_t offset
   if(addr>=top-stack&&addr<top){base=top-stack;size=stack;state=0xb;perm=3;}
   else if(addr>=(uintptr_t)heap&&addr<(uintptr_t)heap+heap_size){base=(uintptr_t)heap;size=heap_size;state=5;perm=3;}
   else if(addr>=(uintptr_t)low_space&&addr<(uintptr_t)low_space+LOW_SIZE){base=(uintptr_t)low_space;size=LOW_SIZE;if(addr<(uintptr_t)heap){size=(uintptr_t)heap-base;}else{base=(uintptr_t)heap+heap_size;size=(uintptr_t)low_space+LOW_SIZE-base;}}
+  else if(ro_module_query(addr,&base,&size,&state,&perm,&attr)){}   /* an nn::ro module, mapped after the reservations */
   else if(addr>=(uintptr_t)low_space+LOW_SIZE&&addr<ALIAS_START){base=(uintptr_t)low_space+LOW_SIZE;size=ALIAS_START-base;state=0x10;perm=0;}   /* host-owned: Inaccessible */
   else if(!addr){base=0;size=ASLR_START;state=0;perm=0;}
   else if(runtime_module_query(addr,&base,&size,&state,&perm,&attr)){}

@@ -33,8 +33,8 @@ GFX_OBJECTS := $(patsubst %,$(OUT)/obj/%.o,$(GFX_SRC))
 GFX_HEADERS := $(wildcard third_party/d2r_gfx/gfx/nvn/*.h third_party/d2r_gfx/gfx/nvn/include/*.h third_party/d2r_gfx/host/*.h)
 GFX_FLAGS := -std=gnu11 -Wno-error -Wno-unused-function -Wno-unused-parameter -fobjc-arc -Ithird_party/d2r_gfx/gfx/nvn/include
 
-RUNTIME_SRC := $(wildcard runtime/*.c runtime/*.m runtime/*.S)
-RUNTIME_HEADERS := $(wildcard runtime/*.h)
+RUNTIME_SRC := $(wildcard runtime/*.c runtime/*.m runtime/*.S runtime/ro/*.c)
+RUNTIME_HEADERS := $(wildcard runtime/*.h runtime/ro/*.h)
 GENERATED := $(OUT)/runtime_tables.h $(OUT)/romfs_config.h $(OUT)/shared_fonts_config.h
 
 .PHONY: check-config prepare runtime probe boot clean rewrite test
