@@ -26,6 +26,7 @@ NVN_NOPROTO(nvnTextureBuilderGetRawStorageClass, int, const NVNtextureBuilder *b
 void *nvn_rec(NVNcommandBuffer *c, uint32_t op, size_t payload);   // hle_nvn.c: appends a command record
 NVN(nvnCommandBufferSetCopyImageStride, void, NVNcommandBuffer *c, ptrdiff_t st) {
     if (st < 0) die("nvnCommandBufferSetCopyImageStride %td: negative image stride not supported by the Metal copies", st);
+    if (st) { static int seen; if (seen < 4) LOG("[nvn] SetCopyImageStride %td (first non-zero image strides: %d of 4 logged)", st, ++seen); }
     ((p_copy_stride *)nvn_rec(c, OP_COPY_IMG_STRIDE, sizeof(p_copy_stride)))->stride = st;
 }
 

@@ -45,6 +45,9 @@ class NvnGaps(unittest.TestCase):
         run = self.run_case('run')
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertNotIn('FAIL', run.stdout)
+        # the Mac run shows whether the game's copies take the new path: non-zero image strides are logged (0 is not)
+        self.assertEqual([l for l in run.stderr.splitlines() if 'SetCopyImageStride' in l],
+                         ['[totk-gfx] [nvn] SetCopyImageStride 12288 (first non-zero image strides: 1 of 4 logged)'])
 
     def test_registered_under_the_names_of_main_name_table(self):
         # The thunk table is generated from names.txt: slot i = line i, label Ln<i> in nvn_thunks.S. A name outside it would
