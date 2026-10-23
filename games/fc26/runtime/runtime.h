@@ -6,8 +6,9 @@ typedef struct { uint64_t where; unsigned kind, symbol; int64_t addend; } Reloc;
 typedef struct { const char *name; uint64_t value, size; unsigned defined, binding, type; } Symbol;
 typedef struct { uint64_t ret, original; unsigned timer, arg; } Gate;
 typedef struct {
- const char *name, *digest; size_t file_size, size;
- uint64_t text_end, ro_off, data_off, patch_off, key_off, init, ctor_flag, init_array, init_size;
+ const char *name, *digest, *pre_digest; size_t file_size, size;
+ /* pre_size: the pre-island (games/fc26/docs/ILHAS_NUVEM.md), mapped just before base at base-pre_size; 0 when unused. */
+ uint64_t text_end, ro_off, data_off, patch_off, key_off, pre_size, init, ctor_flag, init_array, init_size;
  const Symbol *symbols; unsigned nsym; const Reloc *relocs; unsigned nreloc;
  const Gate *gates; unsigned ngate; unsigned *hash, hash_mask;
  uint8_t *base; unsigned relative, symbolic, cross, weak;

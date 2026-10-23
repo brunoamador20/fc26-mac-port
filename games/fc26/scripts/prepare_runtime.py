@@ -130,9 +130,23 @@ def module_table(work, name, pins):
     for line in (work / f'rewritten/{VERSION}/{name}.gates.tsv').read_text().splitlines():
         ret, kind, arg, original = line.split()
         need(kind in ['cntpct', 'cntvct', 'svc'], f'{name}: unknown gate kind {kind}')
-        gates.append(dict(ret=int(ret, 0), timer=kind != 'svc', arg=int(arg), original=int(original, 0)))
+        # ret may be negative (a gate in the pre-island); store it as an unsigned 64-bit offset from base, which the
+        # loader adds to base (base + (uint64)ret wraps to base - |ret|), so a negative offset resolves correctly.
+        gates.append(dict(ret=int(ret, 0) & ((1 << 64) - 1), timer=kind != 'svc', arg=int(arg), original=int(original, 0)))
+    # Pre-island (games/fc26/docs/ILHAS_NUVEM.md): present only when the rewrite needed a patch area before base.
+    # Its size and SHA-256 are baked into the table so the loader verifies the .pre.bin it maps (same load-time check
+    # as patched.bin's digest). pre_size 0 means no island, and the output is byte-identical to a single-area rewrite.
+    pre_size, pre_digest = layout.get('PRE_PATCH_SIZE', 0), ''
+    if pre_size:
+        pre_path = work / f'rewritten/{VERSION}/{name}.pre.bin'
+        need(pre_path.exists(), f'{pre_path} missing but {name}.fixups.tsv declares a pre-island')
+        pre_bytes = pre_path.read_bytes()
+        need(len(pre_bytes) == pre_size, f'{name}: {pre_path.name} is {len(pre_bytes)} bytes, fixups says {pre_size}')
+        need(layout.get('PRE_PATCH_OFF', 0) == -pre_size, f'{name}: PRE_PATCH_OFF {layout.get("PRE_PATCH_OFF")} != -PRE_PATCH_SIZE')
+        pre_digest = hashlib.sha256(pre_bytes).hexdigest()
     return dict(name=name, sha256=digest, size=len(image), layout=layout, tags=tags, symbols=symbols,
-                relocs=relocs, gates=gates, ctor_flag=ctor_flag(image, tags, layout, name))
+                relocs=relocs, gates=gates, ctor_flag=ctor_flag(image, tags, layout, name),
+                pre_size=pre_size, pre_digest=pre_digest)
 
 
 def ctor_flag(image, tags, layout, name):
@@ -238,7 +252,7 @@ def runtime_tables(work, out, pins):
     lines.append('static Module modules[] = {')
     for n, m in enumerate(modules):
         l = m['layout']
-        lines.append('{' + f'.name={json.dumps(m["name"])},.digest={json.dumps(m["sha256"])},.file_size={m["size"]}ULL,.text_end={l["TEXT_END"]}ULL,.ro_off={l["RO_OFF"]}ULL,.data_off={l["DATA_OFF"]}ULL,.patch_off={l["PATCH_OFF"]}ULL,.key_off={l["KEY_PAGE_OFF"]}ULL,.symbols=symbol_{n},.nsym={len(m["symbols"])},.relocs=reloc_{n},.nreloc={len(m["relocs"])},.gates=gate_{n},.ngate={len(m["gates"])},.init={m["tags"].get(12,0)}ULL,.ctor_flag={m["ctor_flag"]}ULL,.init_array={m["tags"].get(25,0)}ULL,.init_size={m["tags"].get(27,0)}ULL' + '},')
+        lines.append('{' + f'.name={json.dumps(m["name"])},.digest={json.dumps(m["sha256"])},.pre_digest={json.dumps(m["pre_digest"])},.file_size={m["size"]}ULL,.text_end={l["TEXT_END"]}ULL,.ro_off={l["RO_OFF"]}ULL,.data_off={l["DATA_OFF"]}ULL,.patch_off={l["PATCH_OFF"]}ULL,.key_off={l["KEY_PAGE_OFF"]}ULL,.pre_size={m["pre_size"]}ULL,.symbols=symbol_{n},.nsym={len(m["symbols"])},.relocs=reloc_{n},.nreloc={len(m["relocs"])},.gates=gate_{n},.ngate={len(m["gates"])},.init={m["tags"].get(12,0)}ULL,.ctor_flag={m["ctor_flag"]}ULL,.init_array={m["tags"].get(25,0)}ULL,.init_size={m["tags"].get(27,0)}ULL' + '},')
     lines.append('};')
     lines.append(f'#define PROBE_PLT {plt}ULL\n#define PROBE_SLOT {slot}ULL')
     text = '\n'.join(lines) + '\n'
