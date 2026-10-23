@@ -83,6 +83,32 @@ int main(void) {
     memcpy(&count, data, 4);
     assert(count == 0);
 
+    /* Command 1: OpenAudioIn -> must fail with 0x299 (DeviceNotFound) */
+    request(1, NULL, 0);
+    sync_request(audin);
+    res = reply_result(&data);
+    assert(res == 0x299);
+
+    /* Command 3: OpenAudioInAuto -> must fail with 0x299 (DeviceNotFound) */
+    request(3, NULL, 0);
+    sync_request(audin);
+    res = reply_result(&data);
+    assert(res == 0x299);
+
+    /* Command 5: OpenAudioInProtocolSpecified -> must fail with 0x299 (DeviceNotFound) */
+    request(5, NULL, 0);
+    sync_request(audin);
+    res = reply_result(&data);
+    assert(res == 0x299);
+
+    /* Command 4: AcquireAudioDeviceNotificationForInput -> must return a readable handle */
+    request(4, NULL, 0);
+    sync_request(audin);
+    res = reply_result(&data);
+    assert(res == 0);
+    assert(msg[1] >> 31); /* special flag (handle returned) */
+    assert(msg[3] != 0);  /* event handle */
+
     printf("AUDIN_IPC_OK\n");
     return 0;
 }

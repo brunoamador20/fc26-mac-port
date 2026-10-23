@@ -196,6 +196,7 @@ static void audio_in_manager_handler(IpcSession *s, const IpcRequest *rq, IpcRes
     (void)s;
     switch (rq->cmd) {
     case 0: case 2: { uint32_t n = 0; IPC_OUT(rs, n); return; }   /* ListAudioIns(Auto) -> 0 devices */
+    case 1: case 3: case 5: rs->result = 0x299; return;           /* OpenAudioIn(Auto/Protocol) -> 2153-0001 (DeviceNotFound) */
     case 4: rs->copy[rs->ncopy++] = runtime_event_readable(runtime_event_new()); return;   /* AcquireAudioDeviceNotificationForInput */
     default: ipc_unimplemented(s, rq);
     }
