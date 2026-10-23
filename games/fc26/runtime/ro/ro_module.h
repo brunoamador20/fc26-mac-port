@@ -24,9 +24,16 @@ uint32_t ro_module_unmap(uint64_t base);
 int ro_module_link_host(uint64_t base, char *err, size_t errn);
 void *ro_module_symbol(uint64_t base, const char *name);   /* a definition the module exports, NULL if none */
 
+/* probe-ro (a loader.c mode, after the static modules are linked): each image in nro_manifest.tsv mapped as the service
+   maps it, then every import looked up the way the host would link it (runtime_override, runtime_symbol). One JSON line
+   per module on stdout; returns how many modules have a strong import that main / sdk do not export. */
+int ro_module_probe(void);
+
 /* ---------- Hooks: each answers only for addresses inside a loaded module ---------- */
-/* runtime_dispatch: the gate whose return address is ret (copied out), with the module's name and the gate's own entry. */
-int ro_module_gate(uint64_t ret, Gate *gate, const char **name);
+/* runtime_dispatch: handle a gate of a loaded module as loader.c handles its own (a timer gate writes the 19.2 MHz count,
+   an svc gate goes to runtime_svc with the module's name and the svc's original offset). 0: not a module gate. */
+int ro_module_dispatch(uint64_t ret, uint64_t *regs);
+int ro_module_gate(uint64_t ret, Gate *gate, const char **name);   /* the gate itself, copied out */
 /* svcSetMemoryPermission / svcSetMemoryAttribute / svcQueryMemory, with loader.c's results; RO_SVC_INVALID_MEMORY (0xd401)
    or 0 (query) when the address is not in a loaded module, so loader.c can return these in place of its own last line. */
 uint64_t ro_module_permission(uint64_t address, uint64_t size, unsigned permission);

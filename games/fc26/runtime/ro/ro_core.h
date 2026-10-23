@@ -74,6 +74,8 @@ int ro_gates_parse(const char *text, const RoLayout *l, RoGate **out, unsigned *
 const RoGate *ro_gate_find(const RoGate *gates, unsigned count, uint64_t ret_offset);
 /* 1 found, 0 no row for this hash, -1 malformed manifest (err says where). */
 int ro_catalog_find(const char *text, const uint8_t nro_sha256[32], RoImage *out, char *err, size_t errn);
+/* Every row in order; visit returns non-zero to stop the walk, which then returns that value; -1: malformed. */
+int ro_catalog_each(const char *text, int (*visit)(void *ctx, const RoImage *row, unsigned line), void *ctx, char *err, size_t errn);
 
 /* ---------- Host pages ---------- */
 typedef struct { uint64_t off, size; unsigned prot; } RoRange;

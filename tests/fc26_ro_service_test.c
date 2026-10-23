@@ -2,7 +2,8 @@
    tests/test_fc26_ro_runtime.py. The rest of the runtime is replaced by the stand-ins below; requests are built the way
    ipc.c hands them to a service (CMIF arguments after the pid placeholder, the PID descriptor, copy handles).
    Modes: "flow <dir>" (everything that must work and every refusal), "missing <dir>" (an authorized NRO without a
-   rewritten image stops the runtime), "tampered <dir>" (a rewritten image that does not match the manifest stops it). */
+   rewritten image stops the runtime), "tampered <dir>" (a rewritten image that does not match the manifest stops it),
+   "probe <dir>" (ro_module_probe, the probe-ro mode, over every image in the manifest). */
 #include "runtime.h"
 #include "ipc.h"
 #include "ro/ro_core.h"
@@ -22,6 +23,8 @@ static uint64_t stub_class_type_info[4], stub_allocate;
 static void stub_mutex_lock(void) {}
 static void stub_guard_override(void) {}
 void *runtime_symbol(const char *name) {
+    const char *hidden = getenv("TEST_HIDE_SYMBOL");   /* probe mode: an import main / sdk would not export */
+    if (hidden && !strcmp(name, hidden)) return NULL;
     if (!strcmp(name, "pthread_mutex_lock")) return (void *)stub_mutex_lock;
     if (!strcmp(name, "_ZTVN10__cxxabiv117__class_type_infoE")) return stub_class_type_info;
     if (!strcmp(name, "_ZN2nn3mem17StandardAllocator8AllocateEm")) return &stub_allocate;
@@ -30,6 +33,11 @@ void *runtime_symbol(const char *name) {
 }
 void *runtime_override(const char *name) { return !strcmp(name, "__cxa_guard_acquire") ? (void *)stub_guard_override : NULL; }
 void *runtime_hle_wrap_named(void *fn, const char *name) { (void)name; return fn; }
+uint64_t runtime_now_ns(void) { return 625000; }   /* a timer gate then reads 12000 ticks */
+static unsigned svc_seen; static const char *svc_module; static uint64_t svc_offset;
+uint64_t runtime_svc(unsigned num, uint64_t *regs, const char *module, uint64_t offset) {
+    svc_seen = num; svc_module = module; svc_offset = offset; regs[0] = 0; return 0;
+}
 
 typedef struct { const char *name; IpcHandler handler; IpcOpen open; void (*close)(void *); } Registered;
 static Registered registered[4]; static unsigned nregistered;
@@ -131,6 +139,12 @@ static void check_mapping(uint64_t base) {
     CHECK(ro_module_gate(base + expect("gate0_ret"), &g, &name));
     CHECK_EQ(g.ret, expect("gate0_ret")); CHECK_EQ(g.arg, expect("gate0_arg")); CHECK(!strcmp(name, "m"));
     CHECK(!ro_module_gate(base + 0x100, &g, &name));
+    uint64_t regs[32] = {0};
+    CHECK(ro_module_dispatch(base + expect("gate_svc_ret"), regs));
+    CHECK_EQ(svc_seen, 1); CHECK(svc_module && !strcmp(svc_module, "m")); CHECK_EQ(svc_offset, 0x108);
+    CHECK(ro_module_dispatch(base + expect("gate_timer_ret"), regs));
+    CHECK_EQ(regs[1], 12000);                                   /* x1 of mrs x1, cntpct_el0 */
+    CHECK(!ro_module_dispatch(base + 0x104, regs));
     uint64_t off; CHECK(ro_module_offset(base + 0x130, &name, &off) && off == 0x130 && !strcmp(name, "m"));
     CHECK(!ro_module_offset(ptr(&g), &name, &off));
     CHECK(ro_module_symbol(base, "nro_export_fn") == (void *)(uintptr_t)(base + 0x130));
@@ -259,6 +273,7 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1], "flow")) { ro_module_set_dir(dir); flow(); }
     else if (!strcmp(argv[1], "missing")) { ro_module_set_dir(dir); stop_on_map("stranger.nro"); }
     else if (!strcmp(argv[1], "tampered")) stop_on_map("m.nro");   /* FC26_RO_DIR names the directory with the bad image */
+    else if (!strcmp(argv[1], "probe")) { ro_module_set_dir(dir); return ro_module_probe() ? 1 : 0; }
     else return 2;
     if (failures) { fprintf(stderr, "%u checks failed\n", failures); return 1; }
     puts("ro service ok");

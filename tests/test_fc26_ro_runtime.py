@@ -45,7 +45,9 @@ def write_fixture(directory, nro=None, name='m'):
                   g_abs_import=synth.G_ABS_IMPORT, g_abs_local=synth.G_ABS_LOCAL, export_data=synth.EXPORT_DATA,
                   g_glob=synth.G_GLOB, g_weak=synth.G_WEAK, g_jump0=synth.G_JUMP0, g_jump1=synth.G_JUMP1,
                   g_tls_local=synth.G_TLS_LOCAL, g_tls_sym=synth.G_TLS_SYM, tls_value=0x8,
-                  patched_size=len(patched), gate0_ret=int(gates[0].split()[0], 0), gate0_arg=int(gates[0].split()[2]))
+                  patched_size=len(patched), gate0_ret=int(gates[0].split()[0], 0), gate0_arg=int(gates[0].split()[2]),
+                  gate_svc_ret=next(int(g.split()[0], 0) for g in gates if g.split()[1] == 'svc'),
+                  gate_timer_ret=next(int(g.split()[0], 0) for g in gates if g.split()[1] == 'cntpct'))
     (directory / 'expect.txt').write_text(''.join(f'{k} {v:#x}\n' for k, v in values.items()))
     # A module without TLS for the host link (caminho B), and one the NRR allows but that has no rewritten image.
     notls = synth.make_nro(module_id=bytes(range(0x40, 0x54)) + bytes(12), tlsdesc=False)
@@ -131,6 +133,21 @@ class Service(unittest.TestCase):
         self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
         self.assertIn('has no rewritten image', run.stderr)
         self.assertIn(hashlib.sha256((self.dir / 'stranger.nro').read_bytes()).hexdigest(), run.stderr)
+
+    def test_probe_lists_imports_as_the_host_would_link_them(self):
+        import json
+        run = self.run_mode('probe', self.dir)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        rows = {r['module']: r for r in map(json.loads, run.stdout.splitlines())}
+        self.assertEqual(set(rows), {'m', 'notls'})
+        m = rows['m']
+        self.assertEqual((m['status'], m['imports'], m['relative'], m['symbolic'], m['gates']), ('pass', 5, 5, 6, 2))
+        self.assertEqual((m['overridden'], m['missing'], m['weak_missing']), (['__cxa_guard_acquire'], [], ['weak_optional_hook']))
+        self.assertEqual(m['tlsdesc'], ['(local)', 'nro_tls_var'])
+        self.assertEqual(rows['notls']['tlsdesc'], [])
+        hidden = self.run_mode('probe', self.dir, TEST_HIDE_SYMBOL='pthread_mutex_lock')
+        self.assertEqual(hidden.returncode, 1, hidden.stdout + hidden.stderr)
+        self.assertEqual([json.loads(l)['missing'] for l in hidden.stdout.splitlines()], [['pthread_mutex_lock']] * 2)
 
     def test_image_that_does_not_match_the_manifest_stops(self):
         tampered = self.dir / 'tampered'

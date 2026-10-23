@@ -156,8 +156,8 @@ const RoGate *ro_gate_find(const RoGate *gates, unsigned count, uint64_t ret_off
     return lo < count && gates[lo].ret == ret_offset ? &gates[lo] : NULL;
 }
 
-int ro_catalog_find(const char *text, const uint8_t nro_sha256[32], RoImage *out, char *err, size_t errn) {
-    unsigned number = 0; int found = 0;
+int ro_catalog_each(const char *text, int (*visit)(void *ctx, const RoImage *row, unsigned line), void *ctx, char *err, size_t errn) {
+    unsigned number = 0;
     for (const char *line = text; *line;) {
         const char *end = strchr(line, '\n'); if (!end) end = line + strlen(line);
         number++;
@@ -186,14 +186,28 @@ int ro_catalog_find(const char *text, const uint8_t nro_sha256[32], RoImage *out
                 *sizes[f] = strtoull(number_text, &stop, 10);
                 if (*stop) return fail(err, errn, "manifest line %u: bad size", number);
             }
-            if (!memcmp(row.nro_sha256, nro_sha256, 32)) {
-                if (found) return fail(err, errn, "manifest line %u: second row for the same NRO", number);
-                *out = row; found = 1;
-            }
+            int r = visit(ctx, &row, number);
+            if (r) return r;
         }
         line = *end ? end + 1 : end;
     }
-    return found;
+    return 0;
+}
+
+typedef struct { const uint8_t *sha256; RoImage *out; int found; unsigned twice; } CatalogFind;
+static int catalog_match(void *ctx, const RoImage *row, unsigned line) {
+    CatalogFind *f = ctx;
+    if (memcmp(row->nro_sha256, f->sha256, 32)) return 0;
+    if (f->found) { f->twice = line; return 2; }
+    *f->out = *row; f->found = 1;
+    return 0;
+}
+
+int ro_catalog_find(const char *text, const uint8_t nro_sha256[32], RoImage *out, char *err, size_t errn) {
+    CatalogFind f = {nro_sha256, out, 0, 0};
+    int r = ro_catalog_each(text, catalog_match, &f, err, errn);
+    if (r == 2) return fail(err, errn, "manifest line %u: second row for the same NRO", f.twice);
+    return r ? -1 : f.found;
 }
 
 /* ---------- Host pages ---------- */

@@ -213,6 +213,93 @@ int ro_module_gate(uint64_t ret, Gate *gate, const char **name) {
     return g != NULL;
 }
 
+int ro_module_dispatch(uint64_t ret, uint64_t *regs) {
+    Gate g; const char *name;
+    if (!ro_module_gate(ret, &g, &name)) return 0;
+    if (g.timer) {   /* the Switch counter runs at 19.2 MHz: ns * 12 / 625, as loader.c */
+        if (g.arg >= 31 || g.arg == 18) runtime_fail("timer target register");
+        regs[g.arg] = (uint64_t)((__uint128_t)runtime_now_ns() * 12 / 625);
+        return 1;
+    }
+    runtime_svc(g.arg, regs, name, g.original);
+    return 1;
+}
+
+typedef struct {
+    const Loaded *m; uint8_t *seen; unsigned imports, overridden, missing, weak_missing, tlsdesc, relative, symbolic;
+    char lists[4][4096]; size_t used[4];   /* overridden, missing, weak_missing, tlsdesc names (JSON arrays) */
+} Probe;
+
+static void probe_add(Probe *p, unsigned list, const char *name) {
+    char item[300]; size_t n = 0;
+    item[n++] = '"';
+    for (const char *c = name; *c && n < sizeof item - 4; c++) { if (*c == '"' || *c == '\\') item[n++] = '\\'; item[n++] = *c; }
+    item[n++] = '"'; item[n] = 0;
+    int w = snprintf(p->lists[list] + p->used[list], sizeof p->lists[list] - p->used[list], "%s%s", p->used[list] ? "," : "", item);
+    if (w > 0 && (size_t)w < sizeof p->lists[list] - p->used[list]) p->used[list] += (size_t)w;
+}
+
+static int probe_reloc(void *ctx, const RoReloc *r) {
+    Probe *p = ctx;
+    const Loaded *m = p->m;
+    uint64_t size = (uint64_t)m->nro.size + m->nro.bss_size;
+    RoSymbol s = {"", 0, 0, 0, 0};
+    if (r->symbol && ro_symbol(m->base, size, &m->dynamic, r->symbol, &s)) return -1;
+    if (r->type == 1027) { p->relative++; return 0; }
+    if (r->type == 1031) { p->tlsdesc++; probe_add(p, 3, s.name[0] ? s.name : "(local)"); return 0; }
+    p->symbolic++;
+    if (!r->symbol || s.defined || (p->seen[r->symbol / 8] & (1u << (r->symbol % 8)))) return 0;
+    p->seen[r->symbol / 8] |= (uint8_t)(1u << (r->symbol % 8));   /* each import once, however many slots use it */
+    p->imports++;
+    int overridden = runtime_override(s.name) != NULL;
+    if (overridden) { p->overridden++; probe_add(p, 0, s.name); }
+    if (!overridden && !runtime_symbol(s.name)) {
+        if (s.binding == 2) { p->weak_missing++; probe_add(p, 2, s.name); }
+        else { p->missing++; probe_add(p, 1, s.name); }
+    }
+    return 0;
+}
+
+static int probe_row(void *ctx, const RoImage *row, unsigned line) {
+    (void)line;
+    unsigned *failed = ctx;
+    size_t size; uint8_t *image = read_file(row->name, ".patched.bin", &size);
+    RoNro header;   /* the NRO header and MOD0 are in the image unchanged (nro_to_nso.py register checked) */
+    if (size < row->nro_size || ro_nro_parse(image, row->nro_size, row->bss_size, &header)) setup_error("probe: NRO header in the image", row->name);
+    uint64_t base;
+    uint32_t r = ro_module_map(image, &header, row->nro_sha256, &base);
+    free(image);
+    if (r) { printf("{\"status\":\"fail\",\"module\":\"%s\",\"map_result\":\"%#x\"}\n", row->name, r); (*failed)++; return 0; }
+    pthread_rwlock_rdlock(&lock);
+    Loaded *m = containing(base, 1);
+    Probe *p = calloc(1, sizeof *p);
+    if (!p || !(p->seen = calloc(m->dynamic.nsym / 8 + 1, 1))) runtime_fail("probe allocation");
+    p->m = m;
+    char err[256];
+    if (ro_relocs_each(m->base, (uint64_t)m->nro.size + m->nro.bss_size, &m->dynamic, m->nro.data_off,
+                       (uint64_t)m->nro.size + m->nro.bss_size, probe_reloc, p, err, sizeof err)) setup_error(row->name, err);
+    unsigned gates = m->ngates;
+    pthread_rwlock_unlock(&lock);
+    printf("{\"status\":\"%s\",\"module\":\"%s\",\"base\":\"%#llx\",\"gates\":%u,\"relative\":%u,\"symbolic\":%u,\"imports\":%u,"
+           "\"overridden\":[%s],\"missing\":[%s],\"weak_missing\":[%s],\"tlsdesc\":[%s],\"scope\":\"image mapped and protected; "
+           "imports looked up as the host would link them; the module was not relocated or run\"}\n",
+           p->missing ? "fail" : "pass", row->name, (unsigned long long)base, gates, p->relative, p->symbolic, p->imports,
+           p->lists[0], p->lists[1], p->lists[2], p->lists[3]);
+    fflush(stdout);
+    if (p->missing) (*failed)++;
+    free(p->seen); free(p);
+    ro_module_unmap(base);
+    return 0;
+}
+
+int ro_module_probe(void) {
+    size_t size; char *manifest = (char *)read_file("nro_manifest.tsv", "", &size), err[256];
+    unsigned failed = 0;
+    if (ro_catalog_each(manifest, probe_row, &failed, err, sizeof err)) setup_error("nro_manifest.tsv", err);
+    free(manifest);
+    return (int)failed;
+}
+
 /* Guest permission changes land on whole 16 KiB host pages: each gets the union of its four guest pages (loader.c). */
 static void apply(Loaded *m, uint64_t lo, uint64_t hi) {
     for (uint64_t page = lo; page < hi; page += RO_HOST_PAGE) {
