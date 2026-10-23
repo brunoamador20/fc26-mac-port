@@ -1,0 +1,15 @@
+{
+    "_comment": "FC 26's identity and module list, read by scripts/game_config.py (the Makefile, the scripts and the tests take them from here). Facts from games/fc26/docs/BRIEFING.md, measured 2026-10-22: base game 1.0.0, no update and no DLC; ExeFS main, sdk, rtld, main.npdm and no subsdk0. modules: what the runtime maps, relocates and initialises, in that order (main first: the probe calls main's PLT and boot reports offsets in main); each one is rewritten to rewritten/<version_dir>/<name>.patched.bin. analysis_modules: what prepare_modules.py turns into analysis ELF.",
+    "name": "FC 26",
+    "slug": "fc26",
+    "title_id": "01004FF021942000",
+    "update_title_id": "01004FF021942800",
+    "display_version": "1.0.0",
+    "version_dir": "v100",
+    "sdk": "19.3.4",
+    "work": "FC26_build",
+    "binary": "fc26-native",
+    "modules": ["main", "sdk"],
+    "analysis_modules": ["rtld", "main", "sdk"],
+    "rewrite_env": {"DM_RULESET": "native", "DM_PRIVATE_GATES": "0"}
+}

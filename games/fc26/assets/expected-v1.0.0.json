@@ -1,0 +1,23 @@
+{
+    "_comment": "Pinned FC 26 1.0.0 inputs: ExeFS (from the base NSP: there is no update), rewrite bytes and RomFS. Known values come from games/fc26/docs/BRIEFING.md (2026-10-22); null = not pinned yet. On the Mac, once story 1's checks passed (structck and equiv for every module), scripts/prepare_runtime.py --record measures each null value, checks it against what is already known, writes it here, and the file is committed. Hashes are not game data. Runtime validation is recorded separately (CHANGELOG.md).",
+    "title_id": "01004FF021942000",
+    "display_version": "1.0.0",
+    "source_nsp_size": 13409283148,
+    "main_build_id": null,
+    "exefs_sha256": {
+        "main": null,
+        "main.npdm": null,
+        "rtld": null,
+        "sdk": null
+    },
+    "rewritten_sha256": {
+        "main.patched.bin": null,
+        "sdk.patched.bin": null
+    },
+    "romfs": {
+        "size": 13263536744,
+        "files": 76,
+        "sha256_prefix": "b5c10b4bf6b3",
+        "sha256": null
+    }
+}

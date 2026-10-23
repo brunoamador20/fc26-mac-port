@@ -1,8 +1,10 @@
-/* Bayonetta 3 1.2.0 (main build ID B47CC79B88B7091EA514B2B725C50AE01C6F00DF).
-   No game-code address is defined on purpose: the TotK GAME_ADDR maps do not apply, so any leftover use is a
-   compile error. Bayonetta addresses get named defines here when a patch needs one. */
+/* EA SPORTS FC 26 1.0.0 (base game, no update; SDK 19.3.4). The values here must match assets/game.json
+   (scripts/game_config.py check, run by scripts/prepare_runtime.py and the tests).
+   No game-code address is defined on purpose: no address of another game applies (TotK's GAME_ADDR maps, the earlier fork's sites), so any
+   leftover use is a compile error. FC 26 addresses get named defines here when a patch needs one.
+   TODO(mac): main's build ID (assets/expected-v1.0.0.json main_build_id, recorded by prepare_runtime.py --record). */
 #pragma once
-#define GAME_BY3 1
-#define TOTK_GAME_VERSION "1.2.0"
-#define TOTK_GAME_DIR "v120"
-#define GAME_TITLE_ID 0x01004a4010fea000ULL
+#define GAME_FC26 1
+#define TOTK_GAME_VERSION "1.0.0"
+#define TOTK_GAME_DIR "v100"
+#define GAME_TITLE_ID 0x01004ff021942000ULL
