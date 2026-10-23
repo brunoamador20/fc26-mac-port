@@ -1229,8 +1229,10 @@ with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
     # 前导岛布局（仅在用到时写）：偏移为负（相对模块基址），装载器把 .pre.bin 映射到 [base+PRE_PATCH_OFF, base)。
+    # PRE_PATCH_USED = 块实际占用的字节（其后到 PRE_PATCH_SIZE 全是 0 填充，不是代码）：核对工具只把这一段当补丁区。
     # Pre-island layout (written only when used): the offset is negative (relative to the module base); the loader maps .pre.bin into [base+PRE_PATCH_OFF, base).
-    if PRE_USED: f.write(f'# PRE_PATCH_OFF\t{PRE_PATCH_OFF:#x}\n# PRE_PATCH_SIZE\t{PRE_PATCH_SIZE:#x}\n')
+    # PRE_PATCH_USED = the bytes the blocks really occupy (the rest up to PRE_PATCH_SIZE is zero padding, not code): the checkers take only this part as patch area.
+    if PRE_USED: f.write(f'# PRE_PATCH_OFF\t{PRE_PATCH_OFF:#x}\n# PRE_PATCH_SIZE\t{PRE_PATCH_SIZE:#x}\n# PRE_PATCH_USED\t{len(pre):#x}\n')
 with open(P('gates.tsv'), 'w') as f:
     for ret, k, arg, orig in gates: f.write(f'{ret:#x}\t{k}\t{arg}\t{orig:#x}\n')
 with open(P('sites.tsv'), 'w') as f:

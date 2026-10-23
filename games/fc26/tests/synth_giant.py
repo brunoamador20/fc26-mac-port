@@ -71,14 +71,17 @@ def main():
             if line.startswith('#'):
                 _, k, v = line.split(); h[k] = int(v, 0)
         PO, TE = h['PATCH_OFF'], h['TEXT_END']
-        pre_base = h.get('PRE_PATCH_OFF', 0); pre_size = h.get('PRE_PATCH_SIZE', 0)
+        pre_base = h.get('PRE_PATCH_OFF', 0); pre_size = h.get('PRE_PATCH_SIZE', 0); pre_used = h.get('PRE_PATCH_USED', 0)
         pre = open(f'{out}/giant.pre.bin', 'rb').read() if pre_size else b''
+        if pre_size and not (0 < pre_used <= len(pre) and pre[pre_used:] == bytes(len(pre) - pre_used)):
+            print(f'BAD pre-island: PRE_PATCH_USED {pre_used:#x} missing, out of range or not followed by zero padding')
+            return 1
 
         def word_at(o):
             return struct.unpack_from('<I', pre, o - pre_base)[0] if o < 0 else struct.unpack_from('<I', pat, o)[0]
 
-        def is_patch(t):
-            return t is not None and ((pre_size and pre_base <= t < 0) or PO <= t < len(pat))
+        def is_patch(t):   # the after-area, or the island's used part (its zero padding is not code)
+            return t is not None and ((pre_size and pre_base <= t < pre_base + pre_used) or PO <= t < len(pat))
 
         # 1) every site head is a B into a patch area, in range, and its block returns to text
         pre_heads = after_heads = 0
@@ -98,11 +101,12 @@ def main():
             worst = max(worst, abs(t - a_))
             pre_heads += t < 0
             after_heads += t >= PO
-            # walk the block to its first return into text
+            # walk the block to its first return into text; running out of the patch area in sequence (no branch:
+            # into the island's padding, or on into text offset 0 right after it) or looping is a failure
             o, seen, ok = t, set(), False
             for _ in range(8192):
                 if o in seen or not is_patch(o):
-                    ok = 0 <= o < TE; break
+                    ok = False; break
                 seen.add(o); w = word_at(o)
                 if w & 0xFC000000 == 0x14000000:
                     nt = btarget_mod(word_at, o)

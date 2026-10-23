@@ -47,7 +47,10 @@ W = lambda b, o: struct.unpack_from('<I', b, o)[0]
 # Pre-island (.pre.bin, present only when used): negative offsets (relative to the module base). All patch-area access
 # goes through PW / pbytes / is_patch, so the after-area and the pre-island are checked by the same code; without a
 # pre-island, pre is empty and every check is exactly as before (nothing loosens).
-PRE_BASE = h.get('PRE_PATCH_OFF', 0); PRE_SIZE = h.get('PRE_PATCH_SIZE', 0)
+# 前导岛只有 [PRE_PATCH_OFF, PRE_PATCH_OFF + PRE_PATCH_USED) 是块；其后的 0 填充不是代码（udf #0），不算补丁区。
+# Only [PRE_PATCH_OFF, PRE_PATCH_OFF + PRE_PATCH_USED) of the pre-island holds blocks; the zero padding after it is not
+# code (udf #0) and is not patch area.
+PRE_BASE = h.get('PRE_PATCH_OFF', 0); PRE_SIZE = h.get('PRE_PATCH_SIZE', 0); PRE_USED = h.get('PRE_PATCH_USED', 0)
 pre = b''
 if PRE_SIZE:
     pre = open(f'{out_dir}/{mod}.pre.bin', 'rb').read()
@@ -56,7 +59,7 @@ def PW(off):
     b, i = _pbuf(off); return struct.unpack_from('<I', b, i)[0]
 def pbytes(off, n):
     b, i = _pbuf(off); return bytes(b[i:i + n])
-def in_pre(off): return bool(PRE_SIZE) and PRE_BASE <= off < 0
+def in_pre(off): return bool(PRE_SIZE) and PRE_BASE <= off < PRE_BASE + PRE_USED
 def is_patch(off): return off is not None and (in_pre(off) or PO <= off < len(pat))
 fails = []
 def bad(msg):
@@ -219,6 +222,10 @@ def btarget(o):
     return o + 4 * imm
 if PRE_SIZE and (len(pre) != PRE_SIZE or PRE_BASE != -PRE_SIZE):
     bad(f'前导岛文件 / 表头不一致：size {len(pre):#x} vs {PRE_SIZE:#x}, off {PRE_BASE:#x} | pre-island file / header mismatch')
+if PRE_SIZE and not (0 < PRE_USED <= len(pre) and PRE_USED % 4 == 0):
+    bad(f'前导岛表头 PRE_PATCH_USED 缺失或越界：{PRE_USED:#x} / {PRE_SIZE:#x} | pre-island PRE_PATCH_USED missing or out of range')
+elif PRE_SIZE and pre[PRE_USED:] != bytes(len(pre) - PRE_USED):
+    bad(f'前导岛 PRE_PATCH_USED {PRE_USED:#x} 之后不全是 0 | the pre-island is not all zero past PRE_PATCH_USED')
 nb = [a for a in heads | obs_heads if not is_patch(btarget(a))]
 if nb: bad(f'改写点头不是跳进补丁区的 B：{len(nb)} 例 {[hex(x) for x in nb[:5]]}')
 
@@ -251,7 +258,7 @@ nwin_ref = sum(1 for o in ind if o in inwin)
 # ④ 补丁区干净
 # ④ Patch area is clean
 P = llvm_dis(pat[PO:], PO)
-if PRE_SIZE: P.update(llvm_dis(pre, PRE_BASE))   # 前导岛同样必须干净 | the pre-island must be clean too
+if PRE_SIZE: P.update(llvm_dis(pre[:PRE_USED], PRE_BASE))   # 前导岛（用到的部分）同样必须干净 | the pre-island (its used part) must be clean too
 left = sorted(o for o, t in P.items() if RX18.search(t) or sysk(t) not in (None, 'tpidrro_r'))
 if left: bad(f'补丁区残留 x18/系统寄存器/svc：{len(left)} 例 {[(hex(x), P[x]) for x in left[:5]]}')
 
@@ -395,9 +402,9 @@ if set(KEY) != {'K18', 'KTLS', 'KTLR', 'KGATE', 'KRES0', 'KRES1', 'KASPECT', 'KA
         or not {k for *_, k in params} <= set(KEY) or set(KEY.values()) != set(range(8)):
     bad(f'表头键页下标不合规：{KEY}（须含八个键且下标恰为 0..7）')
 kv = {v: k for k, v in KEY.items()}; nk = {}
-_slot_scan = [(PO, len(pat))] + ([(PRE_BASE, 0)] if PRE_SIZE else [])   # 两块补丁区都要扫 | scan both patch areas
-for lo_, hi_ in _slot_scan:
-    for o in range(lo_, hi_ - 4, 4):
+_slot_scan = [range(PO, len(pat) - 4, 4)] + ([range(PRE_BASE, PRE_BASE + PRE_USED, 4)] if PRE_SIZE else [])   # 两块补丁区都要扫（前导岛只扫用到的部分）| scan both patch areas (the pre-island's used part)
+for words in _slot_scan:
+    for o in words:
         w = PW(o)
         if w & 0xFFFFFFE0 != 0xD53BD060: continue        # mrs xN, tpidrro_el0
         n = w & 31; ks = keyseq(o); k = kv.get(ks[1]) if ks else None
@@ -592,10 +599,15 @@ if calls:
             bad('relocation enters call without preparation')
 
 def _exits(start):
-    ex, seen, st = set(), set(), [start]
+    """补丁块回 text 的全部出口；第二项是顺序执行（没有分支）走出补丁区的位置——块尾漏了出口 b，会落进前导岛的 0 填充、
+    模块 text 的开头或映像之外，一律判失败。| Every exit of the patch block back to text; the second item lists where the
+    walk ran out of the patch area in sequence (no branch) -- a block missing its exit b falls into the pre-island's zero
+    padding, the start of the module text or past the image, and fails."""
+    ex, seen, st, off_end = set(), set(), [start], []
     while st:
         o = st.pop()
-        while o not in seen and is_patch(o):       # is_patch 同时给出补丁区边界（后区或前导岛）| is_patch also bounds the walk to a patch area (after or pre-island)
+        while o not in seen:
+            if not is_patch(o): off_end.append(o); break   # 补丁区边界（后区或前导岛用到的部分）| the patch-area bound (after-area or the pre-island's used part)
             seen.add(o); w = PW(o)
             if w & 0xFC000000 == 0x14000000:
                 t = _bt(w, o)
@@ -608,7 +620,7 @@ def _exits(start):
                 if not is_patch(t): ex.add(t)
                 else: st.append(t)
             o += 4
-    return ex
+    return ex, off_end
 nexit = 0; _cutoff = {c[0] for c in cuts}; _cutex = []
 for a in sorted(_heads):
     if a in _wend:
@@ -620,7 +632,9 @@ for a in sorted(_heads):
         while e < TE and W(pat, e) != W(orig, e) and e not in _heads: e += 4
         seg = range(a, e, 4); legal = {a + 4 * k for k in range(1, len(seg) + 1)}
     legal |= {t for o in seg for t in [_bt(W(orig, o), o)] if t is not None}
-    for t in _exits(btarget(a)):
+    _ex, _off_end = _exits(btarget(a))
+    for o in _off_end: bad(f'跳板 {a:#x}：补丁块在 {o:#x} 没有分支就走出补丁区 | the patch block runs out of the patch area at {o:#x} without a branch')
+    for t in _ex:
         nexit += 1
         if t not in legal and a in _cutoff: _cutex.append(f'{a:#x}→{t:#x}'); continue   # 已登记剪口（带理由，故意改控制流）：放行并列出 | Registered cuts (with a reason, deliberately changing control flow): let through and listed
         if t not in legal: bad(f'跳板出口 {a:#x} → {t:#x}：既不是 {a + 4:#x} / 吸收段尾 / 窗口尾，也不是段内原指令的分支目标（越过未改原指令或别的跳板头）')

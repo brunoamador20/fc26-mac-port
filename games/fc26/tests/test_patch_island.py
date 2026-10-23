@@ -178,6 +178,23 @@ class GoldenRule(unittest.TestCase):
             self.assertGreaterEqual(btarget(pat, g), h['PATCH_OFF'])
         self.assertEqual(group_entry_problems(word_at, lambda o: btarget(pat, o), h['KEY_PAGE_OFF']), [])
 
+    def test_structck_no_island_same_report_as_base(self):
+        """No island: this structck and the base commit's print the same report (every check line, the EXITS / STATIC
+        / STRUCT summaries) on the same output: nothing loosened, nothing new fires."""
+        objdump = shutil.which('llvm-objdump') or shutil.which('llvm-objdump-18')
+        if not objdump:
+            self.skipTest('llvm-objdump not available for structck')
+        old = os.path.join(self.tmp, 'base_d2r')
+        if not base_d2r(old):
+            self.skipTest(f'base commit {BASE_COMMIT[:12]} not in this clone')
+        out = os.path.join(self.tmp, 'new'); os.makedirs(out)
+        self.assertEqual(run_rewriter(D2R, self.nso, out, {'DM_REACH_BITS': '27'}).returncode, 0)
+        env = {**os.environ, 'LLVM_BIN': os.path.dirname(objdump), 'DM_ROOT': os.path.join(self.tmp, 'dmroot')}
+        reports = [subprocess.run([sys.executable, 'structck.py', out, 'synth', self.nso], capture_output=True, text=True,
+                                  env=env, cwd=d).stdout.splitlines() for d in (old, str(D2R))]
+        self.assertIn('STRUCT synth OK', reports[1][-1])
+        self.assertEqual(reports[1], reports[0])
+
     def test_byte_identical_to_base_branch(self):
         """The real before/after: run the base-branch rewriter (+ its helpers) and diff every product."""
         old = os.path.join(self.tmp, 'old_d2r'); os.makedirs(old)
@@ -217,14 +234,45 @@ class PreIsland(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _is_patch(self, t):
-        return t is not None and (self.pre_base <= t < 0 or self.h['PATCH_OFF'] <= t < len(self.pat))
+        """Patch code: the after-area, or the island's USED part (the zero padding after it is not code)."""
+        used = self.h['PRE_PATCH_USED']
+        return t is not None and (self.pre_base <= t < self.pre_base + used or self.h['PATCH_OFF'] <= t < len(self.pat))
 
-    def _word(self, off):
-        return struct.unpack_from('<I', self.pre, off - self.pre_base)[0] if off < 0 else struct.unpack_from('<I', self.pat, off)[0]
+    def _word(self, off, pre=None):
+        pre = self.pre if pre is None else pre
+        return struct.unpack_from('<I', pre, off - self.pre_base)[0] if off < 0 else struct.unpack_from('<I', self.pat, off)[0]
+
+    def _heads(self):
+        """{site head: block start} for every non-J row of sites.tsv."""
+        out = {}
+        for line in open(f'{self.out}/synth.sites.tsv'):
+            f = line.split()
+            if f[1] != 'J':
+                out[int(f[0], 16)] = btarget(self.pat, int(f[0], 16))
+        return out
+
+    def _last_exit_b(self):
+        """Module offset of the island's last used word: the exit b of the last block routed there (a plain x18 site)."""
+        o = self.pre_base + self.h['PRE_PATCH_USED'] - 4
+        t = b_of(self._word(o), o)
+        self.assertTrue(t is not None and 0 <= t < self.h['TEXT_END'], 'the island should end with an exit b to text')
+        return o
+
+    def _bad_copy(self, pre_mutation=None, header_filter=None):
+        bad = os.path.join(self.tmp, 'bad'); shutil.copytree(self.out, bad)
+        if pre_mutation:
+            d = bytearray(self.pre); pre_mutation(d); Path(bad, 'synth.pre.bin').write_bytes(d)
+        if header_filter:
+            p = Path(bad, 'synth.fixups.tsv'); p.write_text(''.join(l for l in p.read_text().splitlines(True) if header_filter(l)))
+        return bad
 
     def test_file_and_header_consistent(self):
         self.assertEqual(len(self.pre), self.h['PRE_PATCH_SIZE'])
         self.assertEqual(self.pre_base, -self.h['PRE_PATCH_SIZE'])
+        used = self.h['PRE_PATCH_USED']
+        self.assertTrue(0 < used <= len(self.pre) and used % 4 == 0)
+        self.assertNotEqual(self.pre[used - 4:used], bytes(4), 'PRE_PATCH_USED must end at the last block word')
+        self.assertEqual(self.pre[used:], bytes(len(self.pre) - used), 'the island past PRE_PATCH_USED is zero padding')
 
     def test_group_entries_in_island(self):
         """The linked-window group routed to the pre-island: every entry keeps its stp/key-slot prologue and ends in
@@ -249,15 +297,17 @@ class PreIsland(unittest.TestCase):
         self.assertGreater(pre_heads, 0, 'the forced island should hold some sites')
         self.assertGreater(after_heads, 0, 'the after-area should still hold the high sites')
 
-    def _walks_back(self, start):
-        """Follow the block from `start` in module-offset space; True once a b leaves the patch area into text."""
+    def _walks_back(self, start, pre=None):
+        """Follow the block from `start` in module-offset space; True once a b leaves the patch area into text.
+        Running out of the patch area in sequence (no branch: into the island's zero padding, or on into text offset 0
+        right after the island) or looping is a failure, never a return."""
         seen = set(); o = start
         for _ in range(4096):
             if o in seen or not self._is_patch(o):
-                return 0 <= o < self.h['TEXT_END']
-            seen.add(o); w = self._word(o)
+                return False
+            seen.add(o); w = self._word(o, pre)
             if w & 0xFC000000 == 0x14000000:          # b: follow it, or take it as the exit if it leaves the patch area
-                nt = self._btarget_mod(o)
+                nt = b_of(w, o)
                 if not self._is_patch(nt):
                     return 0 <= nt < self.h['TEXT_END']
                 o = nt; continue
@@ -266,14 +316,19 @@ class PreIsland(unittest.TestCase):
             o += 4
         return False
 
-    def _btarget_mod(self, o):
-        w = self._word(o)
-        if w & 0xFC000000 != 0x14000000:
-            return None
-        imm = w & 0x3FFFFFF
-        if imm & 0x2000000:
-            imm -= 0x4000000
-        return o + 4 * imm
+    def test_walker_rejects_falling_off_the_island(self):
+        """The test's own walker: a last block without its exit b runs into the padding and on to offset 0 (text):
+        that is not a return to text."""
+        o = self._last_exit_b()
+        start = max(t for t in self._heads().values() if t < 0)    # the last block routed to the island
+        self.assertTrue(self._walks_back(start))
+        d = bytearray(self.pre); struct.pack_into('<I', d, o - self.pre_base, 0xD503201F)
+        self.assertFalse(self._walks_back(start, bytes(d)), 'falling into the island padding was taken as a return')
+        # an island used to its very end (no padding): a block that falls through its last word lands on offset 0,
+        # the first word of text -- by sequence, not by a branch
+        d = bytearray(self.pre); struct.pack_into('<II', d, len(d) - 8, 0xD503201F, 0xD503201F)
+        self.h['PRE_PATCH_USED'] = len(d)
+        self.assertFalse(self._walks_back(-8, bytes(d)), 'falling off the island end onto offset 0 was taken as a return')
 
     def _structck(self, out):
         objdump = shutil.which('llvm-objdump') or shutil.which('llvm-objdump-18')
@@ -299,6 +354,25 @@ class PreIsland(unittest.TestCase):
         r = self._structck(bad)
         self.assertNotEqual(r.returncode, 0, 'structck must fail on a corrupted pre-island')
         self.assertIn('STRUCT synth FAIL', r.stdout)
+
+    def test_structck_fails_block_falling_off_the_island(self):
+        """The island's last block loses its exit b: it would run into the zero padding (udf #0) and, past the island,
+        into the module text at offset 0. structck must fail it, not walk the padding as code."""
+        o = self._last_exit_b()
+        r = self._structck(self._bad_copy(lambda d: struct.pack_into('<I', d, o - self.pre_base, 0xD503201F)))
+        self.assertIn('STRUCT synth FAIL', r.stdout)
+        self.assertIn('runs out of the patch area', r.stdout)
+
+    def test_structck_fails_nonzero_padding(self):
+        used = self.h['PRE_PATCH_USED']
+        r = self._structck(self._bad_copy(lambda d: d.__setitem__(used + 8, 1)))
+        self.assertIn('STRUCT synth FAIL', r.stdout)
+        self.assertIn('not all zero past PRE_PATCH_USED', r.stdout)
+
+    def test_structck_needs_the_used_header(self):
+        r = self._structck(self._bad_copy(header_filter=lambda l: not l.startswith('# PRE_PATCH_USED')))
+        self.assertIn('STRUCT synth FAIL', r.stdout)
+        self.assertIn('PRE_PATCH_USED missing', r.stdout)
 
     def test_equiv_passes_on_island(self):
         try:

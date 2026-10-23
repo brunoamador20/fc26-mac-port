@@ -38,7 +38,8 @@ KEY_PAGE_OFF = hdr['KEY_PAGE_OFF']
 pat = bytearray(open(f'{DIR}/{MOD}.patched.bin', 'rb').read())
 # 前导岛（.pre.bin，仅在用到时存在）：映射在模块基址 IB 之前，偏移为负。补丁区读统一经 PWO / pslice / in_patch。
 # Pre-island (.pre.bin, present only when used): mapped before the module base IB, negative offsets. Patch reads go through PWO / pslice / in_patch.
-PRE_BASE = hdr.get('PRE_PATCH_OFF', 0); PRE_SIZE = hdr.get('PRE_PATCH_SIZE', 0)
+PRE_BASE = hdr.get('PRE_PATCH_OFF', 0); PRE_SIZE = hdr.get('PRE_PATCH_SIZE', 0); PRE_USED = hdr.get('PRE_PATCH_USED', 0)
+if PRE_SIZE and not 0 < PRE_USED <= PRE_SIZE: sys.exit(f'equiv: {MOD}.fixups.tsv 有前导岛但 PRE_PATCH_USED 缺失或越界 | pre-island without a valid PRE_PATCH_USED')
 pre = bytearray(open(f'{DIR}/{MOD}.pre.bin', 'rb').read()) if PRE_SIZE else bytearray()
 orig = nsoimg.load(A.nso)
 ncut = sum(1 for l in open(f'{DIR}/{MOD}.cuts.tsv') if not l.startswith('#'))
@@ -69,10 +70,11 @@ def _pbuf(off): return (pre, off - PRE_BASE) if off < 0 else (pat, off)   # 模�
 def PWO(off): b, i = _pbuf(off); return struct.unpack_from('<I', b, i)[0]
 def pslice(off, n): b, i = _pbuf(off); return bytes(b[i:i + n])
 def in_patch(off):
-    """模块偏移是否在补丁区：后区 off ≥ PATCH_OFF（与改前同一判据）；前导岛的范围只在有前导岛时算（ARENA / TSD 在 IB 之下，永远不算）。
-    | Is a module offset in a patch area: the after-area off ≥ PATCH_OFF (the same test as before); the pre-island range
-    counts only when there is a pre-island (ARENA / TSD sit below IB and never count)."""
-    return (bool(PRE_SIZE) and PRE_BASE <= off < 0) or off >= PATCH_OFF
+    """模块偏移是否在补丁区：后区 off ≥ PATCH_OFF（与改前同一判据）；前导岛只在有前导岛时算、只算用到的部分（其后是 0 填充）；
+    ARENA / TSD 在 IB 之下，永远不算。
+    | Is a module offset in a patch area: the after-area off ≥ PATCH_OFF (the same test as before); the pre-island
+    counts only when there is one, and only its used part (zero padding follows); ARENA / TSD sit below IB and never count."""
+    return (bool(PRE_SIZE) and PRE_BASE <= off < PRE_BASE + PRE_USED) or off >= PATCH_OFF
 def adrp_page(word, pc):
     """adrp 的页目标，按真实模块偏移算（capstone 对前导岛的负地址不可靠）；正偏移时与 capstone 的 imm 相同。
     | The adrp page target from the true module offset (capstone is unreliable for the pre-island's negative address);
