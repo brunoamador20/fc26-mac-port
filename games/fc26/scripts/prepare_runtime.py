@@ -30,6 +30,7 @@ sys.path.insert(0, str(HERE / 'third_party/d2r'))   # FC 26's own copy of the re
 sys.path.insert(0, str(HERE / 'scripts'))           # also under python -I, which drops the script's folder
 from relr import decode_relr
 import game_config
+import nro_to_nso
 
 VERSION = game_config.VERSION
 MODULES = game_config.MODULES
@@ -254,11 +255,69 @@ def check_required(modules):
     return dict(nnmain_references=refs, nnmain_plt_callers=calls)
 
 
+def find_late_symbols(work, modules):
+    """Strong imports of main/sdk not defined by any module, but exported by an NRO
+    registered in <work>/rewritten/<version>/nro_manifest.tsv.
+    Returns a sorted list: [dict(name=..., nro=...), ...]."""
+    defined = {s['name'] for m in modules for s in m['symbols'] if s['defined'] and s['name']}
+    unresolved = set()
+    for m in modules:
+        for r in m['relocs']:
+            if r['kind'] != R_RELATIVE:
+                s = m['symbols'][r['symbol']]
+                if not s['defined'] and s['binding'] != 2 and s['name'] and s['name'] not in defined:
+                    unresolved.add(s['name'])
+    if not unresolved:
+        return []
+    manifest_path = work / f'rewritten/{VERSION}/nro_manifest.tsv'
+    if not manifest_path.exists():
+        return []
+    rw = work / f'rewritten/{VERSION}'
+    nro_exports = {}
+    for line in manifest_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        name = parts[1]
+        candidates = [
+            rw / f'{name}.patched.bin',
+            rw / f'{name}.nro',
+            rw / name,
+            rw / f'{Path(name).stem}.patched.bin',
+            rw / f'{Path(name).stem}.nro',
+            work / f'extracted/{VERSION}/romfs' / f'{name}.nro',
+            work / f'extracted/{VERSION}/romfs' / name,
+        ]
+        path = next((p for p in candidates if p.exists()), None)
+        if not path:
+            continue
+        try:
+            syms = nro_to_nso.module_symbols(path.read_bytes())
+            nro_exports[name] = {e['name'] for e in syms['exports'] if e['name']}
+        except Exception as e:
+            print(f'warning: failed to read symbols from {path}: {e}', file=sys.stderr)
+            continue
+    late = []
+    seen = set()
+    for name in sorted(unresolved):
+        for nro_name, exports in nro_exports.items():
+            if name in exports:
+                if name not in seen:
+                    late.append(dict(name=name, nro=nro_name))
+                    seen.add(name)
+                break
+    return late
+
+
 def runtime_tables(work, out, pins):
     """runtime_tables.h and analysis/runtime-layout.json, written as they are made: main's tables can be large, and the
     Mac has 8 GB."""
     modules = [module_table(work, n, pins, keep_image=(i == 0)) for i, n in enumerate(MODULES)]
     nnmain = check_required(modules)
+    late_symbols = find_late_symbols(work, modules)
     main = modules[0]
     plt, slot = probe_plt(main, main.pop('_image'))
     with (out / 'runtime_tables.h').open('w') as f:
@@ -277,6 +336,11 @@ def runtime_tables(work, out, pins):
                 f.write(f'{{{g["ret"]}ULL,{g["original"]}ULL,{int(g["timer"])},{g["arg"]}}},\n')
             if not m['gates']: f.write('{0,0,0,0},\n')
             f.write('};\n')
+        f.write('static const LateSymbol late_symbols[] = {\n')
+        for ls in late_symbols:
+            f.write(f'  {{{json.dumps(ls["name"])}, {json.dumps(ls["nro"])}}},\n')
+        f.write('  {NULL, NULL},\n};\n')
+        f.write(f'#define LATE_SYMBOL_COUNT {len(late_symbols)}ULL\n')
         f.write('static Module modules[] = {\n')
         for n, m in enumerate(modules):
             l = m['layout']
@@ -290,10 +354,11 @@ def runtime_tables(work, out, pins):
         print(f'warning: runtime_tables.h is {size >> 20} MiB; compiling it needs much memory', file=sys.stderr)
     (work / 'analysis').mkdir(exist_ok=True)
     with (work / 'analysis/runtime-layout.json').open('w') as f:
-        json.dump(modules, f, indent=2)
+        json.dump(dict(modules=modules, late_symbols=late_symbols), f, indent=2)
         f.write('\n')
     return dict(modules=[m['name'] for m in modules], relocations=sum(len(m['relocs']) for m in modules),
-                symbols=sum(len(m['symbols']) for m in modules), main_plt=hex(plt), tables_bytes=size, **nnmain)
+                symbols=sum(len(m['symbols']) for m in modules), main_plt=hex(plt), tables_bytes=size,
+                late_symbols=[ls['name'] for ls in late_symbols], **nnmain)
 
 
 def build_id(work):

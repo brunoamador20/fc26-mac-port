@@ -12,7 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))   # also under python -
 import game_config
 
 work = Path(os.environ.get('FC26_WORK') or os.environ.get('WORK') or Path(__file__).resolve().parents[1] / game_config.CONFIG['work'])
-modules = {m['name']: m for m in json.loads((work / 'analysis/runtime-layout.json').read_text())}
+_raw_layout = json.loads((work / 'analysis/runtime-layout.json').read_text())
+modules = {m['name']: m for m in (_raw_layout.get('modules', _raw_layout) if isinstance(_raw_layout, dict) else _raw_layout)}
 tables = {}
 for name, m in modules.items():
     rows = sorted((s['value'], s['size'], s['name']) for s in m['symbols'] if s['defined'] and s['type'] == 2 and s['value'])

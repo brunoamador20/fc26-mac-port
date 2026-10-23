@@ -5,6 +5,11 @@
 typedef struct { uint64_t where; unsigned kind, symbol; int64_t addend; } Reloc;
 typedef struct { const char *name; uint64_t value, size; unsigned defined, binding, type; } Symbol;
 typedef struct { uint64_t ret, original; unsigned timer, arg; } Gate;
+typedef struct { const char *name; const char *nro; } LateSymbol;
+typedef struct { void *slot; const char *name; const char *nro; } LateSlot;
+typedef LateSlot RuntimeLateSlot;
+/* Story 3 hook: array of unresolved strong import slots left at 0, for late relinking when NROs load */
+LateSlot *runtime_late_slots(unsigned *count);
 typedef struct {
  const char *name, *digest, *pre_digest; size_t file_size, size;
  /* pre_size: the pre-island (games/fc26/docs/ILHAS_NUVEM.md), mapped just before base at base-pre_size; 0 when unused. */

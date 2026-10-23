@@ -20,10 +20,12 @@ STAND_INS = {
     'runtime_tables.h': '''static const Reloc reloc_0[] = {{0ULL,1027,0,0LL},};
 static const Symbol symbol_0[] = {{"",0ULL,0ULL,0,0,0},};
 static const Gate gate_0[] = {{0,0,0,0},};
+static const LateSymbol late_symbols[] = {{NULL, NULL}};
 static Module modules[] = {''' + ','.join(f'{{.name="{m}",.digest="",.symbols=symbol_0,.nsym=1,.relocs=reloc_0,.nreloc=1,.gates=gate_0,.ngate=1}}'
                             for m in game_config.MODULES) + '''};
 #define PROBE_PLT 0ULL
 #define PROBE_SLOT 0ULL
+#define LATE_SYMBOL_COUNT 0ULL
 ''',
     'romfs_config.h': '#define ROMFS_IMAGE_SIZE 1ULL\n#define ROMFS_IMAGE_SHA256 ""\n#define ROMFS_INDEX_SHA256 ""\n',
     'shared_fonts_config.h': '#define SHARED_FONT_COUNT 6\n#define SHARED_FONT_ROWS ' + ','.join(['{"",0ULL,0ULL,""}'] * 6) + '\n',

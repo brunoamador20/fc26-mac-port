@@ -26,6 +26,26 @@
 pthread_key_t runtime_keys[8];
 static uint64_t timer_calls, svc_calls;
 static void need(bool c,const char *m) { if(!c) runtime_fail(m); }
+#define RUNTIME_MAX_LATE_SLOTS 128
+static LateSlot late_slots[RUNTIME_MAX_LATE_SLOTS];
+static unsigned late_slot_count;
+static const char *find_late_symbol(const char *name) {
+ for(const LateSymbol *ls=late_symbols;ls->name;ls++) {
+  if(!strcmp(ls->name,name)) return ls->nro;
+ }
+ return NULL;
+}
+static void record_late_slot(void *slot,const char *name,const char *nro) {
+ need(late_slot_count<RUNTIME_MAX_LATE_SLOTS,"too many late slots");
+ late_slots[late_slot_count].slot=slot;
+ late_slots[late_slot_count].name=name;
+ late_slots[late_slot_count].nro=nro;
+ late_slot_count++;
+}
+LateSlot *runtime_late_slots(unsigned *count) {
+ if(count) *count=late_slot_count;
+ return late_slots;
+}
 static size_t page_up(size_t x) { return (x+0x3fff)&~(size_t)0x3fff; }
 static unsigned hash_name(const char *s) { unsigned h=2166136261u; for(;*s;s++)h=(h^(uint8_t)*s)*16777619u;return h; }
 static void make_hash(Module *m) {
@@ -238,10 +258,16 @@ static void relocate(Module *m) {
    if(!p)p=runtime_override(s->name);
    if(p)p=runtime_hle_wrap_named(p,s->name);   /* host replacements run on the thread's host stack */
    if(!p)p=s->defined?(s->value<m->key_off?m->base+s->value:NULL):runtime_symbol(s->name);
-   if(!p&&s->binding!=2){fprintf(stderr,"%s unresolved %s\n",m->name,s->name);runtime_missing("import: %s needs %s",m->name,s->name);runtime_fail("strong import unresolved");}
+   const char *late_nro=NULL;
+   if(!p&&s->binding!=2){
+    late_nro=find_late_symbol(s->name);
+    if(!late_nro){fprintf(stderr,"%s unresolved %s\n",m->name,s->name);runtime_missing("import: %s needs %s",m->name,s->name);runtime_fail("strong import unresolved");}
+    fprintf(stderr,"[rtld] Unresolved symbol: '%s' (late: exported by %s)\n",s->name,late_nro);
+    record_late_slot(m->base+r->where,s->name,late_nro);
+   }
    if(!p)m->weak++;
    if(p&&!s->defined)m->cross++;
-   v=(uintptr_t)p+(r->kind==1026?0:r->addend);m->symbolic++;
+   v=late_nro?0:((uintptr_t)p+(r->kind==1026?0:r->addend));m->symbolic++;
   }
   memcpy(m->base+r->where,&v,8);
  }

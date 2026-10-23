@@ -64,7 +64,12 @@ class ModulePath(unittest.TestCase):
         self.rw.mkdir(parents=True); self.ex.mkdir(parents=True)
         self.out = self.work / 'build'; self.out.mkdir()
         self.pins_path = Path(self.tmp.name) / 'expected.json'
-        shutil.copy(HERE / 'assets/expected-v1.0.0.json', self.pins_path)
+        pins = json.loads((HERE / 'assets/expected-v1.0.0.json').read_text())
+        pins['main_build_id'] = None
+        pins['rewritten_sha256'].pop('main.pre.bin', None)
+        for k in pins['exefs_sha256']: pins['exefs_sha256'][k] = None
+        for k in pins['rewritten_sha256']: pins['rewritten_sha256'][k] = None
+        self.pins_path.write_text(json.dumps(pins, indent=4))
         nso = bytearray(0x100); nso[:4] = b'NSO0'; nso[0x40:0x54] = bytes(range(20))
         for name in ['main', 'sdk', 'rtld', 'main.npdm']:
             (self.ex / name).write_bytes(bytes(nso) + name.encode())

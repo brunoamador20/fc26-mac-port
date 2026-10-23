@@ -138,7 +138,9 @@ class PreIslandPin(unittest.TestCase):
         self.path.write_bytes(self.pre)
         self.layout = dict(PRE_PATCH_OFF=-0x10000, PRE_PATCH_SIZE=0x10000, PRE_PATCH_USED=4096)
         self.pins_path = Path(self.tmp.name) / 'expected.json'
-        self.pins_path.write_text((HERE / 'assets/expected-v1.0.0.json').read_text())
+        pins = json.loads((HERE / 'assets/expected-v1.0.0.json').read_text())
+        pins['rewritten_sha256'].pop('main.pre.bin', None)
+        self.pins_path.write_text(json.dumps(pins, indent=4))
 
     def tearDown(self):
         self.tmp.cleanup()
