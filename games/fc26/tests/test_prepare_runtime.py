@@ -147,7 +147,8 @@ class PreIslandPin(unittest.TestCase):
         return prepare_runtime.Pins(self.pins_path, record=record)
 
     def test_null_pin_needs_record_then_is_checked(self):
-        self.assertIn('main.pre.bin', json.loads(self.pins_path.read_text())['rewritten_sha256'])
+        # no main.pre.bin key yet (as in assets/expected-v1.0.0.json): like a null pin, --record writes it
+        self.assertIsNone(json.loads(self.pins_path.read_text())['rewritten_sha256'].get('main.pre.bin'))
         with self.assertRaises(SystemExit) as stop:
             prepare_runtime.pre_island(self.work, 'main', self.layout, self.pins(False))
         self.assertIn('--record', str(stop.exception))
