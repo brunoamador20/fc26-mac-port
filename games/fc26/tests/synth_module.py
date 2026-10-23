@@ -3,8 +3,10 @@
 Shape mirrors a real Switch module so patch_nso.py / structck.py / equiv.py exercise their real paths:
 NSO0 header (uncompressed), a module prologue whose word 4 points at MOD0, MOD0 with a dynamic table and an
 eh_frame_hdr listing function starts, and a .text seeded with x18 sites spread start-to-end, one ldxr/stxr
-exclusive window touching x18, one `br x18` jump table in the kit's ldrb-width form, and an svc. A random build id
-means no CUTS / OBS / PARAMS / SIGNED_TABLES apply, so the rewrite is the plain generic path.
+exclusive window touching x18, one GROUP of linked windows (an ldaxr/stlxr window plus the out-of-line ldaxr retry
+that re-enters it, both on x18: the rewriter's linked_windows / site_window_group path) in the first 16 KiB, one
+`br x18` jump table in the kit's ldrb-width form, and an svc. A fixed build id that matches no CUTS / OBS / PARAMS /
+SIGNED_TABLES entry keeps the rewrite on the plain generic path.
 
 small()  -> a few hundred KiB, fits with the default reach (no island) and spills to a pre-island at a small reach.
 giant()  -> text over 140 MiB in a single function (like FC 26's main: one eh_frame FDE, the chunked LazyInsns path).
@@ -25,8 +27,26 @@ def mov_from_x18(rd):            # mov x<rd>, x18  (orr x<rd>, xzr, x18): a plai
     return 0xAA0003E0 | (18 << 16) | rd
 
 
+# The linked-window group (word index; byte offset GROUP_WORD * 4 = 0x4000, low in the text so that a short routing
+# reach, or the real one on the giant module, sends it to the pre-island):
+#   +0 R0: ldaxr x8, [x18]        out-of-line retry: re-loads, then re-enters the window at its stlxr
+#   +1 R1: add   x9, x8, #1
+#   +2 R2: cbnz  x9, W2            -> into the middle of the window (linked_windows makes the pair one group)
+#   +3 R3: b     W4                (retry not taken: leave)
+#   +4 W0: ldaxr x8, [x18]        the window
+#   +5 W1: add   x9, x8, #1
+#   +6 W2: stlxr w10, x9, [x18]
+#   +7 W3: cbnz  w10, R0           store failed -> out-of-line retry
+#   +8 W4: (nop)
+GROUP_WORD = 0x1000
+GROUP_SPAN = 9
+GROUP_WORDS = [0xC85FFE48, 0x91000509, 0xB5000089, 0x14000005,
+               0xC85FFE48, 0x91000509, 0xC80AFE49, 0x35FFFF2A]
+GROUP_HEADS = (GROUP_WORD * 4, (GROUP_WORD + 4) * 4)   # R0 and W0: the two W rows the rewriter writes for the group
+
+
 def seed(words, nwords, n_sites):
-    """Spread x18 read sites, one exclusive window, an svc and a `br x18` jump table across `words`.
+    """Spread x18 read sites, one exclusive window, one linked-window group, an svc and a `br x18` jump table across `words`.
 
     Returns (n_x18_sites, window_at, svc_at, jump_base, jump_count)."""
     step = max(4, (nwords - 512) // max(1, n_sites))
@@ -35,7 +55,11 @@ def seed(words, nwords, n_sites):
         i = 8 + k * step
         if i >= nwords - 512:
             break
+        if GROUP_WORD - 4 <= i < GROUP_WORD + GROUP_SPAN + 4:   # keep plain sites clear of the group
+            continue
         words[i] = mov_from_x18(1); placed += 1
+    for j, w in enumerate(GROUP_WORDS):
+        words[GROUP_WORD + j] = w
     wi = min(nwords // 3 | 1, nwords - 512)      # exclusive window touching x18 (ldxr/add/stxr/cbnz retry)
     words[wi] = 0x885F7E41                        # ldxr w1, [x18]
     words[wi + 1] = 0x11000421                    # add  w1, w1, #1

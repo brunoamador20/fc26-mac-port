@@ -53,6 +53,45 @@ def btarget(buf, o):
     return o + 4 * imm
 
 
+def b_of(word, o):
+    """Target of an unconditional b at module offset o, else None."""
+    if word & 0xFC000000 != 0x14000000:
+        return None
+    return o + 4 * (((word & 0x3FFFFFF) ^ 0x2000000) - 0x2000000)
+
+
+def adrp_page(word, pc):
+    imm = ((word >> 29) & 3) | (((word >> 5) & 0x7FFFF) << 2)
+    return (pc & ~0xFFF) + (((imm ^ (1 << 20)) - (1 << 20)) << 12)
+
+
+def group_entry_problems(word_at, head_target, key_page):
+    """The linked-window group (synth_module.GROUP_*): each entry must be the full prologue
+    stp xS,xT,[sp,#-16] ; mrs xT,tpidrro_el0 ; adrp ->key page ; ldr ; add ; ldr xS,[xT] ; b <copy of the head>
+    where the copy is the head's own ldaxr with x18 renamed to xS. A wrong entry-branch offset leaves the nop in
+    place and/or overwrites another entry's stp (the bug the reviews found)."""
+    problems = []
+    for h in synth_module.GROUP_HEADS:
+        e = head_target(h)
+        if e is None:
+            problems.append(f'group head {h:#x} is not a b'); continue
+        w = [word_at(e + 4 * k) for k in range(7)]
+        S, T = w[0] & 31, (w[0] >> 10) & 31
+        if w[0] & 0xFFFF83E0 != 0xA93F03E0:
+            problems.append(f'entry {e:#x} (head {h:#x}) does not start with stp xS,xT,[sp,#-16]: {w[0]:#010x}'); continue
+        if w[1] != 0xD53BD060 | T:
+            problems.append(f'entry {e:#x}: word 1 is not mrs x{T},tpidrro_el0')
+        if w[2] & 0x9F000000 != 0x90000000 or adrp_page(w[2], e + 8) != key_page:
+            problems.append(f'entry {e:#x}: word 2 is not an adrp to the key page')
+        body = b_of(w[6], e + 24)
+        want = (synth_module.GROUP_WORDS[(h // 4) - synth_module.GROUP_WORD] & ~(31 << 5)) | (S << 5)
+        if body is None:
+            problems.append(f'entry {e:#x} (head {h:#x}): word 6 is {w[6]:#010x}, not the b into the copied body')
+        elif word_at(body) != want:
+            problems.append(f'entry {e:#x} (head {h:#x}): b lands on {word_at(body):#010x}, not the copied head {want:#010x}')
+    return problems
+
+
 class GoldenRule(unittest.TestCase):
     """A module that fits => no island, and the output equals the base-branch rewriter byte for byte."""
 
@@ -70,6 +109,17 @@ class GoldenRule(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse(os.path.exists(f'{out}/synth.pre.bin'), 'a fitting module must not make a pre-island')
         self.assertNotIn('PRE_PATCH', open(f'{out}/synth.fixups.tsv').read(), 'no PRE_ header lines when there is no island')
+
+    def test_group_entries_after_area(self):
+        """The linked-window group in the after-area (no island): entry prologues and entry branches intact."""
+        out = os.path.join(self.tmp, 'new'); os.makedirs(out)
+        self.assertEqual(run_rewriter(D2R, self.nso, out, {'DM_REACH_BITS': '27'}).returncode, 0)
+        pat = open(f'{out}/synth.patched.bin', 'rb').read()
+        h = header(out)
+        word_at = lambda o: struct.unpack_from('<I', pat, o)[0]
+        for g in synth_module.GROUP_HEADS:
+            self.assertGreaterEqual(btarget(pat, g), h['PATCH_OFF'])
+        self.assertEqual(group_entry_problems(word_at, lambda o: btarget(pat, o), h['KEY_PAGE_OFF']), [])
 
     def test_byte_identical_to_base_branch(self):
         """The real before/after: run the base-branch rewriter (+ its helpers) and diff every product."""
@@ -118,6 +168,13 @@ class PreIsland(unittest.TestCase):
     def test_file_and_header_consistent(self):
         self.assertEqual(len(self.pre), self.h['PRE_PATCH_SIZE'])
         self.assertEqual(self.pre_base, -self.h['PRE_PATCH_SIZE'])
+
+    def test_group_entries_in_island(self):
+        """The linked-window group routed to the pre-island: every entry keeps its stp/key-slot prologue and ends in
+        the b into the copied body (the entry branches are written into the island, at the island's own offsets)."""
+        for g in synth_module.GROUP_HEADS:
+            self.assertLess(btarget(self.pat, g), 0, f'group head {g:#x} should be routed to the pre-island')
+        self.assertEqual(group_entry_problems(self._word, lambda o: btarget(self.pat, o), self.h['KEY_PAGE_OFF']), [])
 
     def test_both_areas_used_and_heads_round_trip(self):
         pre_heads = after_heads = 0
@@ -177,7 +234,10 @@ class PreIsland(unittest.TestCase):
     def test_structck_bites_corrupted_island(self):
         bad = os.path.join(self.tmp, 'bad'); shutil.copytree(self.out, bad)
         d = bytearray(open(f'{bad}/synth.pre.bin', 'rb').read())
-        struct.pack_into('<I', d, 0x40, 0xD503201F)   # clobber a word inside a block
+        # clobber the key-page adrp right after the island's first mrs tpidrro_el0 (structck checks every key-slot
+        # sequence; a copied window body word is equiv's to check, not structck's)
+        at = next(o for o in range(0, len(d), 4) if struct.unpack_from('<I', d, o)[0] & 0xFFFFFFE0 == 0xD53BD060)
+        struct.pack_into('<I', d, at + 4, 0xD503201F)
         open(f'{bad}/synth.pre.bin', 'wb').write(d)
         r = self._structck(bad)
         self.assertNotEqual(r.returncode, 0, 'structck must fail on a corrupted pre-island')

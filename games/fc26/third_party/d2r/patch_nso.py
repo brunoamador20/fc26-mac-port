@@ -593,7 +593,7 @@ def site_window_group(segments):
     for seg in segments:
         entries[seg[0].address] = here()
         emit(STP(S, T, 31, -16)); emit(MRS_TPIDRRO(T)); emit_slot_addr(T, S, 'K18'); emit(LDRX(S, T))
-        entry_branches.append((len(patch), seg[0].address)); emit(NOP)
+        entry_branches.append((len(cur[0]), seg[0].address)); emit(NOP)   # 当前补丁区内的下标（前导岛时不是 patch）| index into the active patch area (not patch when routed to the pre-island)
     copied = {}; cursor = here()
     for seg in segments:
         for ins in seg: copied[ins.address] = cursor; cursor += 4
@@ -1205,6 +1205,10 @@ open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch
 PRE_USED = len(pre) > 0
 if PRE_USED:
     assert len(pre) <= PRE_PATCH_SIZE, f'前导岛超出预留 {len(pre):#x} > {PRE_PATCH_SIZE:#x} | pre-island over its reservation'
+    # place 的后区判据假定后区最高块不超过 PATCH_OFF + 上界：两区实际总量须在上界内（不用前导岛时不查，产物不变）
+    # place's after-area test assumes the highest after-area block stays under PATCH_OFF + the cap: the real total of both
+    # areas must fit the cap (not checked without a pre-island, so that output is unchanged)
+    assert len(patch) + len(pre) <= TOTAL_CAP, f'补丁总量超出上界 {len(patch) + len(pre):#x} > {TOTAL_CAP:#x} | patch total over the cap'
     open(P('pre.bin'), 'wb').write(bytes(pre) + bytes(PRE_PATCH_SIZE - len(pre)))
 elif os.path.exists(P('pre.bin')):
     os.unlink(P('pre.bin'))   # 重出时清掉旧前导岛，别让装载器用到过期文件 | clear a stale pre-island on rebuild so the loader never uses an out-of-date file
