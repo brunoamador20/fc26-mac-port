@@ -2,6 +2,7 @@
 ListDisplays, CreateLayer, DestroyLayer, SetLayerCrop, CloseDisplay, Finalize.
 """
 from pathlib import Path
+import json
 import os
 import shutil
 import struct
@@ -12,7 +13,8 @@ import unittest
 import lz4.block
 
 HERE = Path(__file__).resolve().parents[1]
-MAIN_NSO = (Path.home() / 'fc26-switch/work/extracted/v100/exefs/main')
+# the main of the version the port runs (assets/game.json version_dir): the overrides must still match its imports
+MAIN_NSO = (Path.home() / 'fc26-switch/work/extracted') / json.loads((HERE / 'assets/game.json').read_text())['version_dir'] / 'exefs/main'
 PLATFORM_NVN = (Path.home() / 'fc26-switch/work/nro/Engine.Render.Core2.PlatformNvn.nro')
 
 

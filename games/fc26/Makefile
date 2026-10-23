@@ -4,7 +4,7 @@
 # The game's identity and module list are in assets/game.json (scripts/game_config.py). Everything generated goes to the
 # work folder. Inputs come from scripts/extract_exefs.py, scripts/extract_romfs.py and the rewrite (story 1), then:
 #   make prepare   # scripts/prepare_runtime.py: tables, RomFS index, fonts config (PREPARE_FLAGS=--record the first time)
-#   make runtime   # <work>/build/fc26-native
+#   make runtime   # <work>/build/fc26-native (OUT=<dir>: prepare + runtime into another folder, e.g. a second version's)
 #   make probe     # modules mapped and linked, cross-module calls on 4 threads (no game code beyond that)
 #   make boot      # run it from the work folder (cwd: extracted/ and rewritten/ are read relative to it)
 #   make boot-nnmain  # story 2's check: stop with a JSON verdict at the original nnMain's entry
@@ -43,7 +43,7 @@ check-config:
 
 PREPARE_FLAGS ?=
 prepare:   # prepare_runtime.py runs the check-config checks itself
-	"$(PY)" scripts/prepare_runtime.py --work "$(WORK)" $(PREPARE_FLAGS)
+	"$(PY)" scripts/prepare_runtime.py --work "$(WORK)" --out "$(OUT)" $(PREPARE_FLAGS)
 
 $(GENERATED):
 	@echo "missing $@: run make prepare" && false

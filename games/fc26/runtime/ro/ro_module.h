@@ -7,7 +7,7 @@
 #include "ro_core.h"
 
 /* Where the rewritten images and nro_manifest.tsv are: FC26_RO_DIR when set, else the directory given here (loader.c's
-   main can pass argv[1]), else rewritten/v100 relative to the working directory (the Makefile runs from the work folder). */
+   main can pass argv[1]), else rewritten/<TOTK_GAME_DIR> relative to the working directory (the Makefile runs from the work folder). */
 void ro_module_set_dir(const char *dir);
 
 /* Map the rewrite of the NRO the client handed over (nro: its bytes, checked and authorized by the caller; sha256: of

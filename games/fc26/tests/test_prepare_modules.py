@@ -162,6 +162,33 @@ class ModulePath(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.out.iterdir()), [])
         self.assertEqual((romfs / 'runtime-index.bin').read_bytes(), b'old index')
 
+    def test_out_leaves_the_build_folder_alone(self):
+        # Story H1: --out <dir> (make OUT=<dir> prepare) replaces the headers there; <work>/build, the runtime another
+        # session builds and runs, keeps its own.
+        other = self.work / 'build-update'; other.mkdir()
+        for folder in (self.out, other):
+            for name in ('runtime_tables.h', 'romfs_config.h', 'shared_fonts_config.h'):
+                (folder / name).write_text('/* an earlier run */')
+        self.manifest(self.nsp_size + 1)   # exefs_pins stops, after the stale headers of the target folder are gone
+        saved, argv = pr.game_config.EXPECTED_PATH, sys.argv
+        pr.game_config.EXPECTED_PATH, sys.argv = self.pins_path, ['prepare_runtime.py', '--work', str(self.work),
+                                                                   '--out', str(other), '--record']
+        try:
+            with self.assertRaises(SystemExit):
+                pr.main()
+        finally:
+            pr.game_config.EXPECTED_PATH, sys.argv = saved, argv
+        self.assertEqual(sorted(p.name for p in other.iterdir()), [])
+        self.assertEqual(sorted(p.name for p in self.out.iterdir()), ['romfs_config.h', 'runtime_tables.h', 'shared_fonts_config.h'])
+
+    def test_out_gets_the_layout(self):
+        layout = self.out.parent / 'build-update/runtime-layout.json'; layout.parent.mkdir()
+        pins = pr.Pins(self.pins_path, record=True)
+        pr.exefs_pins(self.work, pins)
+        pr.runtime_tables(self.work, layout.parent, pins, layout)
+        self.assertEqual([m['name'] for m in json.loads(layout.read_text())['modules']], ['main', 'sdk'])
+        self.assertFalse((self.work / 'analysis/runtime-layout.json').exists())
+
     def test_no_plt_call_of_nnmain_warns(self):
         self.write_modules(sdk_jmprel=[])
         err = io.StringIO()

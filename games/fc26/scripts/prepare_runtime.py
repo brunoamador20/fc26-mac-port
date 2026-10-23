@@ -3,6 +3,8 @@
 
 Writes <work>/build/runtime_tables.h (modules, symbols, relocations, gates), romfs_config.h and
 extracted/<version>/romfs/runtime-index.bin (the RomFS index the runtime reads), and shared_fonts_config.h.
+--out <dir> puts the three headers (and runtime-layout.json) in another folder instead, for a second runtime built
+with `make OUT=<dir>` next to the one in <work>/build (story H1: the update's runtime while the base's is in use).
 The modules, their order and the version folder come from assets/game.json (scripts/game_config.py). Every input is
 checked against assets/expected-v<version>.json first.
 
@@ -312,9 +314,9 @@ def find_late_symbols(work, modules):
     return late
 
 
-def runtime_tables(work, out, pins):
-    """runtime_tables.h and analysis/runtime-layout.json, written as they are made: main's tables can be large, and the
-    Mac has 8 GB."""
+def runtime_tables(work, out, pins, layout_path=None):
+    """runtime_tables.h and analysis/runtime-layout.json (layout_path), written as they are made: main's tables can be
+    large, and the Mac has 8 GB."""
     modules = [module_table(work, n, pins, keep_image=(i == 0)) for i, n in enumerate(MODULES)]
     nnmain = check_required(modules)
     late_symbols = find_late_symbols(work, modules)
@@ -352,8 +354,9 @@ def runtime_tables(work, out, pins):
         # TODO(mac): measure clang's time and memory on this header; if it does not fit the 8 GB Mac, load the
         # relocation rows from a binary file instead of C arrays.
         print(f'warning: runtime_tables.h is {size >> 20} MiB; compiling it needs much memory', file=sys.stderr)
-    (work / 'analysis').mkdir(exist_ok=True)
-    with (work / 'analysis/runtime-layout.json').open('w') as f:
+    layout_path = layout_path or work / 'analysis/runtime-layout.json'
+    layout_path.parent.mkdir(exist_ok=True)
+    with layout_path.open('w') as f:
         json.dump(dict(modules=modules, late_symbols=late_symbols), f, indent=2)
         f.write('\n')
     return dict(modules=[m['name'] for m in modules], relocations=sum(len(m['relocs']) for m in modules),
@@ -431,17 +434,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--work', type=Path, default=HERE / game_config.CONFIG['work'])
     parser.add_argument('--record', action='store_true', help='write the measured value of every null pin (see above)')
+    parser.add_argument('--out', type=Path, help='folder for the headers (default <work>/build; see above)')
     args = parser.parse_args()
     problems = game_config.check_config() + game_config.check_game_version_h()
     need(not problems, '; '.join(problems))
     work = args.work.resolve()
-    out = work / 'build'
+    out = args.out.resolve() if args.out else work / 'build'
     out.mkdir(parents=True, exist_ok=True)
+    layout_path = work / 'analysis/runtime-layout.json' if out == work / 'build' else out / 'runtime-layout.json'
     for stale in ('runtime_tables.h', 'romfs_config.h', 'shared_fonts_config.h'):   # a run that stops leaves at least
         (out / stale).unlink(missing_ok=True)                                     # one missing: make runtime stops too
     pins = Pins(game_config.EXPECTED_PATH, args.record)
     exefs_pins(work, pins)
-    runtime = runtime_tables(work, out, pins)
+    runtime = runtime_tables(work, out, pins, layout_path)
     fonts = shared_fonts_config(work, out)
     romfs = romfs_config(work, out, pins)   # last: it replaces the RomFS index a built runtime checks
     pins.save()

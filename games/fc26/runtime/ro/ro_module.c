@@ -1,6 +1,7 @@
 /* See ro_module.h. Mapping follows loader.c's map_module / seal for the Mac (not the iOS embedding path). */
 #include "ro_module.h"
 #include "ro_sha256.h"
+#include "../game_version.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,7 +30,7 @@ void ro_module_set_dir(const char *dir) { snprintf(given_dir, sizeof given_dir, 
 
 static const char *image_dir(void) {
     const char *env = getenv("FC26_RO_DIR");
-    return env && *env ? env : given_dir[0] ? given_dir : "rewritten/v100";
+    return env && *env ? env : given_dir[0] ? given_dir : "rewritten/" TOTK_GAME_DIR;
 }
 
 static _Noreturn void setup_error(const char *what, const char *detail) {

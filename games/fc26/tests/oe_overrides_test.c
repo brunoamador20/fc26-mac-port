@@ -150,7 +150,7 @@ int main(int argc, char **argv) {
     }
     DisplayVersion dv = {{0}};
     get_disp_ver(&dv);
-    assert(strcmp(dv.version, "1.0.0") == 0);
+    assert(strcmp(dv.version, "1.89.6e65") == 0);   /* the update's control.nacp (story H1), not the base's 1.0.0 */
 
     /* 6. Void applet controls: DisableScreenShot, Enter/LeaveExitRequestHandlingSection */
     void (*disable_ss)(void) = (void (*)(void))runtime_override("_ZN2nn2oe17DisableScreenShotEv");

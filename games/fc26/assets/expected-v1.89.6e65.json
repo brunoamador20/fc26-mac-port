@@ -1,0 +1,24 @@
+{
+    "_comment": "Pinned FC 26 update v1638400 (display version 1.89.6e65) inputs, story H1 (2026-10-23): ExeFS from the update NSP (scripts/extract_exefs.py --update on servidor-de-build; sdk and rtld byte-identical to 1.0.0's, main and main.npdm new), rewrite bytes (main rewritten on servidor-de-build with this tree's patch_nso.py: 0 cuts, structck and equiv OK; sdk is 1.0.0's rewrite, same input) and the RomFS: the update's BKTR section over the base's, the whole IVFC level 5 dumped by hactool 1.4.0 after hactool -y found all six levels GOOD, each block re-checked against level 4, 307 files. Values measured on servidor-de-build and the Mac; prepare_runtime.py checks them. Hashes are not game data. The base's pins are in expected-v1.0.0.json.",
+    "title_id": "01004FF021942000",
+    "display_version": "1.89.6e65",
+    "source_nsp_size": 24716696655,
+    "main_build_id": "323F3A9F3F0426C97610DC9066F4E67E00000000",
+    "exefs_sha256": {
+        "main": "b2fbada9f5f24416d6df5d715a86672c1c49c3150676a633635f8c53858de467",
+        "main.npdm": "50bd677af512aff99329266166e1b5c06cf3a43255453d0202dd7bc7a50329eb",
+        "rtld": "a7f51c03c7e3a06aa49f9a114f9c1d876a6cd37a2394c4ebb25b05daaeb0a107",
+        "sdk": "194889754042a3f8180d14829b177ba84105920adf55e6d7d559cf91c0bc0968"
+    },
+    "rewritten_sha256": {
+        "main.patched.bin": "3d354f5c3e72e9b967b6f021f7fef70d6fd9ca7cbbde76fdb23f402b75d5c492",
+        "sdk.patched.bin": "8eed8598b56b3951a59418dc45caa29598e335092367100de832e0c00dd15fcb",
+        "main.pre.bin": "477f9c39da9aca9d1b367cb272ccafa5a60774c64b4d35b691d2f9e9d2112967"
+    },
+    "romfs": {
+        "size": 37806915224,
+        "files": 307,
+        "sha256_prefix": "f7c6444d69ad",
+        "sha256": "f7c6444d69ad090ae4afb440acdbdf5841becc61b89137d834485305982ec090"
+    }
+}

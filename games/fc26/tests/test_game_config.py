@@ -19,6 +19,15 @@ class GameConfig(unittest.TestCase):
         self.assertEqual(game_config.check_config(), [])
         self.assertEqual(game_config.check_game_version_h(), [])
 
+    def test_runtime_takes_the_version_from_game_version_h(self):
+        # Story H1: the display version (nn::oe::GetDisplayVersion) and the rewritten folder (runtime/ro) follow
+        # TOTK_GAME_VERSION / TOTK_GAME_DIR; a literal copy elsewhere stays behind when the version changes.
+        literals = [json.dumps(v) for v in ('1.0.0', '1.89.6e65')] + ['"rewritten/v']
+        found = [f'{path.relative_to(HERE)}: {lit}' for path in sorted((HERE / 'runtime').rglob('*'))
+                 if path.suffix in ('.c', '.m', '.h') and path.name != 'game_version.h'
+                 for lit in literals if lit in path.read_text(errors='replace')]
+        self.assertEqual(found, [])
+
     def test_fc26_modules(self):
         # BRIEFING: main + sdk (+ rtld) and no subsdk0; the loader maps main first.
         self.assertEqual(game_config.MODULES, ['main', 'sdk'])
@@ -28,7 +37,7 @@ class GameConfig(unittest.TestCase):
     def test_identity(self):
         c = game_config.CONFIG
         self.assertEqual((c['title_id'], c['update_title_id'], c['display_version'], c['version_dir']),
-                         ('01004FF021942000', '01004FF021942800', '1.0.0', 'v100'))
+                         ('01004FF021942000', '01004FF021942800', '1.89.6e65', 'v1638400'))
         self.assertEqual(c['rewrite_env'], {'DM_RULESET': 'native', 'DM_PRIVATE_GATES': '0'})
 
     def test_extractor_checks_the_same_title(self):
@@ -52,8 +61,8 @@ class GameConfig(unittest.TestCase):
         run = subprocess.run(['make', '-n', '-C', str(HERE), 'probe', 'boot', 'rewrite', 'WORK=/nonexistent/work', f'PY={sys.executable}'],
                              capture_output=True, text=True)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        self.assertIn('./build/fc26-native rewritten/v100 probe', run.stdout)
-        self.assertIn('./build/fc26-native rewritten/v100 boot', run.stdout)
+        self.assertIn('./build/fc26-native rewritten/v1638400 probe', run.stdout)
+        self.assertIn('./build/fc26-native rewritten/v1638400 boot', run.stdout)
         self.assertIn('for m in main sdk;', run.stdout)
         self.assertIn('rewrite-env', run.stdout)
         check = subprocess.run(['make', '-s', '-C', str(HERE), 'check-config', f'PY={sys.executable}'], capture_output=True, text=True)

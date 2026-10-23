@@ -2,6 +2,7 @@
    Client-side SDK code (PlayReport encoding, keyboard presets, diag logging) runs unchanged; only the
    calls that would talk to system services are taken here. */
 #include "runtime.h"
+#include "game_version.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,7 +46,7 @@ static void leave_exit_request_section(void) {}
 static void get_display_version(char *out) {
     if (!out) runtime_fail("null display version pointer");
     memset(out, 0, 16);
-    strncpy(out, "1.0.0", 15);
+    strncpy(out, TOTK_GAME_VERSION, 15);   /* the control.nacp display version (game_version.h) */
 }
 static uint8_t s_pseudo_device[16];
 static int s_pseudo_device_init;
