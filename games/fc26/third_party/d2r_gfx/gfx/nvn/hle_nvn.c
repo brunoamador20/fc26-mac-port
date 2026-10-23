@@ -1265,6 +1265,7 @@ static void *rec(NVNcommandBuffer *c, uint32_t op, size_t payload) {
     return p + 8;
 }
 #define REC(c, OP, T) ((T *)rec((c), (OP), sizeof(T)))
+void *nvn_rec(NVNcommandBuffer *c, uint32_t op, size_t payload) { return rec(c, op, payload); }   // FC 26: records for fc26_nvn_ext.c
 // 带数组的绑定记录按实际个数分配：前缀字段 + n 个元素（回放端只读前 n 个）。原先按最大个数定长记（绑顶点缓冲 272 字节、绑贴图 / 采样器 280 字节，
 // 实际常只有 1–2 个），空尾占每帧命令字节的四到五成；88 级法师的高级属性页每帧录 12.5 MB，把游戏自己的命令内存池（约每帧 105 段 × 128 KB）用空
 // Binding records with arrays are allocated by the actual count: prefix fields + n elements (the replay side reads only the first n). Previously they were recorded at fixed length for the maximum count (bind vertex buffers 272 bytes, bind textures / samplers 280 bytes,

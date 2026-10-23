@@ -21,6 +21,14 @@ NVN_NOPROTO(nvnEventGetMemoryOffset, int64_t, const NVNevent *e) { return ((cons
    compares it with 1); the builder answers the same, so a builder and the texture made from it agree. */
 NVN_NOPROTO(nvnTextureBuilderGetRawStorageClass, int, const NVNtextureBuilder *b) { (void)b; return 1; }
 
+// ---------- Copy strides: bytes between 2D images (array layers / 3D slices) in the buffer of later buffer <-> texture
+// copies, 0 = tightly packed. Command buffer state like the row stride (OP_COPY_STRIDE), replayed in order. ----------
+void *nvn_rec(NVNcommandBuffer *c, uint32_t op, size_t payload);   // hle_nvn.c: appends a command record
+NVN(nvnCommandBufferSetCopyImageStride, void, NVNcommandBuffer *c, ptrdiff_t st) {
+    if (st < 0) die("nvnCommandBufferSetCopyImageStride %td: negative image stride not supported by the Metal copies", st);
+    ((p_copy_stride *)nvn_rec(c, OP_COPY_IMG_STRIDE, sizeof(p_copy_stride)))->stride = st;
+}
+
 // ---------- Programmable sample locations repeated over a pixel grid: Metal's custom sample positions are the same for
 // every pixel, and this layer applies no sample locations at all (SetSampleLocations stores nothing). The flag is kept
 // for the state object; enabling it is reported once and drawing uses the standard positions. ----------
