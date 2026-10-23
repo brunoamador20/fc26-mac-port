@@ -2087,6 +2087,15 @@ static int g_red_once[128];
 // ---------- Texture → MTLTexture ----------
 static int fmt_compressed(int f) { return (f >= 0x41 && f <= 0x50) || (f >= 0x79 && f <= 0x94); }
 static int fmt_depth(int f) { return f >= 0x31 && f <= 0x36; }
+/* FC 26 / Metal: Metal requires depth/stencil pixel formats to be of type MTLTextureType2D[Array] or Cube[Array].
+   1D depth/stencil textures (NVN 0x31..0x36 / fmt_depth, e.g. Frostbite dummy/fallback tables) are promoted to 2D/2DArray with height 1. */
+static inline MTLTextureType depth_promote_type(int format, MTLTextureType type) {
+    if (fmt_depth(format)) {
+        if (type == MTLTextureType1D) return MTLTextureType2D;
+        if (type == MTLTextureType1DArray) return MTLTextureType2DArray;
+    }
+    return type;
+}
 typedef struct { MTLPixelFormat a, b; } pfv_pair;
 static const pfv_pair g_pfv_srgb[] = {
     {MTLPixelFormatRGBA8Unorm, MTLPixelFormatRGBA8Unorm_sRGB},
@@ -2636,6 +2645,7 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
         case 10: RED_ONCE(1, "缓冲贴图（TARGET_BUFFER）未实现"); return nil;
         default: d.textureType = MTLTextureType2D; break;
     }
+    d.textureType = depth_promote_type(t->d.format, d.textureType);
     d.storageMode = MTLStorageModePrivate;   // 渲染目标与素材都放 GPU 私有存储（可用无损压缩） | Render targets and assets both go in GPU private storage (lossless compression available)
     d.usage = MTLTextureUsageShaderRead | (fmt_compressed(t->d.format) || packaged ? 0 : MTLTextureUsageRenderTarget)
             | (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE ? MTLTextureUsageShaderWrite : 0)   // 图像用途：着色器可写（计算核生成 3D 调色表等） | Image usage: shader-writable (compute kernels generating the 3D color lookup table, etc.)
@@ -5469,6 +5479,7 @@ static id<MTLTexture> tex_by_id(int tid) {   // 调用方持 g_rmu | Caller hold
         NSUInteger s0 = r.v.set_layers ? r.v.min_layer : 0;
         NSUInteger ns = base.textureType == MTLTextureType3D ? 1 : (r.v.set_layers && r.v.nlayers ? r.v.nlayers : base.arrayLength * (base.textureType == MTLTextureTypeCube || base.textureType == MTLTextureTypeCubeArray ? 6 : 1) - s0);
         MTLTextureType tt = r.v.set_target ? ttype(r.v.target, base.textureType) : base.textureType;
+        tt = depth_promote_type(r.t.d.format, depth_promote_type(r.v.set_format ? r.v.format : r.t.d.format, tt));   // base or view depth: a 1D view over a promoted base is 2D too
         if (tt == MTLTextureType2D && ns > 1) ns = 1;
         /* TOTK containment: an invalid view must never reach the GPU (full-game runs kernel-panicked macOS; a run with
            submission disabled then hit Metal rejecting an R32Float 1-level texture viewed as BC3 sRGB with 9 levels).
