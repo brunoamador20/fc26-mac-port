@@ -232,7 +232,7 @@ static void map_module(Module *m,const char *dir) {
  uint64_t *key=(void *)(m->base+m->key_off);
  for(unsigned i=0;i<8;i++)key[i]=runtime_keys[i]*8;
  make_hash(m);
- fprintf(stderr,"[totk] mapped %s size=%zu pre=%#llx symbols=%u\n",m->name,m->size,(unsigned long long)m->pre_size,m->nsym);
+ fprintf(stderr,"[totk] mapped %s base=%p size=%zu pre=%#llx symbols=%u\n",m->name,(void *)m->base,m->size,(unsigned long long)m->pre_size,m->nsym);
 }
 /* TOTK_EXPORT_IOS=<dir>: after the game patches, write each module's text [0, page_up(TEXT_END)) for ios/tools/gen_embed.py.
    Relocations never reach the text (they start at DATA_OFF), so the exported bytes differ from the verified image only at
@@ -515,6 +515,11 @@ int main(int argc,char **argv) {
  if(!strcmp(argv[2],"export-ios")){const char *out=getenv("TOTK_EXPORT_IOS");need(out!=NULL,"export-ios needs TOTK_EXPORT_IOS=<dir>");export_ios_text(argv[1],out);return 0;}
 #endif
  verify_identity(!strcmp(argv[2],"probe-identity-negative"));
+ {const char *e=getenv("FC26_BRK");   /* diagnostics: FC26_BRK=main:75c5430,sdk:1234 writes brk #0 there after the image checks; crash() reports the state */
+  while(e&&*e){const char *c=strchr(e,':');if(!c)break;size_t n=(size_t)(c-e);uint64_t off=strtoull(c+1,NULL,16);
+   for(unsigned i=0;i<NM;i++)if(strlen(modules[i].name)==n&&!strncmp(modules[i].name,e,n)&&off+4<=modules[i].size){uint8_t *at=(uint8_t *)modules[i].base+off;
+    *(uint32_t *)at=0xd4200000u;sys_icache_invalidate(at,4);fprintf(stderr,"[fc26] brk at %s+%#llx\n",modules[i].name,(unsigned long long)off);}
+   e=strchr(c,',');if(e)e++;}}
  for(unsigned i=0;i<NM;i++){seal(&modules[i]);check_permissions(&modules[i]);}
  ro_module_init_sdk();   /* initialize nn::ro::detail globals in sdk */
  if(!strcmp(argv[2],"probe-ro"))return ro_module_probe()?1:0;   /* every image of nro_manifest.tsv: map, imports */
