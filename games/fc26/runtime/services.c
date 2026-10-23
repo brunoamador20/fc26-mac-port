@@ -245,6 +245,19 @@ static void operation_enabled(unsigned value) {operation_notification=value&255;
 static void performance_enabled(unsigned value) {performance_notification=value&255;}
 static uint32_t performance_configuration[2];
 static void performance_config(int mode,int cfg) {if(mode<0||mode>1)runtime_fail("invalid performance mode");performance_configuration[mode]=(uint32_t)cfg;fprintf(stderr,"[totk] performance request mode=%d cfg=%x: native macOS scheduling\n",mode,(uint32_t)cfg);}
+static int get_performance_config(int mode) {
+ if(mode<0||mode>1)runtime_fail("invalid performance mode");
+ if(performance_configuration[mode])return (int)performance_configuration[mode];
+ return mode?0x00020003:0x00010001;
+}
+static void default_display_resolution(int *w,int *h) {
+ if(handheld_mode()){if(w)*w=1280;if(h)*h=720;}
+ else{if(w)*w=1920;if(h)*h=1080;}
+}
+static void default_display_resolution_change_event(void *ev) {
+ if(!ev)runtime_fail("null display resolution change event");
+ hle_bind_system_event(ev,1);
+}
 /* The game's language: TOTK_LANG as given (a Switch language code), otherwise from a locale: TOTK_LOCALE, which the
    launcher sets to the app's first preferred language (BCP 47, e.g. "pt-BR"; it follows a per-app language), or else
    the Mac's current locale. */
@@ -289,6 +302,9 @@ void *runtime_override(const char *name) {
  static const struct {const char *name;void *fn;} entries[]={
   {"_ZN2nn2oe18GetDesiredLanguageEv",runtime_desired_language},
   {"_ZN2nn2oe27SetPerformanceConfigurationENS0_15PerformanceModeEi",performance_config},
+  {"_ZN2nn2oe27GetPerformanceConfigurationENS0_15PerformanceModeE",get_performance_config},
+  {"_ZN2nn2oe27GetDefaultDisplayResolutionEPiS1_",default_display_resolution},
+  {"_ZN2nn2oe38GetDefaultDisplayResolutionChangeEventEPNS_2os11SystemEventE",default_display_resolution_change_event},
   {"_ZN2nn2oe15SetCpuBoostModeENS0_12CpuBoostModeE",cpu_boost},{"_ZN2nn2oe16GetOperationModeEv",operation_mode},{"_ZN2nn2oe18GetPerformanceModeEv",performance_mode},
   {"_ZN2nn2oe20SetFocusHandlingModeENS0_17FocusHandlingModeE",focus_mode},{"_ZN2nn2oe20GetCurrentFocusStateEv",focus_state},
   {"_ZN2nn2oe28SetResumeNotificationEnabledEb",resume_enabled},{"_ZN2nn2oe42SetOperationModeChangedNotificationEnabledEb",operation_enabled},{"_ZN2nn2oe44SetPerformanceModeChangedNotificationEnabledEb",performance_enabled},

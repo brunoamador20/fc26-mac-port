@@ -4,7 +4,13 @@
 #include "runtime.h"
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/file.h>
+#include <unistd.h>
+#include <errno.h>
 
 /* ---------- nn::oe ---------- */
 static float balance[2] = {1.0f, 1.0f};
@@ -12,11 +18,62 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t message_cv = PTHREAD_COND_INITIALIZER;
 static uint32_t messages[32]; static unsigned head, tail;
 static uint64_t start_ns;
+static uint8_t message_event[64] __attribute__((aligned(8)));
+static int message_event_bound;
 __attribute__((constructor)) static void started(void) { start_ns = runtime_now_ns(); }
 
 void runtime_oe_push_message(uint32_t message) {
     pthread_mutex_lock(&lock);
     if (tail - head < 32) { messages[tail++ % 32] = message; pthread_cond_broadcast(&message_cv); }
+    pthread_mutex_unlock(&lock);
+    if (message_event_bound) hle_signal_system_event(message_event);
+}
+static void *get_notification_message_event(void) {
+    if (!message_event_bound) {
+        hle_bind_system_event(message_event, 0);
+        message_event_bound = 1;
+        pthread_mutex_lock(&lock);
+        int pending = (head != tail);
+        pthread_mutex_unlock(&lock);
+        if (pending) hle_signal_system_event(message_event);
+    }
+    return message_event;
+}
+static void disable_screen_shot(void) {}
+static void enter_exit_request_section(void) {}
+static void leave_exit_request_section(void) {}
+static void get_display_version(char *out) {
+    if (!out) runtime_fail("null display version pointer");
+    memset(out, 0, 16);
+    strncpy(out, "1.0.0", 15);
+}
+static uint8_t s_pseudo_device[16];
+static int s_pseudo_device_init;
+static void get_pseudo_device_id(void *out) {
+    if (!out) runtime_fail("null pseudo device id pointer");
+    pthread_mutex_lock(&lock);
+    if (!s_pseudo_device_init) {
+        const char *dir = getenv("TOTK_PROFILE_DIR");
+        if (!dir) dir = "user-data";
+        if (mkdir(dir, 0700) && errno != EEXIST) runtime_fail("create local profile directory for pseudo device id");
+        char path[4096];
+        if (snprintf(path, sizeof(path), "%s/pseudo_device.uuid", dir) >= (int)sizeof(path))
+            runtime_fail("local pseudo device id path length");
+        int fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW, 0600);
+        if (fd < 0 || flock(fd, LOCK_EX)) runtime_fail("open local pseudo device id");
+        struct stat st;
+        if (fstat(fd, &st) || !S_ISREG(st.st_mode)) runtime_fail("invalid local pseudo device id file");
+        if (st.st_size == 0) {
+            arc4random_buf(s_pseudo_device, sizeof(s_pseudo_device));
+            if (write(fd, s_pseudo_device, sizeof(s_pseudo_device)) != sizeof(s_pseudo_device) || fsync(fd))
+                runtime_fail("persist local pseudo device id");
+        } else if (st.st_size != sizeof(s_pseudo_device) || pread(fd, s_pseudo_device, sizeof(s_pseudo_device), 0) != sizeof(s_pseudo_device)) {
+            runtime_fail("corrupt local pseudo device id file");
+        }
+        close(fd);
+        s_pseudo_device_init = 1;
+    }
+    memcpy(out, s_pseudo_device, sizeof(s_pseudo_device));
     pthread_mutex_unlock(&lock);
 }
 static void get_balance(float *l, float *r) { pthread_mutex_lock(&lock); if (l) *l = balance[0]; if (r) *r = balance[1]; pthread_mutex_unlock(&lock); }
@@ -82,6 +139,12 @@ void *runtime_applet_override(const char *name) {
         {"_ZN2nn2oe44SetUserInactivityDetectionTimeExtendedUnsafeEb", inactivity_extended},
         {"_ZN2nn2oe17FinishStartupLogoEv", finish_startup_logo}, {"_ZN2nn2oe25TryPopNotificationMessageEPj", try_pop},
         {"_ZN2nn2oe22PopNotificationMessageEv", pop},
+        {"_ZN2nn2oe17DisableScreenShotEv", disable_screen_shot},
+        {"_ZN2nn2oe17GetDisplayVersionEPNS0_14DisplayVersionE", get_display_version},
+        {"_ZN2nn2oe17GetPseudoDeviceIdEPNS_4util4UuidE", get_pseudo_device_id},
+        {"_ZN2nn2oe27GetNotificationMessageEventEv", get_notification_message_event},
+        {"_ZN2nn2oe31EnterExitRequestHandlingSectionEv", enter_exit_request_section},
+        {"_ZN2nn2oe31LeaveExitRequestHandlingSectionEv", leave_exit_request_section},
         {"_ZN2nn5prepo10PlayReport4SaveEv", report_save}, {"_ZN2nn5prepo10PlayReport4SaveERKNS_7account3UidE", report_save_uid},
         {"_ZN2nn5prepo28RequestImmediateTransmissionEv", immediate_transmission},
         {"_ZN2nn5prepo27AddInternetConnectionStatusEPNS0_10PlayReportEPKcS4_S4_", connection_status},
