@@ -16,6 +16,8 @@ from call_window import (
     movable_store,
     prepare_call,
 )
+from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+from structck import is_call_prefix_safe, RX18
 
 FC26_BUILD_ID = '863e52bfec7ab17b92fb347967f0619d'
 PATCH_ADDR = 0x2000
@@ -257,6 +259,93 @@ class CallWindowMainCallsRegressionTest(unittest.TestCase):
                         movable_store(word, prefix_addr)
                 else:
                     movable_store(word, prefix_addr)
+
+
+def safe_old(first):
+    """The legacy rule in structck prior to alignment."""
+    if not (first and first.mnemonic in ('str', 'stp', 'stur', 'ldr', 'ldp', 'ldur') and not first.writeback):
+        return False
+    if not first.operands or not hasattr(first.operands[-1], 'mem'):
+        return False
+    base = first.reg_name(first.operands[-1].mem.base)
+    return (
+        base in ('sp', 'fp')
+        and not first.operands[-1].mem.index
+        and (base != 'sp' or first.operands[-1].mem.disp >= 0)
+        and not RX18.search(first.op_str)
+    )
+
+
+class StructckCallPrefixAlignmentTest(unittest.TestCase):
+    """Test structck call prefix alignment: size variants, registered exception, and rejection rules."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        cls.md.detail = True
+
+    def _disasm(self, word, addr):
+        return next(self.md.disasm(struct.pack('<I', word), addr), None)
+
+    FOUR_PROBLEM_CALLS = [
+        (0x7f0ce24, 0x7f0ce20, 0x381b83a8, 'sturb w8, [x29, #-0x48]'),
+        (0x7f17614, 0x7f17610, 0x381b83a8, 'sturb w8, [x29, #-0x48]'),
+        (0x814c01c, 0x814c018, 0xad090aa1, 'stp q1, q2, [x21, #0x120]'),
+        (0x84098c0, 0x84098bc, 0x381983a8, 'sturb w8, [x29, #-0x68]'),
+    ]
+
+    def test_four_problem_calls_fail_under_old_rule_and_pass_aligned_structck(self):
+        """The 4 windows failing in structck fail under safe_old and pass under aligned is_call_prefix_safe."""
+        for call_addr, prefix_addr, word, desc in self.FOUR_PROBLEM_CALLS:
+            with self.subTest(call=hex(call_addr), desc=desc):
+                ins = self._disasm(word, prefix_addr)
+                self.assertIsNotNone(ins)
+                self.assertFalse(safe_old(ins), f'{desc} must fail under legacy structck rule')
+                self.assertTrue(
+                    is_call_prefix_safe(ins, word, prefix_addr, call_addr, FC26_BUILD_ID),
+                    f'{desc} must pass under aligned structck rule',
+                )
+
+    def test_all_9_main_calls_pass_in_structck(self):
+        for call_addr, prefix_addr, word, desc in CallWindowMainCallsRegressionTest.MAIN_CALLS:
+            with self.subTest(call=hex(call_addr), desc=desc):
+                ins = self._disasm(word, prefix_addr)
+                self.assertIsNotNone(ins)
+                self.assertTrue(
+                    is_call_prefix_safe(ins, word, prefix_addr, call_addr, FC26_BUILD_ID),
+                    f'{desc} at {prefix_addr:#x} must pass structck',
+                )
+
+    def test_registered_exception_rejected_on_wrong_build_id_call_or_word(self):
+        call_addr = 0x814c01c
+        prefix_addr = 0x814c018
+        word = 0xad090aa1
+        ins = self._disasm(word, prefix_addr)
+
+        # Correct passes
+        self.assertTrue(is_call_prefix_safe(ins, word, prefix_addr, call_addr, FC26_BUILD_ID))
+
+        # Wrong build id fails
+        self.assertFalse(is_call_prefix_safe(ins, word, prefix_addr, call_addr, '00' * 16))
+        self.assertFalse(is_call_prefix_safe(ins, word, prefix_addr, call_addr, None))
+
+        # Wrong call address fails
+        self.assertFalse(is_call_prefix_safe(ins, word, prefix_addr, 0x814c020, FC26_BUILD_ID))
+
+        # Wrong word fails
+        for wrong_w in (0xad0902a1, 0xad090aa2, 0xb90007f0):
+            ins_w = self._disasm(wrong_w, prefix_addr)
+            self.assertFalse(is_call_prefix_safe(ins_w, wrong_w, prefix_addr, call_addr, FC26_BUILD_ID))
+
+    def test_no_other_base_outside_sp_fp_passes(self):
+        unregistered = [
+            (0xad090aa1, 0x1000, 0x1004),
+            (0xb9000001, 0x1000, 0x1004),
+            (0x39000280, 0x1000, 0x1004),
+        ]
+        for word, p_addr, c_addr in unregistered:
+            ins = self._disasm(word, p_addr)
+            self.assertFalse(is_call_prefix_safe(ins, word, p_addr, c_addr, FC26_BUILD_ID))
 
 
 if __name__ == '__main__':
