@@ -37,7 +37,12 @@ static ssize_t src_pread(int fd,void *buf,size_t n,off_t off) {
  return pread(chunk_fds[c],buf,n,(off_t)o);
 }
 static const uint8_t *image_map;
-static char mount_name[32];
+#define ROMFS_MAX_MOUNTS 8
+static char mount_names[ROMFS_MAX_MOUNTS][32];
+static const char *first_mount(void) {
+ for(int i=0;i<ROMFS_MAX_MOUNTS;i++)if(mount_names[i][0])return mount_names[i];
+ return "rom";
+}
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t read_calls,read_bytes,read_ns,read_prepare_ns,read_report_ns;
 static uint64_t handles[NH]; /* file index + 1; 0 is free */
@@ -243,14 +248,26 @@ void runtime_fs_init(void) {
 }
 static int path_ok(const char *p) {return romfs_path_valid_relative(p);}
 static const char *rom_path(const char *path) {
- return romfs_path_relative(mount_name,path);
+ if(!path)return NULL;
+ for(int i=0;i<ROMFS_MAX_MOUNTS;i++)if(mount_names[i][0]){
+  const char *p=romfs_path_relative(mount_names[i],path);
+  if(p)return p;
+ }
+ return NULL;
 }
 static uint64_t lower(const char *name) {uint64_t lo=0,hi=file_count;while(lo<hi){uint64_t m=lo+(hi-lo)/2;if(strcmp(entry_name(entry(m)),name)<0)lo=m+1;else hi=m;}return lo;}
 static unsigned mount_rom(const char *name,void *cache,uint64_t size) {
- (void)cache;(void)size;runtime_fs_init();if(!name||!path_ok(name)||strlen(name)>=sizeof(mount_name)||strchr(name,'/')||strchr(name,':'))return INVALID;
- if(*mount_name&&strcmp(name,mount_name)){runtime_missing("romfs: a second RomFS mount \"%s\" (\"%s\" is mounted)",name,mount_name);runtime_fail("second RomFS mount not implemented");}strcpy(mount_name,name);return 0;
+ (void)cache;(void)size;runtime_fs_init();if(!name||!path_ok(name)||strlen(name)>=sizeof(mount_names[0])||strchr(name,'/')||strchr(name,':'))return INVALID;
+ for(int i=0;i<ROMFS_MAX_MOUNTS;i++)if(!strcmp(mount_names[i],name))return 0;
+ for(int i=0;i<ROMFS_MAX_MOUNTS;i++)if(!mount_names[i][0]){strcpy(mount_names[i],name);return 0;}
+ runtime_missing("romfs: mount table full (cannot mount \"%s\")",name);runtime_fail("romfs mount table full");return INVALID;
 }
 static unsigned mount_rom_name(const char *name) {return mount_rom(name,NULL,0);}   /* the one-argument MountRom, without a cache buffer (met first with SDK 13.3.2) */
+int runtime_romfs_unmount(const char *name) {
+ if(!name)return 0;const char *sep=strchr(name,':');size_t len=sep?(size_t)(sep-name):strlen(name);
+ for(int i=0;i<ROMFS_MAX_MOUNTS;i++)if(mount_names[i][0]&&strlen(mount_names[i])==len&&!strncmp(mount_names[i],name,len)){mount_names[i][0]=0;return 1;}
+ return 0;
+}
 static unsigned cache_size(uint64_t *out) {if(!out)return INVALID;*out=0;return 0;}
 /* TOTK_FS_LOG=1: log every RomFS open with the time since start (shows how far the game gets without a picture). */
 static void fs_log(const char *what,const char *path){static int on=-1;static uint64_t t0;if(on<0){on=getenv("TOTK_FS_LOG")!=NULL;t0=runtime_now_ns();}if(on)fprintf(stderr,"[totk-fs] %8.3f %s %s\n",(runtime_now_ns()-t0)/1e9,what,path);}
@@ -304,12 +321,19 @@ static void list_source(const char *prefix,size_t n,int mode,const char *(*name_
 static const char *list_index_name(uint64_t i){return entry_name(entry(i));}
 static uint64_t list_index_size(uint64_t i){return entry(i).size;}
 static const char *added_name(uint64_t k){return added[k];}
-static uint64_t added_size(uint64_t k){char full[4200];snprintf(full,sizeof full,"%s:/%s",mount_name,added[k]);uint64_t h;int64_t size=0;if(runtime_romfs_open(&h,full,1))return 0;runtime_romfs_size(&size,h);runtime_romfs_close(h);return (uint64_t)size;}
+static uint64_t added_size(uint64_t k){char full[4200];snprintf(full,sizeof full,"%s:/%s",first_mount(),added[k]);uint64_t h;int64_t size=0;if(runtime_romfs_open(&h,full,1))return 0;runtime_romfs_size(&size,h);runtime_romfs_close(h);return (uint64_t)size;}
 unsigned runtime_romfs_list(const char *path,int mode,void (*add)(void *ctx,const char *name,int is_dir,int64_t size),void *ctx) {
  /* A folder may be named with trailing slashes, and the mount root ("Contents:/") is the empty path; files keep the strict check. */
  char trimmed[4096];if(!path||snprintf(trimmed,sizeof trimmed,"%s",path)>=(int)sizeof trimmed)return INVALID;
- size_t tl=strlen(trimmed),ml=strlen(mount_name);while(tl>ml+2&&trimmed[tl-1]=='/')trimmed[--tl]=0;
- int root=!strncmp(trimmed,mount_name,ml)&&trimmed[ml]==':'&&(!trimmed[ml+1]||(trimmed[ml+1]=='/'&&!trimmed[ml+2]));
+ size_t tl=strlen(trimmed);int root=0;
+ for(int i=0;i<ROMFS_MAX_MOUNTS;i++)if(mount_names[i][0]){
+  size_t ml=strlen(mount_names[i]);
+  if(!strncmp(trimmed,mount_names[i],ml)&&trimmed[ml]==':'){
+   while(tl>ml+2&&trimmed[tl-1]=='/')trimmed[--tl]=0;
+   root=(!trimmed[ml+1]||(trimmed[ml+1]=='/'&&!trimmed[ml+2]));
+   break;
+  }
+ }
  const char *p=root?"":rom_path(trimmed);if(!p)return NOT_FOUND;char prefix[4096];
  if(snprintf(prefix,sizeof prefix,"%s%s",p,*p&&p[strlen(p)-1]!='/'?"/":"")>=(int)sizeof prefix)return INVALID;
  size_t n=strlen(prefix);if(n&&!folder_exists(prefix))return NOT_FOUND;
@@ -318,8 +342,8 @@ unsigned runtime_romfs_list(const char *path,int mode,void (*add)(void *ctx,cons
  last[0]=0;list_source(prefix,n,mode,added_name,added_size,lo,nadded,add,ctx,last);
  return 0;
 }
-int runtime_romfs_is_mounted(const char *name) {return name&&*mount_name&&!strcmp(mount_name,name);}
-int runtime_romfs_owns(const char *path) {size_t n=strlen(mount_name);return n&&path&&!strncmp(path,mount_name,n)&&path[n]==':';}
+int runtime_romfs_is_mounted(const char *name) {if(!name||!*name)return 0;for(int i=0;i<ROMFS_MAX_MOUNTS;i++)if(mount_names[i][0]&&!strcmp(mount_names[i],name))return 1;return 0;}
+int runtime_romfs_owns(const char *path) {if(!path)return 0;for(int i=0;i<ROMFS_MAX_MOUNTS;i++)if(mount_names[i][0]){size_t n=strlen(mount_names[i]);if(n&&!strncmp(path,mount_names[i],n)&&path[n]==':')return 1;}return 0;}
 int runtime_romfs_handle(uint64_t h) {return h>0x100000000ULL&&h<0x100000000ULL+NH;}
 unsigned runtime_romfs_read_options(uint64_t *out,uint64_t h,int64_t off,void *buf,uint64_t size) {return runtime_romfs_read(out,h,off,buf,size);}
 void *runtime_fs_override(const char *name) {

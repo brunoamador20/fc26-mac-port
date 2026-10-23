@@ -53,6 +53,7 @@ unsigned runtime_romfs_list(const char *path, int mode, void (*add)(void *ctx, c
 int runtime_romfs_is_mounted(const char *name) {
     return name && !strcmp(name, "rom");
 }
+int runtime_romfs_unmount(const char *name) { (void)name; return 0; }
 
 void dm_gfx_anomdump(void) {}
 void dm_gfx_gpucapture_next(void) {}

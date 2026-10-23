@@ -109,6 +109,7 @@ unsigned runtime_romfs_list(const char *path, int mode, void (*add)(void *ctx, c
 int runtime_romfs_is_mounted(const char *name) {
     return name && !strcmp(name, "rom");
 }
+int runtime_romfs_unmount(const char *name) { (void)name; return 0; }
 
 int main(void) {
     if (!getenv("TOTK_PROFILE_DIR")) setenv("TOTK_PROFILE_DIR", "/tmp/fc26_libc_fs_test_profile", 1);

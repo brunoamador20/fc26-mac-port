@@ -179,7 +179,8 @@ static void unmount(const char *name) {
     pthread_mutex_lock(&lock);
     for (int i = 0; i < 16; i++) if (mounts[i].kind && !strcmp(mounts[i].name, name)) { mounts[i].kind = M_FREE; pthread_mutex_unlock(&lock); return; }
     pthread_mutex_unlock(&lock);
-    if (!runtime_romfs_owns(name)) runtime_fail("unmount of unknown fs mount");
+    if (runtime_romfs_unmount(name)) return;
+    runtime_fail("unmount of unknown fs mount");
 }
 /* EnsureSaveData(uid) (met first with an SDK 13.3.2 game): the profile's save folder is made when storage starts; only the local account owns one. */
 static unsigned ensure_save(const uint64_t *uid) {
