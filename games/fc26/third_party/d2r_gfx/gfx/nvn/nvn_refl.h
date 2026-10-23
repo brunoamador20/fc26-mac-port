@@ -16,7 +16,7 @@ enum { NVN_RB_CBUF = 1, NVN_RB_SAMP, NVN_RB_TEX, NVN_RB_IMG, NVN_RB_TBUF,
        NVN_RB_TEXIMG };   // TEXIMG：只读贴图语义 amarrada à textura da imagem no slot (TXQ Maxwell / get_width / get_height)   // SBUFU（TOTK）：存储缓冲地址由着色器自己从用户 uniform 槽 reg 的偏移 off 处读出 | SBUFU (TOTK): the storage buffer address is loaded by the shader from byte offset off of user uniform slot reg   // UBOP：计算阶段 uniform 槽 r 的设备指针（Maxwell 计算阶段经 c0 地址表 + 全局内存读 uniform）   // SAMPT：采样器取自贴图槽 r 的合并句柄（高位 = 采样器号）   // 绑定种类（json 的 type）；IMG = 可写贴图（D3D u_r，NVN 图像槽 r）；TBUF = 类型化缓冲（D3D t_r Buffer<T>，NVN 贴图槽 r 的缓冲贴图） | UBOP: device pointer of compute-stage uniform slot r (the Maxwell compute stage reads uniforms via the c0 address table + global memory)   // SAMPT: the sampler is taken from the combined handle of texture slot r (high bits = sampler ID)   // Binding kind (type in the json); IMG = writable texture (D3D u_r, NVN image slot r); TBUF = typed buffer (D3D t_r Buffer<T>, buffer texture in NVN texture slot r)
 enum { NVN_DPF_FLOAT = 0, NVN_DPF_UINT, NVN_DPF_SINT, NVN_DPF_DEPTH };            // 哑贴图像素类（由 msl_type 定） | Dummy texture pixel class (determined by msl_type)
 enum { NVN_CT_FLOAT = 0, NVN_CT_UINT, NVN_CT_INT };                               // 顶点输入分量类型 | Vertex input component type
-#define NVN_REFL_MAXB 64
+#define NVN_REFL_MAXB 128   // FC26: 64 → 128 for texture / sampler arrays (one binding per element; b9764ae7 has 7 + 32 + 32)
 #define NVN_REFL_MAXV 32
 
 typedef struct {
@@ -27,6 +27,7 @@ typedef struct {
 } nvn_rbind;
 typedef struct {
     int nb, abi, nv;         // 绑定数、参数缓冲槽、顶点输入数 | Binding count, argument buffer slot, vertex input count
+    int nj;                  // FC26: b[0..nj) follow the json bindings 1:1; b[nj..nb) are elements 1.. of texture / sampler arrays
     nvn_rbind b[NVN_REFL_MAXB];
     struct { uint8_t loc, ct, nvn; } v[NVN_REFL_MAXV];   // loc：Metal 顶点属性槽（DXBC 输入寄存器）；nvn：NVN 顶点属性号（HLSL 语义 ATTRn 的 n） | loc: Metal vertex attribute slot (DXBC input register); nvn: NVN vertex attribute number (the n of HLSL semantic ATTRn)
     uint16_t tg[3];          // 计算线程组大小（无 = 0） | Compute thread group size (none = 0)
@@ -52,6 +53,7 @@ typedef struct {
 int drv_fillable(int stage, int bank, unsigned off);
 int drv_access_components_fillable(int stage, int bank, unsigned long idx, const char *after);
 int msl_drv_unfillable_check(const char *msl, int stage, const char *entry);
+unsigned tex_array_elem_reg(const char *name, int n);
 
 #ifdef __OBJC__
 #import <Foundation/Foundation.h>

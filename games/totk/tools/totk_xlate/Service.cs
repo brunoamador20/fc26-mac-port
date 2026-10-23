@@ -29,10 +29,11 @@ static class ShaderService
     const int CombinedBase = 0x20, CombinedSlots = 32;
     static readonly string[] Xc = { "--msl", "--msl-version", "20300", "--msl-argument-buffers", "--msl-texture-buffer-native", "--msl-pad-fragment-output" };
     // Driver-segment words the replay fills, per stage (nvn_mtl.m drv_fillable / encode_args): c0 storage-buffer table of the
-    // stage, compute thread-group counts (0x200) and uniform-buffer table (0x210), vertex point-size limit (0x610); c2 handles.
+    // stage, compute thread-group counts (0x200) and uniform-buffer table (0x210), vertex point-size limit (0x610) and
+    // draw parameters {base vertex, base instance, draw index} (0x640..0x64c); c2 handles.
     static readonly Dictionary<string, (long lo, long hi)[]> DrvFillC0 = new()
     {
-        ["vs"] = new[] { (0x110L, 0x210L), (0x610L, 0x620L) }, ["ps"] = new[] { (0x510L, 0x610L) }, ["cs"] = new[] { (0x200L, 0x410L) },
+        ["vs"] = new[] { (0x110L, 0x210L), (0x610L, 0x620L), (0x640L, 0x64CL) }, ["ps"] = new[] { (0x510L, 0x610L) }, ["cs"] = new[] { (0x200L, 0x410L) },
     };
     static readonly (long lo, long hi)[] DrvFillC2 = { (0x20, 0x120), (0x168, 0x568), (0x568, 0x968) };
     static readonly Dictionary<string, string> StagePrefix = new() { ["vs"] = "vp", ["ps"] = "fp", ["cs"] = "cp" };

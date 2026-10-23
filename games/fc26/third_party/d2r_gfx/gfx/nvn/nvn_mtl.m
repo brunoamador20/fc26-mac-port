@@ -4922,7 +4922,7 @@ static id<MTLLibrary> totk_msl_library(NSString *src, NSError **err) {
    vanished), vertex shaders a point-size limit of 0, and both 0 for the base addresses they add offsets to. Words the replay
    fills (encode_args): c0 storage-buffer table at 0x110 (vertex) / 0x310 (compute) / 0x510 (fragment), 16 bytes per slot
    {address, size}; compute thread-group counts {x, y, z} at 0x200 and uniform-buffer table at 0x210; vertex point-size
-   limit at 0x610; c2 texture / sampler handle tables. Anything else reads 0 and is reported. */
+   limit at 0x610 and draw parameters {base vertex, base instance, draw index} at 0x640 (FC26); c2 texture / sampler handle tables. Anything else reads 0 and is reported. */
 /* drv_fillable, drv_access_components_fillable, msl_drv_unfillable_check estão definidos em nvn_refl.m / nvn_refl.h */
 /* TOTK 2026-10-16: does the function store through storage binding `name` (spirv-cross names: `(*spvDescriptorSet0.fp_s0)._m0[...] = ...`
    for stores, `&(*spvDescriptorSet0.fp_s1)` for atomics)? The reflection's rw was never set (shader_service.py tested the wrong
@@ -4968,7 +4968,7 @@ static int msl_tex_uses_beyond_size(NSString *src, NSString *name) {
     return 0;
 }
 static void refl_mark_stores(NvShader *o, NSArray *bs, NSString *src) {
-    if (![bs isKindOfClass:[NSArray class]] || (int)bs.count != o->rf.nb) return;   // nvn_refl_from_json keeps the json order 1:1
+    if (![bs isKindOfClass:[NSArray class]] || (int)bs.count != o->rf.nj) return;   // nvn_refl_from_json keeps the json order 1:1 (array elements after nj)
     for (int i = 0; i < o->rf.nb; i++) {
         nvn_rbind *b = &o->rf.b[i]; if (b->rw || (b->kind != NVN_RB_SBUFP && b->kind != NVN_RB_SBUFU)) continue;
         NSDictionary *d = bs[(NSUInteger)i]; if (![d isKindOfClass:[NSDictionary class]]) continue;
@@ -5058,8 +5058,8 @@ static NvShader *shader_load(NSString *pc, int stage) {
     o->writes_depth = full && [full rangeOfString:@"[[depth("].location != NSNotFound;
     if (full) {
         NSArray *bs = j[@"bindings"];
-        if ([bs isKindOfClass:[NSArray class]] && (int)bs.count == o->rf.nb) {
-            for (int i = 0; i < o->rf.nb; i++) {
+        if ([bs isKindOfClass:[NSArray class]] && (int)bs.count == o->rf.nj) {
+            for (int i = 0; i < o->rf.nj; i++) {
                 if (o->rf.b[i].kind == NVN_RB_TEXIMG) {
                     NSDictionary *d = bs[(NSUInteger)i];
                     if ([d isKindOfClass:[NSDictionary class]] && msl_tex_uses_beyond_size(full, d[@"msl_name"])) {
@@ -7016,6 +7016,10 @@ static uint64_t ui_mat_patch(const p_bind_buf *u, void *mb, uint64_t mo) {
 }
 /* TOTK_NAN_TRACE: g_nt_watch is the texture the traced shader read in its watched slot (see nt_watch_after_pass). */
 static uint32_t g_dispatch_grid[3];   // TOTK: thread-group counts of the dispatch being encoded (driver segment c0 + 0x200)
+/* FC26 2026-10-23: draw parameters of the draw being encoded {base vertex, base instance, draw index}, which the NVN driver keeps
+   at c0 + 0x640 / 0x644 / 0x648 (vendor/ryujinx Constants.cs NvnBaseVertexByteOffset...). Vertex shader 3d1d0a08 (Encontro Clássico)
+   computes its instance as instance_id - base_instance + c0[0x644]; the segment had no such words and the load aborted. */
+static int32_t g_draw_params[3];
 /* Driver banks contain binding metadata, not the pointed-to bytes. Reuse their immutable arena
    allocation while those bindings match; the submission epoch prevents arena reuse from returning
    a previous frame's address. No texture residency or guest-memory freshness checks are skipped. */
@@ -7026,6 +7030,7 @@ typedef struct {
     p_bind_buf storage[16], uniform[16];
     uint64_t textures[128], samplers[128];
     uint32_t grid[3];
+    int32_t draw[3];
 } driver_bank_cache;
 static driver_bank_cache g_driver_bank[6][2];
 static uint64_t g_driver_hit, g_driver_miss, g_driver_check;
@@ -7049,6 +7054,7 @@ static void driver_bank_fill(uint8_t *d, int bank, int stage) {
             for (int r = 0; r < 16; r++) { uint64_t a = S.ubo[5][r].addr; uint32_t n = (uint32_t)S.ubo[5][r].size; memcpy(d + 0x210 + 16 * r, &a, 8); memcpy(d + 0x210 + 16 * r + 8, &n, 4); }
         } else if (stage == 0) {   // TOTK: point-size limit the vertex shaders clamp gl_PointSize to (the driver's hardware limit 0x44fffe00 = 2047.9375)
             const float ps_max = 2047.9375f; memcpy(d + 0x610, &ps_max, sizeof ps_max);
+            memcpy(d + 0x640, g_draw_params, sizeof g_draw_params);
         }
     } else {
         for (int r = 0; r < 128; r++) { uint32_t th = (uint32_t)S.tex[stage][r], sh_ = (uint32_t)S.samp[stage][r]; memcpy(d + 0x168 + 8 * r, &th, 4); memcpy(d + 0x568 + 8 * r, &sh_, 4); }
@@ -7067,7 +7073,8 @@ static uint64_t driver_bank_gpu(int bank, int stage, id<MTLBuffer> *out) {
     int same = c->epoch == g_arena_epoch && c->gpu;
     if (same && !g_driver_probe_stale) {
         if (bank == 0) same = !memcmp(c->storage, S.ssbo[stage], sizeof c->storage) &&
-            (stage != 5 || (!memcmp(c->uniform, S.ubo[5], sizeof c->uniform) && !memcmp(c->grid, g_dispatch_grid, sizeof c->grid)));
+            (stage != 5 || (!memcmp(c->uniform, S.ubo[5], sizeof c->uniform) && !memcmp(c->grid, g_dispatch_grid, sizeof c->grid))) &&
+            (stage != 0 || !memcmp(c->draw, g_draw_params, sizeof c->draw));
         else same = !memcmp(c->textures, S.tex[stage], sizeof c->textures) && !memcmp(c->samplers, S.samp[stage], sizeof c->samplers);
     }
     int check = atomic_load(&g_driver_cache_check);
@@ -7084,6 +7091,7 @@ static uint64_t driver_bank_gpu(int bank, int stage, id<MTLBuffer> *out) {
     c->epoch = g_arena_epoch; c->gpu = g_cur_arena->gpu + offset; c->buffer = buffer; c->offset = offset;
     if (bank == 0) { memcpy(c->storage, S.ssbo[stage], sizeof c->storage);
         if (stage == 5) { memcpy(c->uniform, S.ubo[5], sizeof c->uniform); memcpy(c->grid, g_dispatch_grid, sizeof c->grid); }
+        if (stage == 0) memcpy(c->draw, g_draw_params, sizeof c->draw);
     } else { memcpy(c->textures, S.tex[stage], sizeof c->textures); memcpy(c->samplers, S.samp[stage], sizeof c->samplers); }
     g_driver_miss++; *out = buffer; return c->gpu;
 }
@@ -7174,7 +7182,7 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
     for (int i = 0; i < sh->rf.nb; i++) {
         const nvn_rbind *b = &sh->rf.b[i];
         int reg = b->reg, aid = b->aid;
-        if (slot_mode && tex_slot_binding(b)) {
+        if (slot_mode && aid < 64 && tex_slot_binding(b)) {   // FC26: slot_mask has 64 bits; array elements go past aid 63
             // A preceding miss may create/replace a resource, or a guest write
             // may arrive since the initial key. Then finish this block normally.
             if (slot_context && (slot_key.serial != g_ser_gen || slot_key.dirty != nvn_dirty_now() ||
@@ -7359,7 +7367,7 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
         for (int i = 0; i < sh->rf.nb; i++) {
             const nvn_rbind *b = &sh->rf.b[i]; int aid = b->aid;
             if (!tex_slot_binding(b)) continue;
-            if (slot_check && (slot_mask & (UINT64_C(1) << aid)) && slots[aid] != sh->tex_slots.slots[aid])
+            if (slot_check && aid < 64 && (slot_mask & (UINT64_C(1) << aid)) && slots[aid] != sh->tex_slots.slots[aid])
                 MDIE("texture slot mismatch: shader %s stage %d binding %d kind %d", sh->key, nvn_stage, aid, b->kind);
             sh->tex_slots.handles[aid] = handles[aid]; sh->tex_slots.slots[aid] = slots[aid];
         }
@@ -10187,6 +10195,7 @@ frz_plain:;
     enc_r_blend_color(en, S.blend_color[0], S.blend_color[1], S.blend_color[2], S.blend_color[3]);
     bind_vertex_streams((id<MTL4RenderCommandEncoder>)en,pr->sh[0]);
     if (g_lay.active) enc_r_vbuf(en, LAY_BUF_INDEX, lay_gpu(g_lay_probe_neg == 1 ? 0 : g_lay.cur - g_lay.base));   // TOTK: this draw's layer within the layered pass
+    g_draw_params[0] = di ? di->base_vertex : dw->first; g_draw_params[1] = di ? di->base_instance : dw->base_instance; g_draw_params[2] = 0;
     if (pr->sh[0]) encode_args(en, pr->sh[0], 0, 1);
     if (pr->sh[1]) encode_args(en, pr->sh[1], 1, 0);
     // 参数绑定在登记表锁内捕获实际资源；资格判断到绑定期间有版本变化，则在任何GPU draw前切开重试。
