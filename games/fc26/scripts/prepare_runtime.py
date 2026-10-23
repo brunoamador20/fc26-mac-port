@@ -184,8 +184,28 @@ def probe_plt(main, image):
     return plt[0], slot
 
 
+# Symbols the runtime looks up by name and cannot start without (runtime/loader.c required(), the probe's PLT target).
+REQUIRED = {'nnMain': 'the game entry (loader.c verify_identity)',
+            '_ZN2nn4init5StartEmmPFvvES2_S2_': 'the SDK startup boot calls (loader.c boot)',
+            '_ZN2nn2os13GetSystemTickEv': 'what the probe calls through main\'s PLT'}
+
+
+def check_required(modules):
+    """Every REQUIRED symbol is defined by some module; else stop now, naming similar exports, rather than at boot."""
+    defined = {s['name'] for m in modules for s in m['symbols'] if s['defined'] and s['name']}
+    missing = []
+    for name, why in REQUIRED.items():
+        if name in defined: continue
+        stem = name[:name.find('E', 8)] if name.startswith('_ZN') else name   # the qualified name without its parameters
+        similar = sorted(n for n in defined if stem in n)[:5]
+        missing.append(f'{name} ({why}) is defined by none of {[m["name"] for m in modules]}; similar: {similar or "none"}')
+    # TODO(mac): a different nn::init::Start signature in SDK 19.3.4 is fixed in runtime/loader.c boot() and here.
+    need(not missing, '; '.join(missing))
+
+
 def runtime_tables(work, out, pins):
     modules = [module_table(work, n, pins) for n in MODULES]
+    check_required(modules)
     main = modules[0]
     image = (work / f'rewritten/{VERSION}/main.patched.bin').read_bytes()
     plt, slot = probe_plt(main, image)

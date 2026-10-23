@@ -88,11 +88,12 @@ $(OUT)/spirv-cross/spirv-cross:
 	xcrun clang++ -arch arm64 $(addprefix $(dir $@)obj/,$(addsuffix .o,$(SPIRV_CROSS_SOURCES))) -o "$@"
 
 # FC26_LOG: where stderr goes (the host is loud on purpose; every abort names what is missing: service, command, SVC,
-# symbol). probe prints its JSON verdict on stdout. boot runs headless by default; BOOT_ENV=TOTK_VERIFY_STARTUP=nnmain
-# stops with a JSON verdict at the original nnMain's entry (story 2's goal), =1 when nnMain sets its focus mode.
+# symbol). probe prints its JSON verdict on stdout. boot runs headless and silent by default (automatic runs make no sound:
+# TOTK_AUDIO_OFF for the audio renderer's device, FC26_AUDIO=0 for AudioOut); add TOTK_VERIFY_STARTUP=nnmain to BOOT_ENV
+# to stop with a JSON verdict at the original nnMain's entry (story 2's goal), =1 to stop when nnMain sets its focus mode.
 FC26_LOG ?= $(WORK)/logs/boot.log
 PROBE_LOG ?= $(WORK)/logs/probe.log
-BOOT_ENV ?= TOTK_HEADLESS=1
+BOOT_ENV ?= TOTK_HEADLESS=1 TOTK_AUDIO_OFF=1 FC26_AUDIO=0
 probe: runtime
 	@mkdir -p "$(dir $(PROBE_LOG))"
 	cd "$(WORK)" && ./build/$(BINARY) rewritten/$(VERSION) probe 2> "$(abspath $(PROBE_LOG))"; echo "exit $$?; log: $(PROBE_LOG)"

@@ -134,6 +134,22 @@ def plt_stub(address, slot):
     return struct.pack('<IIII', adrp, ldr, add, 0xd61f0220)
 
 
+class RequiredSymbols(unittest.TestCase):
+    def modules(self, names):
+        return [dict(name='main', symbols=[dict(name=n, defined=1) for n in names]), dict(name='sdk', symbols=[])]
+
+    def test_all_present(self):
+        prepare_runtime.check_required(self.modules(list(prepare_runtime.REQUIRED)))
+
+    def test_missing_start_names_similar_exports(self):
+        other = '_ZN2nn4init5StartEmmPFvvES2_S2_PKv'   # a hypothetical other signature
+        names = [n for n in prepare_runtime.REQUIRED if 'init5Start' not in n] + [other]
+        with self.assertRaises(SystemExit) as stop:
+            prepare_runtime.check_required(self.modules(names))
+        self.assertIn('_ZN2nn4init5StartEmmPFvvES2_S2_ (the SDK startup', str(stop.exception))
+        self.assertIn(other, str(stop.exception))
+
+
 class ProbePlt(unittest.TestCase):
     def test_stub_beyond_the_old_64_kib_window(self):
         njump, text_end, got = 6000, 0x40000, 0x50000
