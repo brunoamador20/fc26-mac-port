@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <pthread.h>
+typedef struct { uint64_t start, end; } MemoryRegion;
 typedef struct { uint64_t where; unsigned kind, symbol; int64_t addend; } Reloc;
 typedef struct { const char *name; uint64_t value, size; unsigned defined, binding, type; } Symbol;
 typedef struct { uint64_t ret, original; unsigned timer, arg; } Gate;
@@ -58,6 +59,8 @@ uint8_t *runtime_module_base(const char *name);   /* runtime/loader.c: a module 
 uint64_t runtime_module_permission(uint64_t address,uint64_t size,unsigned permission);
 uint64_t runtime_module_lock_permission(uint64_t address,uint64_t size,unsigned mask,unsigned attribute);
 int runtime_module_query(uint64_t address,uint64_t *base,uint64_t *size,unsigned *state,unsigned *permission,unsigned *attribute);
+int runtime_module_patch_query(uint64_t address,uint64_t *base,uint64_t *size,unsigned *state,unsigned *permission,unsigned *attribute);
+size_t runtime_module_regions(MemoryRegion *out,size_t max_count);
 void runtime_oe_push_message(uint32_t message);
 void hle_bind_system_event(void *event, int autoclear);
 uint64_t runtime_svc(unsigned num, uint64_t *regs, const char *module, uint64_t offset);

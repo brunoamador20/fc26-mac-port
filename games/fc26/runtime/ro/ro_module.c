@@ -401,3 +401,18 @@ uint64_t ro_module_bytes(void) {
     pthread_rwlock_unlock(&lock);
     return total;
 }
+
+size_t ro_module_regions(MemoryRegion *out, size_t max_count) {
+    size_t n = 0;
+    pthread_rwlock_rdlock(&lock);
+    for (unsigned i = 0; i < RO_MAX_NRO && n < max_count; i++) {
+        Loaded *m = loaded[i];
+        if (m && m->base) {
+            out[n].start = (uint64_t)(uintptr_t)m->base;
+            out[n].end = (uint64_t)(uintptr_t)m->base + m->map_size;
+            n++;
+        }
+    }
+    pthread_rwlock_unlock(&lock);
+    return n;
+}

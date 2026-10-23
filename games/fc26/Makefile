@@ -37,7 +37,7 @@ RUNTIME_SRC := $(wildcard runtime/*.c runtime/*.m runtime/*.S runtime/ro/*.c)
 RUNTIME_HEADERS := $(wildcard runtime/*.h runtime/ro/*.h)
 GENERATED := $(OUT)/runtime_tables.h $(OUT)/romfs_config.h $(OUT)/shared_fonts_config.h
 
-.PHONY: check-config prepare runtime probe boot clean rewrite test
+.PHONY: check-config prepare runtime probe probe-ro boot clean rewrite test
 check-config:
 	$(GAME_CONFIG) check
 
@@ -110,6 +110,9 @@ BOOT_ENV ?= TOTK_HEADLESS=1 TOTK_AUDIO_OFF=1 FC26_AUDIO=0
 probe: runtime
 	@mkdir -p "$(dir $(PROBE_LOG))"
 	cd "$(WORK)" && ./build/$(BINARY) rewritten/$(VERSION) probe 2> "$(abspath $(PROBE_LOG))"; s=$$?; echo "exit $$s; log: $(PROBE_LOG)"; exit $$s
+probe-ro: runtime
+	@mkdir -p "$(dir $(PROBE_LOG))"
+	cd "$(WORK)" && ./build/$(BINARY) rewritten/$(VERSION) probe-ro 2> "$(abspath $(PROBE_LOG))"; s=$$?; echo "exit $$s; log: $(PROBE_LOG)"; exit $$s
 boot: runtime
 	@mkdir -p "$(dir $(FC26_LOG))"
 	cd "$(WORK)" && env $(BOOT_ENV) ./build/$(BINARY) rewritten/$(VERSION) boot 2> "$(abspath $(FC26_LOG))"; s=$$?; echo "exit $$s; log: $(FC26_LOG)"; exit $$s

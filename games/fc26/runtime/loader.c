@@ -152,6 +152,29 @@ void runtime_trace_guest(uint64_t fp,uint64_t lr) {
   lr=f[1];if(f[0]<=fp||f[0]-fp>(64u<<20))break;fp=f[0];
  }
 }
+int runtime_module_patch_query(uint64_t address,uint64_t *base,uint64_t *size,unsigned *state,unsigned *permission,unsigned *attribute){
+ for(unsigned i=0;i<NM;i++){
+  Module *m=&modules[i];if(!m->base)continue;
+  uint64_t start=(uintptr_t)m->base;
+  if(m->pre_size&&address>=start-m->pre_size&&address<start){
+   *base=start-m->pre_size;*size=m->pre_size;*state=3;*permission=5;*attribute=0;return 1;
+  }
+  if(m->size>m->key_off&&address>=start+m->key_off&&address<start+m->size){
+   *base=start+m->key_off;*size=m->size-m->key_off;*state=3;*permission=5;*attribute=0;return 1;
+  }
+ }
+ return 0;
+}
+size_t runtime_module_regions(MemoryRegion *out,size_t max_count){
+ size_t n=0;
+ for(unsigned i=0;i<NM&&n<max_count;i++){
+  Module *m=&modules[i];if(!m->base)continue;
+  out[n].start=(uint64_t)(uintptr_t)m->base-m->pre_size;
+  out[n].end=(uint64_t)(uintptr_t)m->base+m->size;
+  n++;
+ }
+ return n;
+}
 static void *required(const char *name) { void *p=runtime_symbol(name);if(!p){fprintf(stderr,"missing %s\n",name);runtime_missing("symbol: %s (required by the loader)",name);runtime_fail("required symbol");}return p; }
 #if TARGET_OS_IPHONE
 /* iOS: code written into memory at run time cannot execute, so ios/tools/gen_embed.py compiles each rewritten image into

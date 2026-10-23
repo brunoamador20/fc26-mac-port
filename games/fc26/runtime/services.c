@@ -2,6 +2,7 @@
    fail with their number (SVC, GetInfo id) or name (IPC service and command, ipc.c). */
 #include "runtime.h"
 #include "ro/ro_module.h"
+#include "memory_gap.h"
 #include <TargetConditionals.h>
 #include "ipc.h"
 #include "game_version.h"
@@ -350,7 +351,35 @@ uint64_t runtime_svc(unsigned num,uint64_t *r,const char *module,uint64_t offset
   else if(addr>=(uintptr_t)low_space+LOW_SIZE&&addr<ALIAS_START){base=(uintptr_t)low_space+LOW_SIZE;size=ALIAS_START-base;state=0x10;perm=0;}   /* host-owned: Inaccessible */
   else if(!addr){base=0;size=ASLR_START;state=0;perm=0;}
   else if(runtime_module_query(addr,&base,&size,&state,&perm,&attr)){}
-  else {state=3;perm=5;}
+  else if(runtime_module_patch_query(addr,&base,&size,&state,&perm,&attr)){}
+  else {
+   state=0x10;perm=0;attr=0;
+   MemoryRegion known[96];size_t count=0;
+   count+=runtime_module_regions(known+count,sizeof(known)/sizeof(known[0])-count);
+   count+=ro_module_regions(known+count,sizeof(known)/sizeof(known[0])-count);
+   if(count<sizeof(known)/sizeof(known[0]))known[count++]=(MemoryRegion){(uintptr_t)low_space,(uintptr_t)low_space+LOW_SIZE};
+   if(count<sizeof(known)/sizeof(known[0]))known[count++]=(MemoryRegion){ALIAS_START,ALIAS_START+ALIAS_SIZE};
+   if(count<sizeof(known)/sizeof(known[0]))known[count++]=(MemoryRegion){top-stack,top};
+   pthread_mutex_lock(&memory_lock);
+   size_t total=count+2*nstack_maps;
+   MemoryRegion *all_ranges=known;
+   MemoryRegion *dyn=NULL;
+   if(total>sizeof(known)/sizeof(known[0])){
+    dyn=malloc(total*sizeof(MemoryRegion));
+    if(dyn){
+     memcpy(dyn,known,count*sizeof(MemoryRegion));
+     all_ranges=dyn;
+    }
+   }
+   size_t cur=count;
+   for(unsigned i=0;i<nstack_maps&&(dyn||cur+2<=sizeof(known)/sizeof(known[0]));i++){
+    all_ranges[cur++]=(MemoryRegion){stack_maps[i].dst,stack_maps[i].dst+stack_maps[i].size};
+    all_ranges[cur++]=(MemoryRegion){stack_maps[i].src,stack_maps[i].src+stack_maps[i].size};
+   }
+   memory_gap_find(addr,all_ranges,cur,&base,&size);
+   if(dyn)free(dyn);
+   pthread_mutex_unlock(&memory_lock);
+  }
   pthread_mutex_lock(&memory_lock);
   if(addr>=ALIAS_START&&addr<ALIAS_START+ALIAS_SIZE){
    unsigned p=(unsigned)((addr-ALIAS_START)/4096),low=p,high=p+1;unsigned allocated=alias_pages[p];

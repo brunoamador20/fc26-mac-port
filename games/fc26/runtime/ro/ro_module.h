@@ -46,3 +46,4 @@ int ro_module_query(uint64_t address, uint64_t *base, uint64_t *size, unsigned *
 /* Diagnostics (runtime_describe_address, runtime_module_offset, the crash report): name and offset of an address. */
 int ro_module_offset(uint64_t address, const char **name, uint64_t *offset);
 uint64_t ro_module_bytes(void);   /* host memory the loaded images take (runtime_image_bytes) */
+size_t ro_module_regions(MemoryRegion *out, size_t max_count);
