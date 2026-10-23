@@ -29,6 +29,34 @@ static int refl_rw(NSDictionary *b) {
     NSString *t = b[@"msl_type"]; if (![t isKindOfClass:[NSString class]]) return 0;
     return [t containsString:@"access::write"] || [t containsString:@"access::read_write"];
 }
+/* TXQ Maxwell sobre imagens: o shader consulta dimensões de imagem via handle imediato tcb na faixa de imagens.
+   Faixa de imagens: [ImgBase, TexBase) = [0x120, 0x168) em bytes = palavras [0x48, 0x5a).
+   Descritores de imagem têm 8 bytes = 2 palavras, logo (h - 0x48) deve ser par e slot = (h*4 - 0x120) / 8 = (h - 0x48) / 2.
+   O fim da faixa em 0x5a é provado por TexBase = 0x168 (0x168 / 4 = 0x5a = 90). */
+static int parse_tcb_image_handle(NSString *name, int is_sampler, int *out_slot) {
+    if (!name) return 0;
+    const char *s = name.UTF8String;
+    const char *p = strstr(s, "_t_tcb_");
+    if (!p || p == s) return 0;
+    for (const char *q = s; q < p; q++) {
+        if (*q < 'a' || *q > 'z') return 0;
+    }
+    p += 7; // após "_t_tcb_"
+    char *end = NULL;
+    unsigned long h = strtoul(p, &end, 16);
+    if (end == p) return 0;
+    if (is_sampler) {
+        if (strcmp(end, "Smplr") != 0) return 0;
+    } else {
+        if (*end != '\0') return 0;
+    }
+    if (h >= 0x48 && h < 0x5a && (h % 2 == 0)) {
+        if (out_slot) *out_slot = (int)((h - 0x48) / 2);
+        return 1;
+    }
+    return 0;
+}
+
 int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
     memset(o, 0, sizeof *o);
     #define FAIL(...) do { snprintf(err, errlen, __VA_ARGS__); return 1; } while (0)
@@ -44,8 +72,29 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             r->aid = (uint16_t)aid; r->reg = reg < 0 ? 0 : (uint16_t)reg;
             if ([k isEqualToString:@"cbuf"]) r->kind = NVN_RB_CBUF;
             else if ([k isEqualToString:@"samp"]) r->kind = NVN_RB_SAMP;
-            else if ([k isEqualToString:@"samp_tex"]) r->kind = NVN_RB_SAMPT;
-            else if ([k isEqualToString:@"tex"]) { r->kind = NVN_RB_TEX; dummy_kind(b[@"msl_type"], &r->dtt, &r->dpf); }
+            else if ([k isEqualToString:@"samp_tex"]) {
+                int img_slot = -1;
+                if (reg < 0 && parse_tcb_image_handle(b[@"msl_name"], 1, &img_slot)) {
+                    /* The sampler half of a size query on an image: no texture slot holds its handle, so reg 0xffff
+                       (outside every slot table) binds the empty-slot sampler; the shader never samples with it. */
+                    r->kind = NVN_RB_SAMPT;
+                    r->reg = 0xffff;
+                    reg = 0xffff;
+                } else {
+                    r->kind = NVN_RB_SAMPT;
+                }
+            }
+            else if ([k isEqualToString:@"tex"]) {
+                int img_slot = -1;
+                if (reg < 0 && parse_tcb_image_handle(b[@"msl_name"], 0, &img_slot)) {
+                    r->kind = NVN_RB_TEXIMG;
+                    r->reg = (uint16_t)img_slot;
+                    reg = img_slot;
+                } else {
+                    r->kind = NVN_RB_TEX;
+                }
+                dummy_kind(b[@"msl_type"], &r->dtt, &r->dpf);
+            }
             else if ([k isEqualToString:@"img"]) { r->kind = NVN_RB_IMG; dummy_kind(b[@"msl_type"], &r->dtt, &r->dpf); r->rw = refl_rw(b); }
             else if ([k isEqualToString:@"tbuf"]) { r->kind = NVN_RB_TBUF; uint8_t tt; dummy_kind(b[@"msl_type"], &tt, &r->dpf); }
             else if ([k isEqualToString:@"sbuf"]) { r->kind = NVN_RB_SBUFP; r->rw = refl_rw(b); }
@@ -55,7 +104,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@"c1"]) r->kind = NVN_RB_C1;
             else if ([k isEqualToString:@"drvcb"]) r->kind = [b[@"bank"] intValue] == 2 ? NVN_RB_DRV2 : NVN_RB_DRV0;
             else FAIL("B 绑定种类 %s 未实现（%s）", k.UTF8String, [b[@"msl_name"] UTF8String]);
-            if ((r->kind == NVN_RB_CBUF || r->kind == NVN_RB_SAMP || r->kind == NVN_RB_SAMPT || r->kind == NVN_RB_TEX || r->kind == NVN_RB_IMG || r->kind == NVN_RB_TBUF || r->kind == NVN_RB_SBUFP || r->kind == NVN_RB_UBOP || r->kind == NVN_RB_SBUFU) && reg < 0)
+            if ((r->kind == NVN_RB_CBUF || r->kind == NVN_RB_SAMP || r->kind == NVN_RB_SAMPT || r->kind == NVN_RB_TEX || r->kind == NVN_RB_IMG || r->kind == NVN_RB_TBUF || r->kind == NVN_RB_SBUFP || r->kind == NVN_RB_UBOP || r->kind == NVN_RB_SBUFU || r->kind == NVN_RB_TEXIMG) && reg < 0)
                 FAIL("B 绑定 %s 没解出槽号", [b[@"msl_name"] UTF8String]);
             o->nb++;
         }

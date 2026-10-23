@@ -10,7 +10,7 @@ static inline unsigned nvn_texture_plan(const nvn_refl *rf, uint16_t slots[NVN_R
         const nvn_rbind *b = &rf->b[i];
         if ((b->kind == NVN_RB_TEX || b->kind == NVN_RB_TBUF) && b->reg < 128)
             slots[n++] = b->reg;
-        else if (b->kind == NVN_RB_IMG && b->reg < 32)
+        else if ((b->kind == NVN_RB_IMG || b->kind == NVN_RB_TEXIMG) && b->reg < 32)
             slots[n++] = 128 + b->reg;
     }
     return n;
