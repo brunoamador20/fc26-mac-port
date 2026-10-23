@@ -40,6 +40,13 @@ uint32_t runtime_event_readable(uint32_t w) {
 void runtime_event_signal(uint32_t w) { Event *e = runtime_handle_get(w, KIND_EVENT_W); if (!e) runtime_fail("test event handle"); e->signaled = 1; }
 void runtime_trace_guest(uint64_t fp, uint64_t lr) { (void)fp; (void)lr; }
 void dm_guest_write_prepare(void *addr, size_t n) { (void)addr; (void)n; }
+/* svcCloseHandle, as the host reaches it for a service-owned handle (threads.c case 0x16): the slot is freed. */
+static unsigned host_closes;
+int svc_thread(int num, uint64_t *regs) {
+    uint32_t h = (uint32_t)regs[0] - 0x100;
+    if (num != 0x16 || h >= nobjects || kinds[h] < 0) runtime_fail("test svc_thread: only CloseHandle of a live handle");
+    kinds[h] = -1; objects[h] = NULL; host_closes++; regs[0] = 0; return 1;
+}
 
 static int failures;
 #define CHECK(cond, ...) do { if (cond) { printf("ok: "); printf(__VA_ARGS__); putchar('\n'); } \
@@ -242,7 +249,9 @@ static void ldn(void) {
     CHECK(!call(comm, 401, NULL, 0, NULL).result && state_of(comm) == 0, "ldn:u Finalize: None");
     CHECK(call(comm, 401, NULL, 0, NULL).result == NOT_INITIALIZED, "ldn:u Finalize twice = 2203-0037");
 
-    /* ldn:s numbers 402-404 differently; ldn:m reports the shared state; closing without Finalize finalizes. */
+    runtime_ipc_session_closed(runtime_handle_get(comm, 1));
+
+    /* ldn:s numbers 402-404 differently; ldn:m reports the shared state; closing the last object finalizes. */
     uint32_t sys = object(open_service("ldn:s"), 0, NULL, 0, NULL);
     uint32_t mon = object(open_service("ldn:m"), 0, NULL, 0, NULL);
     CHECK(!call(mon, 100, NULL, 0, NULL).result, "ldn:m IMonitorService Initialize");
@@ -255,6 +264,9 @@ static void ldn(void) {
     CHECK(state_of(clone) == 1, "ldn:s a clone of the session sees the same state");
     runtime_ipc_session_closed(runtime_handle_get(clone, 1));
     CHECK(state_of(sys) == 1, "ldn:s closing the clone keeps the state");
+    uint32_t other = object(open_service("ldn:s"), 0, NULL, 0, NULL);
+    runtime_ipc_session_closed(runtime_handle_get(other, 1));
+    CHECK(state_of(sys) == 1, "ldn:s closing a second object that never initialized keeps the state");
     runtime_ipc_session_closed(runtime_handle_get(sys, 1));
     r = call(mon, 0, NULL, 0, NULL);
     CHECK(!r.result && u32_at(&r, 0) == 0, "ldn:s closed without Finalize: None again");
@@ -273,13 +285,21 @@ static void shop(void) {
     r = call(accessor, 0, args, 8, NULL);
     CHECK(!r.result && r.ncopy == 1 && r.nmove == 1 && event_signaled(r.copy[0]), "nim:eca CreateAsyncInterface: a signalled event and the object");
     uint32_t async = r.move[0];
+    Event *done = runtime_handle_get(r.copy[0], KIND_EVENT_R);
+    done->signaled = 0;                                            /* the client clears it before asking */
     void *path = low(0x100);
-    CHECK(!call(async, 4, args, 16, &(Extra){.a = {path, 0x100}}).result, "nim:eca Request accepted");
+    CHECK(!call(async, 4, args, 16, &(Extra){.a = {path, 0x100}}).result && done->signaled, "nim:eca Request accepted, event signalled again");
     CHECK(call(async, 1, NULL, 0, NULL).result == 0x70a4, "nim:eca GetSize = 2164-0056 (internet request not accepted)");
     CHECK(call(async, 2, NULL, 0, &(Extra){.b = {path, 0x100}}).result == 0x70a4, "nim:eca Read = 2164-0056");
     CHECK(call(async, 3, NULL, 0, NULL).result == 0x70a4, "nim:eca GetErrorCode = 2164-0056");
     CHECK(call(async, 5, NULL, 0, NULL).result == 0x70a4, "nim:eca Prepare = 2164-0056");
     CHECK(!call(async, 0, NULL, 0, NULL).result, "nim:eca Cancel");
+    unsigned before = host_closes, handles = nobjects;
+    for (int i = 0; i < 3; i++) {                                  /* request after request: each object frees its event */
+        Reply made = call(accessor, 0, args, 8, NULL);
+        runtime_ipc_session_closed(runtime_handle_take_session(made.move[0]));
+    }
+    CHECK(host_closes - before == 3 && nobjects - handles == 9, "nim:eca closing IShopServiceAsync closes its event's writable handle");
     uint32_t ecas = open_service("nim:ecas");
     CHECK(!call(ecas, 0, args, 8, &(Extra){.pid = 1}).result && !call(ecas, 1, args, 8, &(Extra){.pid = 1}).result, "nim:ecas (Un)RegisterSpecialClient");
 }
@@ -364,6 +384,9 @@ static void hwopus(void) {
     uint8_t *bad = low(16); bad[3] = 200; int16_t *out = low(4096);
     r = call(dec, 0, NULL, 0, &(Extra){.a = {bad, 16}, .b = {out, 4096}});
     CHECK(r.result == 0x46f, "hwopus: a frame longer than its buffer = 2111-0002");
+    int16_t *big = low(1 << 20); uint8_t *empty = low(16);       /* an empty packet: libopus conceals a lost one */
+    r = call(dec, 0, NULL, 0, &(Extra){.a = {empty, 8}, .b = {big, 1 << 20}});
+    CHECK(!r.result && u32_at(&r, 0) == 8 && u32_at(&r, 4) == FRAME * 6, "hwopus: an empty packet conceals one 120 ms frame at most (%u samples)", u32_at(&r, 4));
     int32_t wrong[2] = {44100, 2};
     r = call(m, 1, wrong, 8, NULL);
     CHECK(!r.result && u32_at(&r, 0) == 0, "hwopus GetWorkBufferSize(44100 Hz) = 0 (not an Opus rate)");

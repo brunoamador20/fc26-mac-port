@@ -94,11 +94,12 @@ static void pctl_factory(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
    2203-0039. Offline: opening an access point or a station works, Scan finds no network (count 0), and creating a network
    (CreateNetwork*) or joining one (Connect*) fails with LDN_WIRELESS_OFF, so states 3 and 5 are never reached. One
    wireless device: the state is shared by every session, as the monitor service (ldn:m) reports it, and no session keeps
-   state of its own (a clone made by the sdk's session manager shares the original's handler; only the original closes). */
+   state of its own (a clone made by the sdk's session manager shares the original's handler; only the original closes).
+   When the last communication object closes, with or without Finalize, the state goes back to None. */
 enum { LDN_NONE, LDN_INITIALIZED, LDN_ACCESS_POINT, LDN_ACCESS_POINT_CREATED, LDN_STATION, LDN_STATION_CONNECTED };
 enum { NETWORK_INFO_SIZE = 0x480, ADVERTISE_MAX = 0x180 };
 static pthread_mutex_t ldn_lock = PTHREAD_MUTEX_INITIALIZER;
-static unsigned ldn_state;
+static unsigned ldn_state, ldn_objects;   /* ldn_objects: live I{User,System}LocalCommunicationService objects */
 static uint32_t ldn_event_w;
 static void ldn_event_make(void) { ldn_event_w = runtime_event_new(); }
 static uint32_t ldn_event(void) {
@@ -136,9 +137,14 @@ static uint32_t ldn_scan(const IpcRequest *rq, IpcResponse *rs) {
 }
 static uint32_t ldn_command(IpcSession *s, int system, const IpcRequest *rq, IpcResponse *rs) {
     unsigned cmd = rq->cmd;
-    /* 402-404 differ between the user and the system interface (switchbrew tables). */
-    if (system && (cmd == 402 || cmd == 403 || cmd == 404)) cmd = cmd == 402 ? 1403 : cmd == 403 ? 1402 : 1404;
-    else if (!system && (cmd == 402 || cmd == 403)) cmd = cmd == 402 ? 1402 : 1403;
+    if (cmd >= 402 && cmd <= 404) {
+        /* The user and the system interface number these differently (switchbrew): InitializeWithVersion(s32, pid, u64)
+           is 402 / 403, SetOperationMode 403 / 402, InitializeWithPriority(s32, s32, pid, u64) 404 on ldn:s only. */
+        if (cmd == (system ? 403u : 402u) || (system && cmd == 404))
+            return IPC_ARG(rq, int32_t, 0) < 0 ? LDN_INVALID_ARGUMENT : ldn_initialize();
+        if (cmd == (system ? 402u : 403u)) return ldn_need(LDN_INITIALIZED, LDN_INITIALIZED);
+        ipc_unimplemented(s, rq);
+    }
     switch (cmd) {
     case 0: { uint32_t v = ldn_state; IPC_OUT(rs, v); return 0; }               /* GetState */
     case 1: case 2: case 4: case 5: case 101: return ldn_no_network();         /* GetNetworkInfo, GetIpv4Address, GetSecurityParameter,
@@ -190,9 +196,6 @@ static uint32_t ldn_command(IpcSession *s, int system, const IpcRequest *rq, Ipc
     case 401: {                                                                 /* Finalize: any state but None -> None */
         uint32_t r = ldn_need(LDN_INITIALIZED, LDN_STATION_CONNECTED); if (!r) ldn_set(LDN_NONE); return r;
     }
-    case 1402: if (IPC_ARG(rq, int32_t, 0) < 0) return LDN_INVALID_ARGUMENT; return ldn_initialize();   /* InitializeWithVersion(s32, pid, u64) */
-    case 1403: return ldn_need(LDN_INITIALIZED, LDN_INITIALIZED);               /* SetOperationMode */
-    case 1404: if (IPC_ARG(rq, int32_t, 0) < 0) return LDN_INVALID_ARGUMENT; return ldn_initialize();   /* InitializeWithPriority (ldn:s) */
     default: ipc_unimplemented(s, rq);                                          /* action frames, tx power, ... */
     }
 }
@@ -203,10 +206,10 @@ static void ldn_handle(IpcSession *s, const IpcRequest *rq, IpcResponse *rs, int
 }
 static void ldn_user(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) { ldn_handle(s, rq, rs, 0); }     /* IUserLocalCommunicationService */
 static void ldn_system(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) { ldn_handle(s, rq, rs, 1); }   /* ISystemLocalCommunicationService */
-static void ldn_close(void *unused) {   /* the client went away (with or without Finalize): the service finalizes it */
+static void ldn_close(void *unused) {   /* the last client went away (with or without Finalize): the service finalizes it */
     (void)unused;
     pthread_mutex_lock(&ldn_lock);
-    ldn_set(LDN_NONE);
+    if (ldn_objects && !--ldn_objects) ldn_set(LDN_NONE);
     pthread_mutex_unlock(&ldn_lock);
 }
 static void ldn_client_monitor(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {   /* IClientProcessMonitor */
@@ -227,6 +230,7 @@ static void ldn_monitor(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) { 
 static void ldn_creator(IpcSession *s, const IpcRequest *rq, IpcResponse *rs, int system) {
     switch (rq->cmd) {
     case 0:                                                                     /* Create{User,System}LocalCommunicationService */
+        pthread_mutex_lock(&ldn_lock); ldn_objects++; pthread_mutex_unlock(&ldn_lock);
         new_object(rs, system ? "ISystemLocalCommunicationService" : "IUserLocalCommunicationService", system ? ldn_system : ldn_user,
                    NULL, ldn_close);
         return;
@@ -245,25 +249,32 @@ static void ldn_monitor_creator(IpcSession *s, const IpcRequest *rq, IpcResponse
    IShopServiceAccessServerInterface -> IShopServiceAccessServer -> IShopServiceAccessor -> IShopServiceAsync. Switchbrew
    gives the command numbers, not their arguments; the objects are made as asked (inputs ignored) and every request then
    fails the way a Switch without a connection fails it: 2164-0056 ResultInternetRequestNotAccepted, which needs no output
-   layout. CreateAsyncInterface returns its event (signalled: the request is over at once) with the object. TODO(mac): its
-   handle is not on switchbrew (docs/SERVICOS_NUVEM.md); the boot log shows each command FC 26 sends. */
+   layout. CreateAsyncInterface returns the object's event with it, signalled then and again by Request (the request is
+   over at once); the object keeps the event's writable handle in its state pointer and closes it with the object.
+   TODO(mac): the event is not on switchbrew (docs/SERVICOS_NUVEM.md); the boot log shows each command FC 26 sends. */
+static uint32_t shop_event(const IpcSession *s) { return (uint32_t)(uintptr_t)s->state; }
 static void shop_async(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {   /* IShopServiceAsync */
     switch (rq->cmd) {
     case 0: return;                                                             /* Cancel */
     case 4:                                                                     /* Request: accepted, ends at once in failure */
         fprintf(stderr, "[totk-net] shop request (nim:eca IShopServiceAsync) fails: offline, result %#x\n", EC_INTERNET_NOT_ACCEPTED);
+        runtime_event_signal(shop_event(s));
         return;
     case 1: case 2: case 3: case 5:                                             /* GetSize, Read, GetErrorCode, Prepare */
         rs->result = EC_INTERNET_NOT_ACCEPTED; return;
     default: ipc_unimplemented(s, rq);
     }
 }
+static void shop_async_close(void *state) {   /* the writable end: the same CloseHandle the game's svcCloseHandle runs */
+    uint64_t r[31] = {(uint64_t)(uintptr_t)state};
+    svc_thread(0x16, r);
+}
 static void shop_accessor(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {   /* IShopServiceAccessor */
     if (rq->cmd != 0) ipc_unimplemented(s, rq);                                 /* CreateAsyncInterface */
     uint32_t event = runtime_event_new();
     runtime_event_signal(event);
     rs->copy[rs->ncopy++] = runtime_event_readable(event);
-    new_object(rs, "IShopServiceAsync", shop_async, NULL, NULL);
+    new_object(rs, "IShopServiceAsync", shop_async, (void *)(uintptr_t)event, shop_async_close);
 }
 static void shop_server(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {   /* IShopServiceAccessServer */
     if (rq->cmd != 0) ipc_unimplemented(s, rq);                                 /* CreateAccessorInterface */

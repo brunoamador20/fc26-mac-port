@@ -77,8 +77,10 @@ static void decode(Decoder *d, const IpcRequest *rq, IpcResponse *rs, int reset,
     int16_t *out = ipc_guest(out_b.addr, out_b.size);
     uint32_t n = be32(in), range = be32(in + 4);
     if (n > in_b.size - 8 || n > INT_MAX) { rs->result = HWOPUS_BAD_FRAME; return; }
-    uint64_t capacity = out_b.size / (sizeof(int16_t) * (uint64_t)d->f.channels);
-    if (capacity > INT_MAX) capacity = INT_MAX;
+    /* At most one Opus frame (120 ms): libopus sizes its float scratch by this on the stack, and an empty packet (packet
+       loss) would otherwise conceal the whole output buffer. */
+    uint64_t capacity = out_b.size / (sizeof(int16_t) * (uint64_t)d->f.channels), longest = (uint64_t)d->f.rate * 3 / 25;
+    if (capacity > longest) capacity = longest;
     pthread_mutex_lock(&d->lock);
     if (reset) {
         if (d->multi) opus_multistream_decoder_ctl(d->multi, OPUS_RESET_STATE);

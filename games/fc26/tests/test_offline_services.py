@@ -66,7 +66,9 @@ class OfflineServices(unittest.TestCase):
     def test_unknown_commands_still_stop_with_name_and_number(self):
         cases = [(('command', 'aoc:u', '7'), 'aoc:u', 7), (('command', 'nim:eca', '1'), 'nim:eca', 1),
                  (('command', 'hwopus', '100'), 'hwopus', 100), (('command', 'pctl', '9'), 'pctl', 9),
-                 (('ldn-command', '500'), 'IUserLocalCommunicationService', 500)]
+                 (('ldn-command', '500'), 'IUserLocalCommunicationService', 500),
+                 (('ldn-command', '404'), 'IUserLocalCommunicationService', 404),     # ldn:s only
+                 (('ldn-command', '1402'), 'IUserLocalCommunicationService', 1402)]
         for args, service, command in cases:
             with self.subTest(service=service, command=command):
                 run = self.run_case(*args)
