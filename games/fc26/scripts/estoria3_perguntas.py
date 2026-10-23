@@ -264,7 +264,7 @@ def main():
     parser.add_argument('--work', type=Path, default=Path.home() / 'fc26-switch/work')
     parser.add_argument('--version', default='v100')
     default_runtime = HERE.parent / 'runtime'
-    parser.add_argument('--runtime', type=Path, default=default_runtime if (default_runtime / 'loader.c').exists() else HERE.parents[1] / 'by3/runtime')
+    parser.add_argument('--runtime', type=Path, default=default_runtime)
     parser.add_argument('--extract', action='store_true', help='also write the .nro / .nrr / .nrs files to <work>/nro')
     a = parser.parse_args()
     report = answer(a.work, a.version, a.runtime, a.extract)
