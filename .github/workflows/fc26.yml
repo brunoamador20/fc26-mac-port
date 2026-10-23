@@ -1,0 +1,57 @@
+name: FC 26 build check
+
+# Compiles games/fc26 on macOS (runtime, graphics layer, launcher) against synthetic generated headers: no game data is
+# used or needed. It proves the code builds and links; probe/boot need the game and run on the owner's Mac.
+# Adapted from the workflow another cloud session wrote for the same story (PR #1).
+on:
+  push:
+    paths: ['games/fc26/**', '.github/workflows/fc26.yml']
+  pull_request:
+    paths: ['games/fc26/**', '.github/workflows/fc26.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: games/fc26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: games/fc26/requirements.txt
+      - name: Python dependencies and link dependencies (opus, libvpx)
+        run: |
+          python -m pip install -r requirements.txt
+          brew install opus libvpx
+      - name: Synthetic tests (on macOS they also compile every runtime source with -Werror)
+        run: |
+          python -m py_compile scripts/*.py tests/*.py third_party/d2r/*.py
+          make test PY=python
+      - name: Synthetic generated headers (what make prepare writes from the game)
+        run: |
+          W="$RUNNER_TEMP/work/build"; mkdir -p "$W"
+          printf '%s\n' '/* CI stub: no game data */' 'static Module modules[] = {{.name="main"},{.name="sdk"}};' \
+            '#define PROBE_PLT 0ULL' '#define PROBE_SLOT 0ULL' > "$W/runtime_tables.h"
+          printf '%s\n' '#define ROMFS_IMAGE_SIZE 0ULL' '#define ROMFS_IMAGE_SHA256 ""' '#define ROMFS_INDEX_SHA256 ""' > "$W/romfs_config.h"
+          printf '%s\n' '#define SHARED_FONT_COUNT 6' \
+            '#define SHARED_FONT_ROWS {"",0ULL,0ULL,""},{"",0ULL,0ULL,""},{"",0ULL,0ULL,""},{"",0ULL,0ULL,""},{"",0ULL,0ULL,""},{"",0ULL,0ULL,""}' > "$W/shared_fonts_config.h"
+      - name: Build the runtime (make runtime)
+        run: make runtime PY=python WORK="$RUNNER_TEMP/work" -j3
+      - name: Build the launcher
+        run: make "$RUNNER_TEMP/work/build/launcher" PY=python WORK="$RUNNER_TEMP/work"
+      - name: The binary starts and refuses a missing rewrite with a clear message
+        run: |
+          set +e
+          out=$("$RUNNER_TEMP/work/build/fc26-native" "$RUNNER_TEMP/none" probe 2>&1); code=$?
+          echo "$out" | tail -5; echo "exit $code"
+          test $code -ne 0 && echo "$out" | grep -q "FAIL: open patched module"
