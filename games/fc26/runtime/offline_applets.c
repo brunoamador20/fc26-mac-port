@@ -25,17 +25,17 @@ static uint32_t show_web_page(uint8_t *out, const void *arg) {
         dm_guest_write_prepare(out, 9);
         memset(out, 0, 9);
     }
-    fprintf(stderr, "[fc26-net] nn::web::ShowWebPage: closed at once (offline), exit reason 0\n");
+    fprintf(stderr, "[totk-net] nn::web::ShowWebPage: closed at once (offline), exit reason 0\n");
     return 0;
 }
 /* Another ShowWebPage overload: its return value's place is not known, so nothing is written. */
 static uint32_t show_web_page_other(void) {
-    fprintf(stderr, "[fc26-net] nn::web::ShowWebPage (other overload): closed at once (offline), return value not written\n");
+    fprintf(stderr, "[totk-net] nn::web::ShowWebPage (other overload): closed at once (offline), return value not written\n");
     return 0;
 }
 static uint32_t request_exit_web_page(void) { return 0; }
 static uint32_t show_shop(void) {
-    fprintf(stderr, "[fc26-net] nn::ec shop applet: closed at once (offline), nothing bought\n");
+    fprintf(stderr, "[totk-net] nn::ec shop applet: closed at once (offline), nothing bought\n");
     return 0;
 }
 

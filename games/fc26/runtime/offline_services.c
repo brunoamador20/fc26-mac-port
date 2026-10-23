@@ -131,7 +131,7 @@ static uint32_t ldn_scan(const IpcRequest *rq, IpcResponse *rs) {
     if (pointer) rs->xout[rs->nxout++] = (IpcBuffer){out->addr, 0, 0};
     int16_t count = 0; IPC_OUT(rs, count);
     static int logged;
-    if (!logged++) fprintf(stderr, "[fc26-net] ldn Scan: no network (offline)\n");
+    if (!logged++) fprintf(stderr, "[totk-net] ldn Scan: no network (offline)\n");
     return 0;
 }
 static uint32_t ldn_command(IpcSession *s, int system, const IpcRequest *rq, IpcResponse *rs) {
@@ -163,7 +163,7 @@ static uint32_t ldn_command(IpcSession *s, int system, const IpcRequest *rq, Ipc
     case 202: case 203: {                                                       /* CreateNetwork(Private): needs 2; offline */
         uint32_t r = ldn_need(LDN_ACCESS_POINT, LDN_ACCESS_POINT);
         if (r) return r;
-        fprintf(stderr, "[fc26-net] ldn %s refused: no wireless (offline), result %#x\n", cmd == 202 ? "CreateNetwork" : "CreateNetworkPrivate", LDN_WIRELESS_OFF);
+        fprintf(stderr, "[totk-net] ldn %s refused: no wireless (offline), result %#x\n", cmd == 202 ? "CreateNetwork" : "CreateNetworkPrivate", LDN_WIRELESS_OFF);
         return LDN_WIRELESS_OFF;
     }
     case 204: case 205: return ldn_need(LDN_ACCESS_POINT_CREATED, LDN_ACCESS_POINT_CREATED);   /* DestroyNetwork / Reject: never 3 */
@@ -182,7 +182,7 @@ static uint32_t ldn_command(IpcSession *s, int system, const IpcRequest *rq, Ipc
     case 302: case 303: {                                                       /* Connect(Private): needs 4; offline */
         uint32_t r = ldn_need(LDN_STATION, LDN_STATION);
         if (r) return r;
-        fprintf(stderr, "[fc26-net] ldn %s refused: no wireless (offline), result %#x\n", cmd == 302 ? "Connect" : "ConnectPrivate", LDN_WIRELESS_OFF);
+        fprintf(stderr, "[totk-net] ldn %s refused: no wireless (offline), result %#x\n", cmd == 302 ? "Connect" : "ConnectPrivate", LDN_WIRELESS_OFF);
         return LDN_WIRELESS_OFF;
     }
     case 304: return ldn_need(LDN_STATION_CONNECTED, LDN_STATION_CONNECTED);    /* Disconnect: never 5 */
@@ -251,7 +251,7 @@ static void shop_async(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {  
     switch (rq->cmd) {
     case 0: return;                                                             /* Cancel */
     case 4:                                                                     /* Request: accepted, ends at once in failure */
-        fprintf(stderr, "[fc26-net] shop request (nim:eca IShopServiceAsync) fails: offline, result %#x\n", EC_INTERNET_NOT_ACCEPTED);
+        fprintf(stderr, "[totk-net] shop request (nim:eca IShopServiceAsync) fails: offline, result %#x\n", EC_INTERNET_NOT_ACCEPTED);
         return;
     case 1: case 2: case 3: case 5:                                             /* GetSize, Read, GetErrorCode, Prepare */
         rs->result = EC_INTERNET_NOT_ACCEPTED; return;
