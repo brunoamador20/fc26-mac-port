@@ -250,6 +250,65 @@ KEY_INDEX = {k: i for i, k in enumerate(('K18', 'KTLS', 'KTLR', 'KGATE', 'KRES0'
 md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
 patch = bytearray(); fix = []; gates = []; stats = {}
 def stat(k): stats[k] = stats.get(k, 0) + 1
+
+import collections
+CHUNK = int(os.environ.get('DM_CHUNK', '262144'))
+
+# 惰性指令序列：按块反汇编与 LRU 缓存，行为与指令列表完全一致。
+# Lazy instruction sequence: chunked disassembly with LRU cache, behaving like a list.
+class LazyInsns:
+    def __init__(self, fa, fb):
+        stat('lazy_function')
+        self.fa = fa
+        self.cache = collections.OrderedDict()
+        end = fa
+        for p0 in range(fa, fb, CHUNK * 4):
+            p1 = min(p0 + CHUNK * 4, fb)
+            count = 0
+            for addr, size, _, _ in md.disasm_lite(bytes(IMG[p0:p1]), p0):
+                count += 1
+                end = addr + size
+            if count < (p1 - p0) // 4:
+                break
+        self.n = (end - fa) // 4
+
+    def __len__(self):
+        return self.n
+
+    def _chunk(self, k):
+        if k in self.cache:
+            self.cache.move_to_end(k)
+            return self.cache[k]
+        c0 = self.fa + 4 * k * CHUNK
+        c1 = min(c0 + 4 * CHUNK, self.fa + 4 * self.n)
+        chunk = list(md.disasm(bytes(IMG[c0:c1]), c0))
+        assert len(chunk) == (c1 - c0) // 4
+        self.cache[k] = chunk
+        if len(self.cache) > 3:
+            self.cache.popitem(last=False)
+        return chunk
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            start, stop, step = idx.indices(self.n)
+            assert step == 1, f'unsupported slice step: {step}'
+            if start >= stop:
+                return []
+            res = []
+            for k in range(start // CHUNK, (stop - 1) // CHUNK + 1):
+                c0_idx = k * CHUNK
+                res.extend(self._chunk(k)[max(start, c0_idx) - c0_idx : min(stop, c0_idx + CHUNK) - c0_idx])
+            return res
+        if idx < 0:
+            idx += self.n
+        if not (0 <= idx < self.n):
+            raise IndexError('list index out of range')
+        return self._chunk(idx // CHUNK)[idx % CHUNK]
+
+    def __iter__(self):
+        num_chunks = (self.n + CHUNK - 1) // CHUNK if self.n else 0
+        for k in range(num_chunks):
+            yield from self._chunk(k)
 def here(): return PATCH_OFF + len(patch)
 def emit(w, kind=None):
     if kind: fix.append((len(patch), kind))
@@ -647,7 +706,12 @@ SIGNED_TABLES = {'277178b7dba1b6d4949a84778d4abc58': {
     0x598ef4: (0x598ee4, 0x2d89038, (680,688,20,696,704,712,720,-5688,-2640), '12000010207ab0b85202008bdef747f940021fd6'),
     0x5f2a9c: (0x5f2a90, 0x2d892e0, (884,892,16,900,-6516), 'f0030f2a12000010207ab0b85202008b40021fd6'),
     0x6397d8: (0x6397cc, 0x2d88e7c, (1376,1384,16,1392,1400,1408,-7264), 'fb0301aa12000010207ab0b85202008b40021fd6'),
-}}
+},
+    # FC 26 1.0.0 main：唯一具有该形态的 br x18（adr x18 基址 + 来自 adrp/add 表的 ldrsw + add x18, x18, xE），23 项，边界 cmp w17, #0x16 | FC 26 1.0.0 main: the only `br x18` with this shape (adr x18 base + ldrsw from an adrp/add table + add x18, x18, xE), 23 entries, bound cmp w17, #0x16.
+    '863e52bfec7ab17b92fb347967f0619d': {
+        0x8c42c14: (0x8c42c08, 0xad44ecc, (16, 36, 48, -100, -124, 68, 104, 208, 208, 208, 208, 208, 208, 208, 208, 208, 16, 36, 48, -100, -124, 68, 104), '10323b9112000010007ab1b85202008b40021fd6'),
+    },
+}
 FLAG_SETTERS = ('cmp', 'cmn', 'tst', 'adds', 'subs', 'ands', 'bics', 'adcs', 'sbcs', 'ccmp', 'ccmn', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'negs', 'ngcs')
 def ldrsw_table(insl, j, fa, fb):
     """Breath of the Wild 1.6.0 (older clang): a table of signed 32-bit offsets from its own base,
@@ -715,7 +779,7 @@ def ldrsw_table(insl, j, fa, fb):
 
 funcs = sorted({func_of(a) for a, (k, _) in kinds.items() if k == 'x18'})
 for fa, fb in funcs:
-    insl = list(md.disasm(bytes(IMG[fa:fb]), fa))
+    insl = LazyInsns(fa, fb) if (fb - fa) // 4 > CHUNK else list(md.disasm(bytes(IMG[fa:fb]), fa))
     ws = find_windows(insl)
     groups, linked_edges = linked_windows(insl, ws)
     window_groups.extend(groups)
