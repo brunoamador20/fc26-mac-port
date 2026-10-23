@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The app icon from the game's own control data: the control NCA in the XCI or NSP carries
 icon_<language>.dat (a 256x256 JPEG); it becomes build/AppIcon.icns (sips and iconutil, both part of macOS).
-usage: extract_app_icon.py <game.xci|game.nsp> --keys <prod.keys> [--title 0100f2c0115b6000] [--output build/AppIcon.icns]"""
+usage: extract_app_icon.py <game.xci|game.nsp> --keys <prod.keys> [--title <id>] [--output build/AppIcon.icns]
+The default title is the game's (assets/game.json)."""
 import argparse
 import subprocess
 import tempfile
@@ -9,6 +10,7 @@ from pathlib import Path
 from extract_exefs import read_at, require, container_entries, common_tickets, nca_inventory
 from extract_romfs import index_romfs
 from extract_shared_fonts import Slice, load_keys, nca_romfs
+import game_config
 
 LANGUAGES = ['AmericanEnglish', 'BritishEnglish', 'Japanese', 'French', 'German', 'LatinAmericanSpanish', 'Spanish',
              'Italian', 'Dutch', 'CanadianFrench', 'Portuguese', 'Russian', 'Korean', 'TraditionalChinese', 'SimplifiedChinese']
@@ -22,8 +24,8 @@ def control_nca(game, keys, title):
         controls = [r for r, _ in records if r['content_type'] == 2 and r['title_id'].lower() == title.lower()]
         require(controls, 'Expected a control NCA for this title in the game file')
         if len(controls) > 1:
-            # a card image holding the base game and its update (Breath of the Wild) has a control NCA for each: the
-            # update's follows its Program NCA (the one with a BKTR section) in the file; else the last one
+            # a card image holding the base game and its update has a control NCA for each: the update's follows its
+            # Program NCA (the one with a BKTR section) in the file; else the last one
             bktr = [i for i, (r, h) in enumerate(records) if r['content_type'] == 0 and r['title_id'].lower() == title.lower()
                     and any(h[0x400 + s * 512 + 4] == 4 for s in range(4))]
             later = [r for i, (r, _) in enumerate(records) if r in controls and bktr and i > bktr[0]]
@@ -35,7 +37,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('game', type=Path)
     ap.add_argument('--keys', type=Path, required=True)
-    ap.add_argument('--title', default='0100f2c0115b6000')
+    ap.add_argument('--title', default=game_config.CONFIG['title_id'].lower())
     ap.add_argument('--output', type=Path, default=Path('build/AppIcon.icns'))
     a = ap.parse_args()
     keys = load_keys(a.keys)

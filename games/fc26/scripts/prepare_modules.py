@@ -3,14 +3,19 @@
 
 ELF preserves NSO virtual segment offsets; it is NOT a macOS executable.
 Only defined dynsym section indices are remapped for ELF section numbering.
+The modules come from assets/game.json (analysis_modules: FC 26 has rtld, main and sdk, no subsdk0).
 """
 import argparse
 import collections
 import hashlib
 import json
 import struct
+import sys
 from pathlib import Path
 import lz4.block
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # also under python -I
+import game_config
 
 
 def check(ok, message):
@@ -219,7 +224,7 @@ def main():
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     inventory = []
-    for name in ['rtld', 'main', 'sdk', 'subsdk0']:
+    for name in game_config.CONFIG['analysis_modules']:
         result = prepare(args.exefs / name, args.output / (name + '.elf'))
         (args.output / (name + '-inventory.json')).write_text(json.dumps(result, indent=2) + '\n')
         summary = {k: result[k] for k in ['module', 'build_id', 'needed', 'segment_hashes_verified']}
