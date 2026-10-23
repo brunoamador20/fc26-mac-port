@@ -7,6 +7,7 @@
 #   make runtime   # <work>/build/fc26-native
 #   make probe     # modules mapped and linked, cross-module calls on 4 threads (no game code beyond that)
 #   make boot      # run it from the work folder (cwd: extracted/ and rewritten/ are read relative to it)
+#   make boot-nnmain  # story 2's check: stop with a JSON verdict at the original nnMain's entry
 # The whole sequence for the Mac is in docs/ESTORIA2_NUVEM.md.
 
 PY ?= python3
@@ -100,6 +101,11 @@ probe: runtime
 boot: runtime
 	@mkdir -p "$(dir $(FC26_LOG))"
 	cd "$(WORK)" && env $(BOOT_ENV) ./build/$(BINARY) rewritten/$(VERSION) boot 2> "$(abspath $(FC26_LOG))"; echo "exit $$?; log: $(FC26_LOG)"
+# Story 2's check: boot (headless, silent) until the original nnMain's entry, then a JSON verdict on stdout. What the host
+# lacks before that is listed by: grep '\[fc26-missing\]' <work>/logs/boot.log
+.PHONY: boot-nnmain
+boot-nnmain:
+	$(MAKE) boot BOOT_ENV="$(BOOT_ENV) TOTK_VERIFY_STARTUP=nnmain"
 
 # This folder's synthetic tests (no game data): config, RomFS index, unknown service / command messages.
 test:

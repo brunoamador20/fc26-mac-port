@@ -1,7 +1,9 @@
 /* In-process Horizon IPC server. Message framing follows the public HIPC/CMIF/TIPC description
    (libnx sf/hipc.h, cmif.h, tipc.h; ISC licence). The SDK client code runs unchanged: requests are
    read from the calling thread's TLS message buffer and answered in place. Unknown services and
-   commands stop the runtime with their name and id instead of returning a fake success. */
+   commands stop the runtime with their name and id instead of returning a fake success, each on one line
+   "[fc26-missing] <what>: <name> <number>" (the same tag in loader.c, services.c, system_services.c and the NVN layer),
+   so `grep '\[fc26-missing\]' <log>` lists what the game needs that the host lacks. */
 #include "runtime.h"
 #include "ipc.h"
 #include <pthread.h>
@@ -89,6 +91,7 @@ void ipc_out(IpcResponse *rs, const void *p, uint32_t n) {
 _Noreturn void ipc_unimplemented(const IpcSession *s, const IpcRequest *rq) {
     fprintf(stderr, "[totk-ipc] %s: command %u not implemented (type %u, data %u bytes, x%u a%u b%u w%u c%u)\n",
             s->name, rq->cmd, rq->type, rq->data_size, rq->nx, rq->na, rq->nb, rq->nw, rq->nc);
+    fprintf(stderr, "[fc26-missing] ipc command: service \"%s\" command %u\n", s->name, rq->cmd);
     runtime_trace_guest(trace_fp, trace_lr);
     runtime_fail("IPC command not implemented");
 }
@@ -189,6 +192,7 @@ static void control(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
         return;
     default:
         fprintf(stderr, "[totk-ipc] %s: control command %u not implemented\n", s->name, rq->cmd);
+        fprintf(stderr, "[fc26-missing] ipc control command: service \"%s\" control command %u\n", s->name, rq->cmd);
         runtime_fail("IPC control command not implemented");
     }
 }
@@ -252,7 +256,11 @@ static void sm(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
         const Service *found = NULL;
         for (unsigned i = 0; i < nservices; i++) if (!strcmp(services[i].name, name)) found = &services[i];
         pthread_mutex_unlock(&registry);
-        if (!found) { fprintf(stderr, "[totk-ipc] sm: service \"%s\" not implemented\n", name); runtime_trace_guest(trace_fp, trace_lr); runtime_fail("IPC service not implemented"); }
+        if (!found) {
+            fprintf(stderr, "[totk-ipc] sm: service \"%s\" not implemented\n", name);
+            fprintf(stderr, "[fc26-missing] ipc service: \"%s\" (sm GetServiceHandle, command 1)\n", name);
+            runtime_trace_guest(trace_fp, trace_lr); runtime_fail("IPC service not implemented");
+        }
         rs->move[rs->nmove++] = runtime_ipc_new_session(found->name, found->handler, found->open ? found->open() : NULL, found->close);
         fprintf(stderr, "[totk-ipc] opened service %s\n", found->name);
         return;
@@ -266,7 +274,11 @@ int runtime_ipc_svc(unsigned num, uint64_t *r) {
     switch (num) {
     case 0x1f: {                                             /* ConnectToNamedPort(x1 name) -> w1 */
         char name[13] = {0}; memcpy(name, (const void *)(uintptr_t)r[1], 12);
-        if (strcmp(name, "sm:")) { fprintf(stderr, "[totk-ipc] named port \"%s\"\n", name); runtime_fail("IPC named port not implemented"); }
+        if (strcmp(name, "sm:")) {
+            fprintf(stderr, "[totk-ipc] named port \"%s\"\n", name);
+            fprintf(stderr, "[fc26-missing] named port: \"%s\" (svc 0x1f ConnectToNamedPort)\n", name);
+            runtime_fail("IPC named port not implemented");
+        }
         r[0] = 0; r[1] = runtime_ipc_new_session("sm:", sm, NULL, NULL); return 1;
     }
     case 0x21: case 0x22: {                                  /* SendSyncRequest(w0) / WithUserBuffer(x0, x1, w2) */

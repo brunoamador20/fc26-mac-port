@@ -130,7 +130,7 @@ void runtime_trace_guest(uint64_t fp,uint64_t lr) {
   lr=f[1];if(f[0]<=fp||f[0]-fp>(64u<<20))break;fp=f[0];
  }
 }
-static void *required(const char *name) { void *p=runtime_symbol(name);if(!p){fprintf(stderr,"missing %s\n",name);runtime_fail("required symbol");}return p; }
+static void *required(const char *name) { void *p=runtime_symbol(name);if(!p){fprintf(stderr,"missing %s\n",name);fprintf(stderr,"[fc26-missing] symbol: %s (required by the loader)\n",name);runtime_fail("required symbol");}return p; }
 #if TARGET_OS_IPHONE
 /* iOS: code written into memory at run time cannot execute, so ios/tools/gen_embed.py compiles each rewritten image into
    this executable: the text (with the game patches already applied on the Mac, TOTK_EXPORT_IOS) and the patch area go
@@ -218,7 +218,7 @@ static void relocate(Module *m) {
    if(!p)p=runtime_override(s->name);
    if(p)p=runtime_hle_wrap_named(p,s->name);   /* host replacements run on the thread's host stack */
    if(!p)p=s->defined?(s->value<m->key_off?m->base+s->value:NULL):runtime_symbol(s->name);
-   if(!p&&s->binding!=2){fprintf(stderr,"%s unresolved %s\n",m->name,s->name);runtime_fail("strong import unresolved");}
+   if(!p&&s->binding!=2){fprintf(stderr,"%s unresolved %s\n",m->name,s->name);fprintf(stderr,"[fc26-missing] import: %s needs %s\n",m->name,s->name);runtime_fail("strong import unresolved");}
    if(!p)m->weak++;
    if(p&&!s->defined)m->cross++;
    v=(uintptr_t)p+(r->kind==1026?0:r->addend);m->symbolic++;

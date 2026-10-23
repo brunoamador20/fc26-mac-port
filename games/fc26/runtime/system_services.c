@@ -91,6 +91,7 @@ static void environment_identifier(char *out) { if (!out) runtime_fail("nsd envi
 static void execute_program(int index, const void *param, uint64_t size) {
     (void)param; fprintf(stderr, "[totk] nn::oe::ExecuteProgram(%d, %llu bytes): program title %016llX\n", index, (unsigned long long)size,
                          (unsigned long long)(GAME_TITLE_ID + (uint64_t)index));
+    fprintf(stderr, "[fc26-missing] sdk function: nn::oe::ExecuteProgram program index %d\n", index);
     runtime_fail("the game asked to start another program of its title (nn::oe::ExecuteProgram), which is not supported yet");
 }
 /* Open users kept across a program jump (PushOpenUsers before ExecuteProgram, PopOpenUsers in the next program). A

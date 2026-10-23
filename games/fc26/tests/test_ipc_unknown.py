@@ -1,5 +1,6 @@
 """An IPC service, command or named port the runtime does not answer stops it with its name and number (runtime/ipc.c),
-which is how stories 3 and 4 find what FC 26 needs (ro, ec, ldn, web, aoc, pctl, codec, ...). Built from the portable
+which is how stories 3 and 4 find what FC 26 needs (ro, ec, ldn, web, aoc, pctl, codec, ...): each stop also writes
+one "[fc26-missing] ..." line, so one grep over a log lists them. Built from the portable
 runtime sources (ipc.c, system_services.c) with tests/ipc_unknown.c; runs on Linux and on the Mac."""
 from pathlib import Path
 import platform
@@ -46,6 +47,7 @@ class UnknownIpc(unittest.TestCase):
                     run = self.run_case(mode, name)
                     self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
                     self.assertIn(f'sm: service "{name}" not implemented', run.stderr)
+                    self.assertIn(f'[fc26-missing] ipc service: "{name}" (sm GetServiceHandle, command 1)', run.stderr)
                     self.assertIn('FAIL: IPC service not implemented', run.stderr)
 
     def test_unknown_command_is_named_and_numbered(self):
@@ -54,12 +56,20 @@ class UnknownIpc(unittest.TestCase):
                 run = self.run_case('command', service, command)
                 self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
                 self.assertIn(f'{service}: command {command} not implemented', run.stderr)
+                self.assertIn(f'[fc26-missing] ipc command: service "{service}" command {command}', run.stderr)
                 self.assertIn('FAIL: IPC command not implemented', run.stderr)
 
     def test_unknown_named_port_is_named(self):
         run = self.run_case('port', 'ro:1')
         self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
         self.assertIn('named port "ro:1"', run.stderr)
+        self.assertIn('[fc26-missing] named port: "ro:1" (svc 0x1f ConnectToNamedPort)', run.stderr)
+
+    def test_one_missing_line_per_stop(self):
+        # grep '[fc26-missing]' on a log gives exactly the stop, once.
+        run = self.run_case('command', 'set', '42')
+        self.assertEqual([l for l in run.stderr.splitlines() if l.startswith('[fc26-missing]')],
+                         ['[fc26-missing] ipc command: service "set" command 42'])
 
 
 if __name__ == '__main__':

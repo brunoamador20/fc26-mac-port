@@ -67,6 +67,7 @@ static uint8_t g_unimpl_seen[NVN_NFUNC];
 uint64_t nvn_unimpl_c(nvn_slot_t *slot, uint64_t x0, uint64_t x1, uint64_t x2) {
     unsigned i = (unsigned)(slot - nvn_slot);
     if (!g_unimpl_seen[i]++) LOG("【红】NVN 未实现被调用：%s (x0=%#llx x1=%#llx x2=%#llx)", nvn_names[i], x0, x1, x2);
+    fprintf(stderr, "[fc26-missing] nvn: %s (slot %u)\n", nvn_names[i], i);   // FC 26: the same tag as the host's stops (runtime/ipc.c)
     die("unimplemented NVN call %s",nvn_names[i]);
 }
 
