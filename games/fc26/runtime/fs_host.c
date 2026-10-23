@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
@@ -139,6 +140,19 @@ static unsigned char save_exists(uint64_t application, const uint64_t *uid) {
     ready(); uint64_t me[2]; runtime_account_uid(me);
     return application == TOTK_APPLICATION_ID && uid && uid[0] == me[0] && uid[1] == me[1];
 }
+static unsigned char save_exists_uid_only(const uint64_t *uid) {
+    return save_exists(TOTK_APPLICATION_ID, uid);
+}
+static unsigned save_exists_ptr(bool *out, uint64_t application, const uint64_t *uid) {
+    if (!out) return R_INVALID_ARGUMENT;
+    *out = save_exists(application, uid) ? true : false;
+    return 0;
+}
+static unsigned save_exists_ptr_uid(bool *out, const uint64_t *uid) {
+    if (!out) return R_INVALID_ARGUMENT;
+    *out = save_exists(TOTK_APPLICATION_ID, uid) ? true : false;
+    return 0;
+}
 /* Other titles' save data (e.g. data-link bonuses) is not present on this host. */
 static unsigned mount_save_ro(const char *name, uint64_t application, const uint64_t *uid) {
     if (!save_exists(application, uid)) return R_TARGET_NOT_FOUND;
@@ -176,10 +190,13 @@ static unsigned read_cache_list(int *count, CacheStorageInfo *out, uint64_t h, i
 }
 static void close_cache_list(uint64_t h) { free((void *)(uintptr_t)h); }
 static void unmount(const char *name) {
+    if (!name) runtime_fail("unmount null mount name");
+    char clean[32]; snprintf(clean, sizeof clean, "%s", name);
+    char *colon = strchr(clean, ':'); if (colon) *colon = 0;
     pthread_mutex_lock(&lock);
-    for (int i = 0; i < 16; i++) if (mounts[i].kind && !strcmp(mounts[i].name, name)) { mounts[i].kind = M_FREE; pthread_mutex_unlock(&lock); return; }
+    for (int i = 0; i < 16; i++) if (mounts[i].kind && !strcmp(mounts[i].name, clean)) { mounts[i].kind = M_FREE; pthread_mutex_unlock(&lock); return; }
     pthread_mutex_unlock(&lock);
-    if (runtime_romfs_unmount(name)) return;
+    if (runtime_romfs_unmount(clean)) return;
     runtime_fail("unmount of unknown fs mount");
 }
 /* EnsureSaveData(uid) (met first with an SDK 13.3.2 game): the profile's save folder is made when storage starts; only the local account owns one. */
@@ -189,25 +206,34 @@ static unsigned ensure_save(const uint64_t *uid) {
     return 0;
 }
 static unsigned commit(const char *name) {
+    if (!name) return R_INVALID_ARGUMENT;
+    char clean[32]; snprintf(clean, sizeof clean, "%s", name);
+    char *colon = strchr(clean, ':'); if (colon) *colon = 0;
     pthread_mutex_lock(&lock); int found = 0, save = 0;
-    for (int i = 0; i < 16; i++) if (mounts[i].kind && !strcmp(mounts[i].name, name)) { found = 1; save = mounts[i].kind == M_SAVE; }
+    for (int i = 0; i < 16; i++) if (mounts[i].kind && !strcmp(mounts[i].name, clean)) { found = 1; save = mounts[i].kind == M_SAVE; }
     pthread_mutex_unlock(&lock);
     if (!found) return R_PATH_NOT_FOUND;
     for (int i = 0; i < NFILES; i++) { pthread_mutex_lock(&lock); int fd = files[i].fd; pthread_mutex_unlock(&lock); if (fd > 0) fcntl(fd, F_FULLFSYNC); }
+    if (save) {
+        int dfd = open(save_root, O_RDONLY);
+        if (dfd >= 0) { fcntl(dfd, F_FULLFSYNC); close(dfd); }
+    }
     if (save && !(getenv("TOTK_PROBE_NEGATIVE") && atoi(getenv("TOTK_PROBE_NEGATIVE")) == 23)) atomic_store(&save_dirty, 0);   /* 23: probe-save's negative control */
     return 0;
 }
 static unsigned char is_mounted(const char *name) {
     if (!name) return 0;
+    char clean[32]; snprintf(clean, sizeof clean, "%s", name);
+    char *colon = strchr(clean, ':'); if (colon) *colon = 0;
     pthread_mutex_lock(&lock);
     for (int i = 0; i < 16; i++) {
-        if (mounts[i].kind && !strcmp(mounts[i].name, name)) {
+        if (mounts[i].kind && !strcmp(mounts[i].name, clean)) {
             pthread_mutex_unlock(&lock);
             return 1;
         }
     }
     pthread_mutex_unlock(&lock);
-    return runtime_romfs_is_mounted(name) ? 1 : 0;
+    return runtime_romfs_is_mounted(clean) ? 1 : 0;
 }
 
 /* Save data sizes for FC 26 proven from control.nacp (initial 62 MiB / 16 MiB journal, max 962 MiB / 32 MiB journal) */
@@ -355,6 +381,7 @@ static void close_file(uint64_t h) {
     if (runtime_romfs_handle(h)) { runtime_romfs_close(h); return; }
     if (!file_of(h, NULL, NULL)) runtime_fail("close invalid file handle");
     pthread_mutex_lock(&lock); int fd = files[h - FILE_BASE].fd, save = files[h - FILE_BASE].save; files[h - FILE_BASE].fd = 0; pthread_mutex_unlock(&lock);
+    if (save && fd > 0) fcntl(fd, F_FULLFSYNC);
     close(fd);
     if (save) { save_touched(); atomic_fetch_sub(&save_writers, 1); }
 }
@@ -1085,6 +1112,9 @@ void *runtime_fs_host_override(const char *name) {
         {"_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", mount_save},
         {"_ZN2nn2fs21MountSaveDataReadOnlyEPKcNS_13ApplicationIdERKNS_7account3UidE", mount_save_ro},
         {"_ZN2nn2fs18IsSaveDataExistingENS_13ApplicationIdERKNS_7account3UidE", save_exists},
+        {"_ZN2nn2fs18IsSaveDataExistingERKNS_7account3UidE", save_exists_uid_only},
+        {"_ZN2nn2fs18IsSaveDataExistingEPbNS_13ApplicationIdERKNS_7account3UidE", save_exists_ptr},
+        {"_ZN2nn2fs18IsSaveDataExistingEPbRKNS_7account3UidE", save_exists_ptr_uid},
         {"_ZN2nn2fs9IsMountedEPKc", is_mounted},
         {"_ZN2nn2fs15GetSaveDataSizeEPlS1_RKNS_7account3UidE", get_save_data_size},
         {"_ZN2nn2fs18GetSaveDataSizeMaxEPlS1_", get_save_data_size_max},
