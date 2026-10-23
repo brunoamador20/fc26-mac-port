@@ -285,12 +285,16 @@ NVN(nvnBufferMap, void *, const NVNbuffer *b){const totk_buffer *v=(const void *
 #ifdef GAME_BOTW
  if(!(v->pool&&v->pool->mem)){static int n;if(n++<12)LOG("【红】nvnBufferMap(%p) -> NULL: magic %#x pool %p offset %lld size %llu",(void *)b,v->magic,(void *)v->pool,(long long)v->off,(unsigned long long)v->size);}
 #endif
- return v->pool&&v->pool->mem?v->pool->mem+v->off:NULL;}
-NVN(nvnBufferGetAddress, NVNbufferAddress, const NVNbuffer *b){return (uintptr_t)h_nvnBufferMap(b);}
+ if(!v||v->magic!=MAGIC('B','U','F',0)||!v->pool||v->pool->magic!=MAGIC('P','O','O','L')||!v->pool->mem)return NULL;
+ if(v->pool->flags&NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)return NULL;
+ return v->pool->mem+v->off;}
+NVN(nvnBufferGetAddress, NVNbufferAddress, const NVNbuffer *b){const totk_buffer *v=(const void *)b;
+ if(!v||v->magic!=MAGIC('B','U','F',0)||!v->pool||v->pool->magic!=MAGIC('P','O','O','L')||!v->pool->mem)return 0;
+ return (NVNbufferAddress)((uintptr_t)v->pool->mem+v->off);}
 NVN(nvnBufferGetMemoryPool, NVNmemoryPool *, const NVNbuffer *b){return (void *)((const totk_buffer *)b)->pool;}
 NVN(nvnBufferGetMemoryOffset, ptrdiff_t, const NVNbuffer *b){return ((const totk_buffer *)b)->off;}
 NVN(nvnBufferGetSize, size_t, const NVNbuffer *b){return ((const totk_buffer *)b)->size;}
-NVN(nvnBufferFlushMappedRange, void, const NVNbuffer *b,ptrdiff_t off,size_t size){const totk_buffer *v=(const void *)b;if(off<0||(uint64_t)off>v->size||size>v->size-(uint64_t)off)die("invalid NVN buffer flush range");dm_guest_write_prepare((uint8_t *)h_nvnBufferMap(b)+off,size);}
+NVN(nvnBufferFlushMappedRange, void, const NVNbuffer *b,ptrdiff_t off,size_t size){const totk_buffer *v=(const void *)b;if(off<0||(uint64_t)off>v->size||size>v->size-(uint64_t)off)die("invalid NVN buffer flush range");void *m=h_nvnBufferMap(b);if(m)dm_guest_write_prepare((uint8_t *)m+off,size);}
 
 // ---------- 描述符池 ----------
 // ---------- Descriptor pools ----------
