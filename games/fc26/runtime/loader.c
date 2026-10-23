@@ -1,5 +1,6 @@
 /* Native ARM64 module loader. Guest images and generated metadata stay local. */
 #include "runtime.h"
+#include "module_offset.h"
 #include "totk_ui_lang.h"
 #include <TargetConditionals.h>
 #include <dlfcn.h>
@@ -119,12 +120,12 @@ int runtime_module_query(uint64_t address,uint64_t *base,uint64_t *size,unsigned
  }
  return 0;
 }
-void runtime_describe_address(uint64_t a,char *out,size_t n){for(unsigned i=0;i<NM;i++)if(a>=(uintptr_t)modules[i].base-modules[i].pre_size&&a<(uintptr_t)modules[i].base+modules[i].size){int64_t o=(int64_t)(a-(uintptr_t)modules[i].base);if(o<0)snprintf(out,n,"%s-0x%llx",modules[i].name,(unsigned long long)(-o));else snprintf(out,n,"%s+0x%llx",modules[i].name,(unsigned long long)o);return;}Dl_info di;if(dladdr((void *)(uintptr_t)a,&di)&&di.dli_sname){snprintf(out,n,"%s+0x%llx",di.dli_sname,(unsigned long long)(a-(uintptr_t)di.dli_saddr));return;}snprintf(out,n,"0x%llx",(unsigned long long)a);}
+void runtime_describe_address(uint64_t a,char *out,size_t n){for(unsigned i=0;i<NM;i++)if(a>=(uintptr_t)modules[i].base-modules[i].pre_size&&a<(uintptr_t)modules[i].base+modules[i].size){char o[MODULE_OFFSET_HEX];module_offset_hex(o,a-(uintptr_t)modules[i].base);snprintf(out,n,"%s%s",modules[i].name,o);return;}Dl_info di;if(dladdr((void *)(uintptr_t)a,&di)&&di.dli_sname){snprintf(out,n,"%s+0x%llx",di.dli_sname,(unsigned long long)(a-(uintptr_t)di.dli_saddr));return;}snprintf(out,n,"0x%llx",(unsigned long long)a);}
 /* Guest frame-pointer chain. Guest threads run on guest stacks (not the host pthread stack), so frames are read with
    mach_vm_read_overwrite (a bad pointer ends the walk instead of faulting); the chain must grow upwards. */
 void runtime_trace_guest(uint64_t fp,uint64_t lr) {
  for(unsigned n=0;n<16;n++) {
-  for(unsigned i=0;i<NM;i++)if(lr>=(uintptr_t)modules[i].base-modules[i].pre_size&&lr<(uintptr_t)modules[i].base+modules[i].size)fprintf(stderr,"[totk] caller %s%+lld\n",modules[i].name,(long long)(int64_t)(lr-(uintptr_t)modules[i].base));
+  for(unsigned i=0;i<NM;i++)if(lr>=(uintptr_t)modules[i].base-modules[i].pre_size&&lr<(uintptr_t)modules[i].base+modules[i].size){char o[MODULE_OFFSET_HEX];module_offset_hex(o,lr-(uintptr_t)modules[i].base);fprintf(stderr,"[totk] caller %s%s\n",modules[i].name,o);}   /* main+0x1234, or main-0x40 in the pre-island (scripts/symbolize.py reads both) */
   if(!fp||fp%8)break;uint64_t f[2];mach_vm_size_t got=0;
   if(mach_vm_read_overwrite(mach_task_self(),fp,16,(uintptr_t)f,&got)!=KERN_SUCCESS||got!=16)break;
   lr=f[1];if(f[0]<=fp||f[0]-fp>(64u<<20))break;fp=f[0];
@@ -332,6 +333,12 @@ static void signal_hex(const char *label,uint64_t value) {
  char b[128];size_t n=0;while(*label)b[n++]=*label++;b[n++]='0';b[n++]='x';
  for(int i=15;i>=0;i--)b[n++]="0123456789abcdef"[(value>>(i*4))&15];b[n++]='\n';write(2,b,n);
 }
+/* " offset=0x<16 hex>" as before for a pc at or after the module base; a pc in the pre-island (negative offset) as
+   " offset=-0x<hex>" (module_offset.h), never the wrapped 0xffff... */
+static void signal_offset(uint64_t off) {
+ if((int64_t)off>=0){signal_hex(" offset=",off);return;}
+ char b[64];size_t n=0;const char *l=" offset=";while(*l)b[n++]=*l++;n+=module_offset_hex(b+n,off);b[n++]='\n';write(2,b,n);
+}
 /* CTR_EL0 for 128-byte host cache lines: DminLine=IminLine=5 (32 words), ERG=CWG=5, PIPT I-cache, IDC/DIC clear. */
 #define HOST_CTR_EL0 0x8555c005ULL
 static void crash(int num,siginfo_t *info,void *context) {
@@ -347,9 +354,9 @@ static void crash(int num,siginfo_t *info,void *context) {
  signal_hex("[totk] signal=",num);signal_hex("fault=",(uintptr_t)info->si_addr);signal_hex("esr=",u->uc_mcontext->__es.__esr);
  {mach_vm_address_t ra=(uintptr_t)info->si_addr;mach_vm_size_t rs=0;vm_region_basic_info_data_64_t ri;mach_msg_type_number_t rc=VM_REGION_BASIC_INFO_COUNT_64;mach_port_t ro=0;
   if(mach_vm_region(mach_task_self(),&ra,&rs,VM_REGION_BASIC_INFO_64,(vm_region_info_t)&ri,&rc,&ro)==KERN_SUCCESS){signal_hex("region=",ra);signal_hex("region size=",rs);signal_hex("region prot=",(uint64_t)ri.protection|((uint64_t)ri.max_protection<<8));}}signal_hex("pc=",pc);signal_hex("lr=",u->uc_mcontext->__ss.__lr);signal_hex("fp=",fp);
- for(unsigned i=0;i<NM;i++)if(pc>=(uintptr_t)modules[i].base-modules[i].pre_size&&pc<(uintptr_t)modules[i].base+modules[i].size){write(2,modules[i].name,strlen(modules[i].name));signal_hex(" offset=",pc-(uintptr_t)modules[i].base);}
+ for(unsigned i=0;i<NM;i++)if(pc>=(uintptr_t)modules[i].base-modules[i].pre_size&&pc<(uintptr_t)modules[i].base+modules[i].size){write(2,modules[i].name,strlen(modules[i].name));signal_offset(pc-(uintptr_t)modules[i].base);}
  for(unsigned i=0;i<29;i++)signal_hex("x=",u->uc_mcontext->__ss.__x[i]);signal_hex("sp=",u->uc_mcontext->__ss.__sp);
- for(unsigned depth=0;depth<24&&fp&&!(fp&15);depth++){uint64_t frame[2];mach_vm_size_t got=0;if(mach_vm_read_overwrite(mach_task_self(),fp,16,(uintptr_t)frame,&got)!=KERN_SUCCESS||got!=16)break;signal_hex("frame lr=",frame[1]);for(unsigned i=0;i<NM;i++)if(frame[1]>=(uintptr_t)modules[i].base-modules[i].pre_size&&frame[1]<(uintptr_t)modules[i].base+modules[i].size){write(2,modules[i].name,strlen(modules[i].name));signal_hex(" offset=",frame[1]-(uintptr_t)modules[i].base);}if(frame[0]==fp)break;fp=frame[0];   /* host-stack switch: frames may move between stacks */}
+ for(unsigned depth=0;depth<24&&fp&&!(fp&15);depth++){uint64_t frame[2];mach_vm_size_t got=0;if(mach_vm_read_overwrite(mach_task_self(),fp,16,(uintptr_t)frame,&got)!=KERN_SUCCESS||got!=16)break;signal_hex("frame lr=",frame[1]);for(unsigned i=0;i<NM;i++)if(frame[1]>=(uintptr_t)modules[i].base-modules[i].pre_size&&frame[1]<(uintptr_t)modules[i].base+modules[i].size){write(2,modules[i].name,strlen(modules[i].name));signal_offset(frame[1]-(uintptr_t)modules[i].base);}if(frame[0]==fp)break;fp=frame[0];   /* host-stack switch: frames may move between stacks */}
  /* TOTK_CRASH_MEM=<reg>[:<signed offset>[:<bytes>]]: dump words at register+offset; TOTK_CRASH_MEM_FOLLOW=k1,k2,...: for each
     listed word index, dump 0x100 bytes at that pointer and the ASCII of every readable pointer inside it (data-structure faults). */
  {const char *e=getenv("TOTK_CRASH_MEM");if(e){unsigned r=(unsigned)strtoul(e,NULL,0);const char *c=strchr(e,':');int64_t off=c?strtoll(c+1,NULL,0):0;const char *c2=c?strchr(c+1,':'):NULL;
@@ -409,6 +416,8 @@ static void probe(void) {
  for(unsigned i=0;i<NM;i++){Module *m=&modules[i];printf("%s{\"name\":\"%s\",\"relative\":%u,\"symbolic\":%u,\"cross\":%u,\"weak_zero\":%u}",i?",":"",m->name,m->relative,m->symbolic,m->cross,m->weak);}
  puts("],\"scope\":\"cross-module calls; constructors and game entry not run\"}");
 }
+/* *off = pc - base as two's complement: (int64_t)*off < 0 in the pre-island. Callers print it signed with
+   module_offset_hex (gfx_bridge.c) or an explicit sign (hle_nvn.c, nvn_mtl.m), never as a plain %llx. */
 int runtime_module_offset(uint64_t pc,const char **name,uint64_t *off) {
  for(unsigned i=0;i<NM;i++)if(pc>=(uintptr_t)modules[i].base-modules[i].pre_size&&pc<(uintptr_t)modules[i].base+modules[i].size){*name=modules[i].name;*off=pc-(uintptr_t)modules[i].base;return 1;}
  return 0;

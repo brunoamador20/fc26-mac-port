@@ -2,6 +2,8 @@
 """Name the functions in a runtime call chain: reads "caller <module>+0x<offset>" lines (or arguments like sdk+0x1234)
 and prints the defined symbol containing each address, from <work>/analysis/runtime-layout.json (prepare_runtime.py).
 Symbols are the modules' own exports; main exports little, so main addresses often stay unnamed.
+A negative offset ("main-0x40", runtime/module_offset.h) is in the module's pre-island (docs/ILHAS_NUVEM.md): rewriter
+patch code before the base, which has no symbol; it is listed as such, in the chain's order.
 The work folder is FC26_WORK, or assets/game.json's default; the module names are the ones in runtime-layout.json."""
 import bisect, json, os, re, subprocess, sys
 from pathlib import Path
@@ -21,13 +23,17 @@ def demangle(names):
     except OSError: return names
 
 text = ' '.join(sys.argv[1:]) if len(sys.argv) > 1 else sys.stdin.read()
-hits = re.findall(r'\b(' + '|'.join(map(re.escape, modules)) + r')\+0x([0-9a-f]+)', text)
+hits = re.findall(r'\b(' + '|'.join(map(re.escape, modules)) + r')([+-])0x([0-9a-f]+)', text)
 out = []
-for mod, off in hits:
-    off = int(off, 16); starts, rows = tables[mod]
+for mod, sign, off in hits:
+    off = int(off, 16)
+    if sign == '-': out.append((mod, -off, None, 0)); continue   # pre-island: no symbols there
+    starts, rows = tables[mod]
     i = bisect.bisect_right(starts, off) - 1
     if i >= 0 and (rows[i][1] == 0 or off < rows[i][0] + rows[i][1]): out.append((mod, off, rows[i][2], off - rows[i][0]))
     else: out.append((mod, off, '?', 0))
-names = demangle([o[2] for o in out])
-for (mod, off, _, delta), n in zip(out, names):
+names = iter(demangle([o[2] for o in out if o[2] is not None]))
+for mod, off, sym, delta in out:
+    if sym is None: print(f'{mod}-{-off:#x}  (pre-island: rewriter patch code before the module base)'); continue
+    n = next(names)
     print(f'{mod}+{off:#x}  {n}' + (f' +{delta:#x}' if n != '?' else ''))
