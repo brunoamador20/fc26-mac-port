@@ -248,7 +248,7 @@ static const char *rom_path(const char *path) {
 static uint64_t lower(const char *name) {uint64_t lo=0,hi=file_count;while(lo<hi){uint64_t m=lo+(hi-lo)/2;if(strcmp(entry_name(entry(m)),name)<0)lo=m+1;else hi=m;}return lo;}
 static unsigned mount_rom(const char *name,void *cache,uint64_t size) {
  (void)cache;(void)size;runtime_fs_init();if(!name||!path_ok(name)||strlen(name)>=sizeof(mount_name)||strchr(name,'/')||strchr(name,':'))return INVALID;
- if(*mount_name&&strcmp(name,mount_name))runtime_fail("second RomFS mount not implemented");strcpy(mount_name,name);return 0;
+ if(*mount_name&&strcmp(name,mount_name)){runtime_missing("romfs: a second RomFS mount \"%s\" (\"%s\" is mounted)",name,mount_name);runtime_fail("second RomFS mount not implemented");}strcpy(mount_name,name);return 0;
 }
 static unsigned mount_rom_name(const char *name) {return mount_rom(name,NULL,0);}   /* the one-argument MountRom, without a cache buffer (met first with SDK 13.3.2) */
 static unsigned cache_size(uint64_t *out) {if(!out)return INVALID;*out=0;return 0;}

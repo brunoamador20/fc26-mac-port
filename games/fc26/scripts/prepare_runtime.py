@@ -9,9 +9,14 @@ checked against assets/expected-v<version>.json first.
 FC 26 1.0.0 has no update: the RomFS is scripts/extract_romfs.py's romfs.bin + index.json, used as they are (the kit's
 earlier fork merged a sparse base and its update into the same two files).
 
---record: on the first run on the Mac, measure every pin that is still null (ExeFS and rewrite SHA-256, main's build ID,
-the RomFS SHA-256), check it against what is already pinned (sizes, file count, hash prefix) and write it into the
-expected file. Run it only after story 1's checks passed (structck and equiv for every module), then commit the file.
+--record: on the first run on the Mac, fill every pin that is still null — the SHA-256 of the ExeFS files and of the
+rewrite, main's build ID (all measured here) and the RomFS SHA-256 that extract_romfs.py measured while extracting
+(index.json; the runtime checks the 13 GB itself on its first boot) — after checking what is already pinned (sizes,
+file count, hash prefix), and write them into the expected file. Run it only after story 1's checks passed (structck
+and equiv for every module), then commit the file.
+
+Nothing is half-written: the three headers are deleted first and rewritten only by a run that gets that far, and the
+RomFS index, which a built runtime checks by hash, is written last, once every other check has passed.
 """
 import argparse
 import hashlib
@@ -72,7 +77,8 @@ class Pins:
             print(f'recorded in {self.path}:\n  ' + '\n  '.join(self.recorded), file=sys.stderr)
 
 
-def module_table(work, name, pins):
+def module_table(work, name, pins, keep_image=False):
+    """keep_image: also return the image bytes ('_image'), for main's PLT search, instead of reading the file twice."""
     path = work / f'rewritten/{VERSION}/{name}.patched.bin'
     need(path.exists(), f'{path} missing: the rewrite of {name} (story 1) goes to rewritten/{VERSION}')
     image = path.read_bytes()
@@ -131,8 +137,11 @@ def module_table(work, name, pins):
         ret, kind, arg, original = line.split()
         need(kind in ['cntpct', 'cntvct', 'svc'], f'{name}: unknown gate kind {kind}')
         gates.append(dict(ret=int(ret, 0), timer=kind != 'svc', arg=int(arg), original=int(original, 0)))
-    return dict(name=name, sha256=digest, size=len(image), layout=layout, tags=tags, symbols=symbols,
-                relocs=relocs, gates=gates, ctor_flag=ctor_flag(image, tags, layout, name))
+    table = dict(name=name, sha256=digest, size=len(image), layout=layout, tags=tags, symbols=symbols,
+                 relocs=relocs, gates=gates, ctor_flag=ctor_flag(image, tags, layout, name))
+    if keep_image:
+        table['_image'] = image
+    return table
 
 
 def ctor_flag(image, tags, layout, name):
@@ -218,43 +227,51 @@ def check_required(modules):
 
 
 def runtime_tables(work, out, pins):
-    modules = [module_table(work, n, pins) for n in MODULES]
+    """runtime_tables.h and analysis/runtime-layout.json, written as they are made: main's tables can be large, and the
+    Mac has 8 GB."""
+    modules = [module_table(work, n, pins, keep_image=(i == 0)) for i, n in enumerate(MODULES)]
     nnmain = check_required(modules)
     main = modules[0]
-    image = (work / f'rewritten/{VERSION}/main.patched.bin').read_bytes()
-    plt, slot = probe_plt(main, image)
-    lines = ['/* Generated locally from validated player images; do not commit. */']
-    for n, m in enumerate(modules):
-        lines.append(f'static const Reloc reloc_{n}[] = {{')
-        lines.extend(f'{{{r["where"]}ULL,{r["kind"]},{r["symbol"]},{r["addend"]}LL}},' for r in m['relocs'])
-        lines.append('};')
-        lines.append(f'static const Symbol symbol_{n}[] = {{')
-        lines.extend('{' + f'{json.dumps(s["name"])},{s["value"]}ULL,{s["size"]}ULL,{int(s["defined"])},{s["binding"]},{s["type"]}' + '},' for s in m['symbols'])
-        lines.append('};')
-        lines.append(f'static const Gate gate_{n}[] = {{')
-        lines.extend(f'{{{g["ret"]}ULL,{g["original"]}ULL,{int(g["timer"])},{g["arg"]}}},' for g in m['gates'])
-        if not m['gates']: lines.append('{0,0,0,0},')
-        lines.append('};')
-    lines.append('static Module modules[] = {')
-    for n, m in enumerate(modules):
-        l = m['layout']
-        lines.append('{' + f'.name={json.dumps(m["name"])},.digest={json.dumps(m["sha256"])},.file_size={m["size"]}ULL,.text_end={l["TEXT_END"]}ULL,.ro_off={l["RO_OFF"]}ULL,.data_off={l["DATA_OFF"]}ULL,.patch_off={l["PATCH_OFF"]}ULL,.key_off={l["KEY_PAGE_OFF"]}ULL,.symbols=symbol_{n},.nsym={len(m["symbols"])},.relocs=reloc_{n},.nreloc={len(m["relocs"])},.gates=gate_{n},.ngate={len(m["gates"])},.init={m["tags"].get(12,0)}ULL,.ctor_flag={m["ctor_flag"]}ULL,.init_array={m["tags"].get(25,0)}ULL,.init_size={m["tags"].get(27,0)}ULL' + '},')
-    lines.append('};')
-    lines.append(f'#define PROBE_PLT {plt}ULL\n#define PROBE_SLOT {slot}ULL')
-    text = '\n'.join(lines) + '\n'
-    (out / 'runtime_tables.h').write_text(text)
-    if len(text) > TABLES_WARN_BYTES:
+    plt, slot = probe_plt(main, main.pop('_image'))
+    with (out / 'runtime_tables.h').open('w') as f:
+        f.write('/* Generated locally from validated player images; do not commit. */\n')
+        for n, m in enumerate(modules):
+            f.write(f'static const Reloc reloc_{n}[] = {{\n')
+            for r in m['relocs']:
+                f.write(f'{{{r["where"]}ULL,{r["kind"]},{r["symbol"]},{r["addend"]}LL}},\n')
+            f.write('};\n')
+            f.write(f'static const Symbol symbol_{n}[] = {{\n')
+            for s in m['symbols']:
+                f.write('{' + f'{json.dumps(s["name"])},{s["value"]}ULL,{s["size"]}ULL,{int(s["defined"])},{s["binding"]},{s["type"]}' + '},\n')
+            f.write('};\n')
+            f.write(f'static const Gate gate_{n}[] = {{\n')
+            for g in m['gates']:
+                f.write(f'{{{g["ret"]}ULL,{g["original"]}ULL,{int(g["timer"])},{g["arg"]}}},\n')
+            if not m['gates']: f.write('{0,0,0,0},\n')
+            f.write('};\n')
+        f.write('static Module modules[] = {\n')
+        for n, m in enumerate(modules):
+            l = m['layout']
+            f.write('{' + f'.name={json.dumps(m["name"])},.digest={json.dumps(m["sha256"])},.file_size={m["size"]}ULL,.text_end={l["TEXT_END"]}ULL,.ro_off={l["RO_OFF"]}ULL,.data_off={l["DATA_OFF"]}ULL,.patch_off={l["PATCH_OFF"]}ULL,.key_off={l["KEY_PAGE_OFF"]}ULL,.symbols=symbol_{n},.nsym={len(m["symbols"])},.relocs=reloc_{n},.nreloc={len(m["relocs"])},.gates=gate_{n},.ngate={len(m["gates"])},.init={m["tags"].get(12,0)}ULL,.ctor_flag={m["ctor_flag"]}ULL,.init_array={m["tags"].get(25,0)}ULL,.init_size={m["tags"].get(27,0)}ULL' + '},\n')
+        f.write('};\n')
+        f.write(f'#define PROBE_PLT {plt}ULL\n#define PROBE_SLOT {slot}ULL\n')
+        size = f.tell()
+    if size > TABLES_WARN_BYTES:
         # TODO(mac): measure clang's time and memory on this header; if it does not fit the 8 GB Mac, load the
         # relocation rows from a binary file instead of C arrays.
-        print(f'warning: runtime_tables.h is {len(text) >> 20} MiB; compiling it needs much memory', file=sys.stderr)
+        print(f'warning: runtime_tables.h is {size >> 20} MiB; compiling it needs much memory', file=sys.stderr)
     (work / 'analysis').mkdir(exist_ok=True)
-    (work / 'analysis/runtime-layout.json').write_text(json.dumps(modules, indent=2) + '\n')
+    with (work / 'analysis/runtime-layout.json').open('w') as f:
+        json.dump(modules, f, indent=2)
+        f.write('\n')
     return dict(modules=[m['name'] for m in modules], relocations=sum(len(m['relocs']) for m in modules),
-                symbols=sum(len(m['symbols']) for m in modules), main_plt=hex(plt), tables_bytes=len(text), **nnmain)
+                symbols=sum(len(m['symbols']) for m in modules), main_plt=hex(plt), tables_bytes=size, **nnmain)
 
 
 def build_id(work):
-    raw = (work / f'extracted/{VERSION}/exefs/main').read_bytes()
+    """The first 20 bytes of main's NSO build ID, as IPSwitch patches name it (@nsobid-...)."""
+    with (work / f'extracted/{VERSION}/exefs/main').open('rb') as f:
+        raw = f.read(0x60)
     need(raw[:4] == b'NSO0', 'exefs/main is not an NSO')
     return raw[0x40:0x54].hex().upper()
 
@@ -327,13 +344,13 @@ def main():
     work = args.work.resolve()
     out = work / 'build'
     out.mkdir(parents=True, exist_ok=True)
-    for stale in ('runtime_tables.h', 'romfs_config.h', 'shared_fonts_config.h'):   # a failed run leaves none of them,
-        (out / stale).unlink(missing_ok=True)                                     # so make runtime cannot mix two runs
+    for stale in ('runtime_tables.h', 'romfs_config.h', 'shared_fonts_config.h'):   # a run that stops leaves at least
+        (out / stale).unlink(missing_ok=True)                                     # one missing: make runtime stops too
     pins = Pins(game_config.EXPECTED_PATH, args.record)
-    romfs = romfs_config(work, out, pins)
     exefs_pins(work, pins)
     runtime = runtime_tables(work, out, pins)
     fonts = shared_fonts_config(work, out)
+    romfs = romfs_config(work, out, pins)   # last: it replaces the RomFS index a built runtime checks
     pins.save()
     print(json.dumps(dict(runtime=runtime, romfs=romfs, shared_fonts=fonts, recorded=len(pins.recorded))))
 

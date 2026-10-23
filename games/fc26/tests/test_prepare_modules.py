@@ -140,6 +140,23 @@ class ModulePath(unittest.TestCase):
             self.run_prepare(record=True)
         self.assertIn('verify_identity', str(stop.exception))
 
+    def test_a_run_that_stops_leaves_no_mixed_outputs(self):
+        # Headers of an earlier run are removed, and the RomFS index (checked by hash by a built runtime) is not touched.
+        romfs = self.work / f'extracted/{pr.VERSION}/romfs'; romfs.mkdir(parents=True)
+        (romfs / 'runtime-index.bin').write_bytes(b'old index')
+        for name in ('runtime_tables.h', 'romfs_config.h', 'shared_fonts_config.h'):
+            (self.out / name).write_text('/* an earlier run */')
+        self.manifest(self.nsp_size + 1)   # exefs_pins stops
+        saved, argv = pr.game_config.EXPECTED_PATH, sys.argv
+        pr.game_config.EXPECTED_PATH, sys.argv = self.pins_path, ['prepare_runtime.py', '--work', str(self.work), '--record']
+        try:
+            with self.assertRaises(SystemExit):
+                pr.main()
+        finally:
+            pr.game_config.EXPECTED_PATH, sys.argv = saved, argv
+        self.assertEqual(sorted(p.name for p in self.out.iterdir()), [])
+        self.assertEqual((romfs / 'runtime-index.bin').read_bytes(), b'old index')
+
     def test_no_plt_call_of_nnmain_warns(self):
         self.write_modules(sdk_jmprel=[])
         err = io.StringIO()

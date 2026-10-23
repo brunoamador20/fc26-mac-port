@@ -1,7 +1,8 @@
 /* Unknown IPC services, commands and named ports stop the runtime with their name and number (runtime/ipc.c), without
    the game: requests are built as the SDK's CMIF client builds them and sent through the same SVC entry the rewritten
    code reaches (SendSyncRequest on the thread's message buffer). The registered services are system_services.c's
-   (set, bsd:u). Usage: ipc_unknown open | service <name> | tipc-service <name> | command <service> <id> | port <name>.
+   (set, bsd:u); stops go through the runtime's own runtime_fail / runtime_missing (missing.c).
+   Usage: ipc_unknown open | service <name> | tipc-service <name> | command <service> <id> | port <name> | message-type <n> | fail <message>.
    tipc-service asks sm: in the TIPC framing newer SDKs use for it (type 16 + command, arguments right after the header). */
 #include "runtime.h"
 #include "ipc.h"
@@ -20,7 +21,6 @@ uint32_t runtime_handle_new(int session, void *obj) {
 }
 void *runtime_handle_get(uint32_t h, int session) { h -= 0x100; return h < nobjects && kinds[h] == session ? objects[h] : NULL; }
 void *runtime_handle_take_session(uint32_t h) { void *s = runtime_handle_get(h, 1); if (s) objects[h - 0x100] = NULL; return s; }
-_Noreturn void runtime_fail(const char *message) { fprintf(stderr, "[totk] FAIL: %s\n", message); exit(3); }
 void runtime_trace_guest(uint64_t fp, uint64_t lr) { (void)fp; (void)lr; }
 uint64_t runtime_desired_language(void) { uint64_t v = 0; memcpy(&v, "en-US", 5); return v; }
 
@@ -62,6 +62,7 @@ static uint32_t open_service(uint32_t sm, const char *name) {
 int main(int argc, char **argv) {
     if (argc < 2) return 2;
     if (pthread_key_create(&runtime_keys[2], NULL) || pthread_setspecific(runtime_keys[2], msg)) return 2;
+    if (!strcmp(argv[1], "fail") && argc == 3) runtime_fail(argv[2]);   /* runtime_fail alone, no runtime_missing first */
     if (!strcmp(argv[1], "port") && argc == 3) { connect_port(argv[2]); puts("unexpected: port opened"); return 1; }
     uint32_t sm = connect_port("sm:");
     request(0, NULL, 0); sync_request(sm);                                       /* RegisterClient */
@@ -78,6 +79,11 @@ int main(int argc, char **argv) {
         memset(msg, 0, sizeof msg); msg[0] = 16 + 1; msg[1] = 2;            /* TIPC GetServiceHandle(name) */
         memcpy(&msg[2], argv[2], strnlen(argv[2], 8));
         sync_request(sm); puts("unexpected: service opened"); return 1;
+    }
+    if (!strcmp(argv[1], "message-type") && argc == 3) {                /* a HIPC type the host does not know */
+        uint32_t set = open_service(sm, "set");
+        request(0, NULL, 0); msg[0] = (uint32_t)strtoul(argv[2], NULL, 0); sync_request(set);
+        puts("unexpected: message answered"); return 1;
     }
     if (!strcmp(argv[1], "command") && argc == 4) {
         uint32_t s = open_service(sm, argv[2]);

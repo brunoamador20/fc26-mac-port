@@ -12,7 +12,9 @@
 
 PY ?= python3
 GAME_CONFIG := "$(PY)" scripts/game_config.py
-WORK ?= $(shell $(GAME_CONFIG) work)
+ifndef WORK
+WORK := $(shell $(GAME_CONFIG) work)
+endif
 VERSION := $(shell $(GAME_CONFIG) version_dir)
 MODULES := $(shell $(GAME_CONFIG) modules)
 BINARY := $(shell $(GAME_CONFIG) binary)
@@ -40,7 +42,7 @@ check-config:
 	$(GAME_CONFIG) check
 
 PREPARE_FLAGS ?=
-prepare: check-config
+prepare:   # prepare_runtime.py runs the check-config checks itself
 	"$(PY)" scripts/prepare_runtime.py --work "$(WORK)" $(PREPARE_FLAGS)
 
 $(GENERATED):
@@ -67,7 +69,7 @@ runtime: $(OUT)/$(BINARY)
 rewrite:
 	@mkdir -p "$(WORK)/rewritten/$(VERSION)"
 	@for m in $(MODULES); do \
-	  if [ "$$m" = main ] && ! grep -q 'class LazyInsns' third_party/d2r/patch_nso.py; then \
+	  if [ "$$m" = main ] && ! grep -q '^class LazyInsns' third_party/d2r/patch_nso.py; then \
 	    echo "refusing to rewrite main with this patch_nso.py: it has no chunked disassembly (story 1, docs/BRIEFING.md)"; exit 1; fi; \
 	  echo "rewrite $$m"; \
 	  env $$($(GAME_CONFIG) rewrite-env) "$(PY)" third_party/d2r/patch_nso.py "$(WORK)/extracted/$(VERSION)/exefs/$$m" "$(WORK)/rewritten/$(VERSION)" $$m || exit 1; \
@@ -107,10 +109,10 @@ PROBE_LOG ?= $(WORK)/logs/probe.log
 BOOT_ENV ?= TOTK_HEADLESS=1 TOTK_AUDIO_OFF=1 FC26_AUDIO=0
 probe: runtime
 	@mkdir -p "$(dir $(PROBE_LOG))"
-	cd "$(WORK)" && ./build/$(BINARY) rewritten/$(VERSION) probe 2> "$(abspath $(PROBE_LOG))"; echo "exit $$?; log: $(PROBE_LOG)"
+	cd "$(WORK)" && ./build/$(BINARY) rewritten/$(VERSION) probe 2> "$(abspath $(PROBE_LOG))"; s=$$?; echo "exit $$s; log: $(PROBE_LOG)"; exit $$s
 boot: runtime
 	@mkdir -p "$(dir $(FC26_LOG))"
-	cd "$(WORK)" && env $(BOOT_ENV) ./build/$(BINARY) rewritten/$(VERSION) boot 2> "$(abspath $(FC26_LOG))"; echo "exit $$?; log: $(FC26_LOG)"
+	cd "$(WORK)" && env $(BOOT_ENV) ./build/$(BINARY) rewritten/$(VERSION) boot 2> "$(abspath $(FC26_LOG))"; s=$$?; echo "exit $$s; log: $(FC26_LOG)"; exit $$s
 # Story 2's check: boot (headless, silent) until the original nnMain's entry, then a JSON verdict on stdout. What the host
 # lacks before that is listed by: grep '\[fc26-missing\]' <work>/logs/boot.log
 .PHONY: boot-nnmain
@@ -133,7 +135,7 @@ patches:
 APP ?= FC 26.app
 GAME ?=
 KEYS ?=
-$(OUT)/launcher: app/launcher.m Makefile
+$(OUT)/launcher: app/launcher.m assets/game.json Makefile   # BINARY and VERSION are compiled in
 	@mkdir -p "$(dir $@)"
 	xcrun clang -std=gnu11 -O2 -Wall -Wextra -Werror -fobjc-arc -DFC26_BINARY='"$(BINARY)"' -DFC26_VERSION_DIR='"$(VERSION)"' \
 	  app/launcher.m -framework Cocoa -o "$@"

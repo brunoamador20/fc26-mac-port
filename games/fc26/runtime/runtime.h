@@ -13,7 +13,9 @@ typedef struct {
  uint8_t *base; unsigned relative, symbolic, cross, weak;
 } Module;
 extern pthread_key_t runtime_keys[8];
-_Noreturn void runtime_fail(const char *message);
+_Noreturn void runtime_fail(const char *message);   /* runtime/missing.c */
+/* runtime/missing.c: one "[fc26-missing] <what>" line for a stop on something the host lacks (then runtime_fail). */
+void runtime_missing(const char *format, ...) __attribute__((format(printf, 1, 2)));
 void *runtime_symbol(const char *name);
 void *runtime_override(const char *name);
 void runtime_hle_stack_init(uint64_t tsd_offset);

@@ -2,14 +2,14 @@
 """Name the functions in a runtime call chain: reads "caller <module>+0x<offset>" lines (or arguments like sdk+0x1234)
 and prints the defined symbol containing each address, from <work>/analysis/runtime-layout.json (prepare_runtime.py).
 Symbols are the modules' own exports; main exports little, so main addresses often stay unnamed.
-The work folder is FC26_WORK, or assets/game.json's default; the module names are the ones in runtime-layout.json."""
+The work folder is FC26_WORK, else WORK (as the Makefile), else assets/game.json's default; the module names are the ones in runtime-layout.json."""
 import bisect, json, os, re, subprocess, sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))   # also under python -I
 import game_config
 
-work = Path(os.environ.get('FC26_WORK') or Path(__file__).resolve().parents[1] / game_config.CONFIG['work'])
+work = Path(os.environ.get('FC26_WORK') or os.environ.get('WORK') or Path(__file__).resolve().parents[1] / game_config.CONFIG['work'])
 modules = {m['name']: m for m in json.loads((work / 'analysis/runtime-layout.json').read_text())}
 tables = {}
 for name, m in modules.items():

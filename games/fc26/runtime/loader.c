@@ -24,7 +24,6 @@
 #define NM (sizeof(modules)/sizeof(modules[0]))
 pthread_key_t runtime_keys[8];
 static uint64_t timer_calls, svc_calls;
-_Noreturn void runtime_fail(const char *message) { fprintf(stderr,"[totk] FAIL: %s\n",message); exit(1); }
 static void need(bool c,const char *m) { if(!c) runtime_fail(m); }
 static size_t page_up(size_t x) { return (x+0x3fff)&~(size_t)0x3fff; }
 static unsigned hash_name(const char *s) { unsigned h=2166136261u; for(;*s;s++)h=(h^(uint8_t)*s)*16777619u;return h; }
@@ -130,7 +129,7 @@ void runtime_trace_guest(uint64_t fp,uint64_t lr) {
   lr=f[1];if(f[0]<=fp||f[0]-fp>(64u<<20))break;fp=f[0];
  }
 }
-static void *required(const char *name) { void *p=runtime_symbol(name);if(!p){fprintf(stderr,"missing %s\n",name);fprintf(stderr,"[fc26-missing] symbol: %s (required by the loader)\n",name);runtime_fail("required symbol");}return p; }
+static void *required(const char *name) { void *p=runtime_symbol(name);if(!p){fprintf(stderr,"missing %s\n",name);runtime_missing("symbol: %s (required by the loader)",name);runtime_fail("required symbol");}return p; }
 #if TARGET_OS_IPHONE
 /* iOS: code written into memory at run time cannot execute, so ios/tools/gen_embed.py compiles each rewritten image into
    this executable: the text (with the game patches already applied on the Mac, TOTK_EXPORT_IOS) and the patch area go
@@ -219,7 +218,7 @@ static void relocate(Module *m) {
    if(!p)p=runtime_override(s->name);
    if(p)p=runtime_hle_wrap_named(p,s->name);   /* host replacements run on the thread's host stack */
    if(!p)p=s->defined?(s->value<m->key_off?m->base+s->value:NULL):runtime_symbol(s->name);
-   if(!p&&s->binding!=2){fprintf(stderr,"%s unresolved %s\n",m->name,s->name);fprintf(stderr,"[fc26-missing] import: %s needs %s\n",m->name,s->name);runtime_fail("strong import unresolved");}
+   if(!p&&s->binding!=2){fprintf(stderr,"%s unresolved %s\n",m->name,s->name);runtime_missing("import: %s needs %s",m->name,s->name);runtime_fail("strong import unresolved");}
    if(!p)m->weak++;
    if(p&&!s->defined)m->cross++;
    v=(uintptr_t)p+(r->kind==1026?0:r->addend);m->symbolic++;
@@ -400,19 +399,23 @@ static void module_inits(void) {
  for(unsigned i=0;i<NM;i++){char detail[128];snprintf(detail,sizeof detail,TOTK_UI("运行 %s 游戏模块初始化代码（%u/%u）","Running the %s game module initializers (%u/%u)"),modules[i].name,i+1,(unsigned)NM);runtime_boot_status(TOTK_UI("初始化游戏模块","Initializing game modules"),detail);fprintf(stderr,"[totk] ENTER %s DT_INIT\n",modules[i].name);((void(*)(void))(modules[i].base+modules[i].init))();uint32_t state;memcpy(&state,modules[i].base+modules[i].ctor_flag,4);need(state==2,"DT_INIT deferred or skipped constructors");
  fprintf(stderr,"[totk] RETURN %s DT_INIT state=%u init_array_count=%llu\n",modules[i].name,state,(unsigned long long)(modules[i].init_size/8));}
 }
+/* Both startup checkpoints first require every module's DT_INIT to have finished its constructors (state word 2). */
+static void constructors_done(void) {
+ for(unsigned i=0;i<NM;i++){uint32_t state;memcpy(&state,modules[i].base+modules[i].ctor_flag,4);need(state==2,"constructor checkpoint state");}
+}
 /* TOTK_VERIFY_STARTUP=nnmain: stop at the entry of the original nnMain (called through sdk's PLT, services.c observer)
    once every module's DT_INIT finished its constructors: the story-2 goal, independent of what nnMain calls first. */
 void runtime_startup_checkpoint_nnmain(uintptr_t caller) {
  const char *e=getenv("TOTK_VERIFY_STARTUP");if(!e||strcmp(e,"nnmain"))return;
- for(unsigned i=0;i<NM;i++){uint32_t state;memcpy(&state,modules[i].base+modules[i].ctor_flag,4);need(state==2,"constructor checkpoint state");}
+ constructors_done();
  char where[96];runtime_describe_address(caller,where,sizeof where);
  printf("{\"status\":\"pass\",\"phase\":3,\"modules\":%u,\"nnmain_caller\":\"%s\",\"scope\":\"all DT_INIT constructor loops completed; original nnMain entered, not run\"}\n",(unsigned)NM,where);fflush(stdout);_exit(0);
 }
-/* TOTK_VERIFY_STARTUP=1 (any other value): stop when nnMain sets the focus handling mode (services.c focus_mode). */
+/* TOTK_VERIFY_STARTUP=1 (any value but nnmain): stop when nnMain sets the focus handling mode (services.c focus_mode).
+   Not in nnmain mode: a pass there must come from the nnMain entry itself, never from a call made elsewhere. */
 void runtime_startup_checkpoint(uintptr_t caller) {
- if(!getenv("TOTK_VERIFY_STARTUP"))return;
-
- for(unsigned i=0;i<NM;i++){uint32_t state;memcpy(&state,modules[i].base+modules[i].ctor_flag,4);need(state==2,"constructor checkpoint state");}
+ const char *e=getenv("TOTK_VERIFY_STARTUP");if(!e||!strcmp(e,"nnmain"))return;
+ constructors_done();
  printf("{\"status\":\"pass\",\"phase\":4,\"caller_main_offset\":\"0x%llx\",\"scope\":\"all DT_INIT constructor loops completed; original nnMain prefix executed; stops at focus setup\"}\n",(unsigned long long)(caller-(uintptr_t)modules[0].base));fflush(stdout);_exit(0);
 }
 static void module_finis(void) { runtime_fail("guest exited: module finalizers not yet implemented"); }

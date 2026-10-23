@@ -30,10 +30,15 @@ def slug(name):
     return re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
 
 
+def same_build_id(a, b):
+    """IPSwitch files give the NSO build ID as its first 20 bytes or as all 32 (zero-padded); compare both alike."""
+    return a.strip().upper().rstrip('0') == b.strip().upper().rstrip('0')
+
+
 def parse(path, build_id):
     text = path.read_text(errors='replace').splitlines()
     ids = [l.split('-', 1)[1].strip().upper() for l in text if l.startswith('@nsobid-')]
-    if ids != [build_id]:
+    if len(ids) != 1 or not same_build_id(ids[0], build_id):
         raise ValueError(f'{path}: build ID {ids} is not main {DISPLAY} ({build_id})')
     patches, enabled = [], False
     for n, line in enumerate(text, 1):

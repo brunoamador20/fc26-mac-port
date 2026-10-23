@@ -156,7 +156,9 @@ int main(int argc, char **argv) {
         NSString *work = work_folder(), *home = NSHomeDirectory();
         NSString *data = [home stringByAppendingPathComponent:@"Library/Application Support/MacNativeGames/FC26"];
         NSString *logs = [home stringByAppendingPathComponent:@"Library/Logs/MacNativeGames"];
-        NSString *profile = [data stringByAppendingPathComponent:@"profile"], *slot = [data stringByAppendingPathComponent:@"game-slot"];
+        /* The game slot is the work folder's (<work>/analysis/game-slot), the one `make boot` uses by default: one queue, so
+           an agent's test and the player's game never run together and the player's goes first (runtime/game_slot.c). */
+        NSString *profile = [data stringByAppendingPathComponent:@"profile"], *slot = [work stringByAppendingPathComponent:@"analysis/game-slot"];
         if (!make_dir(profile) || !make_dir(slot) || !make_dir(logs)) { fail([NSString stringWithFormat:@"%@", data]); return 1; }
         if (chdir(work.fileSystemRepresentation)) { fail(work); return 1; }   // the runtime reads extracted/ and rewritten/ relative to it
 
