@@ -325,18 +325,18 @@ static void *ro_lookup_global_auto(const char *name) {
 void ro_module_init_sdk(void) {
     RoListEntry **p_auto = (RoListEntry **)runtime_symbol("_ZN2nn2ro6detail15g_pAutoLoadListE");
     RoListEntry **p_manual = (RoListEntry **)runtime_symbol("_ZN2nn2ro6detail17g_pManualLoadListE");
-    void ***p_lookup_auto = (void ***)runtime_symbol("_ZN2nn2ro6detail34g_pLookupGlobalAutoFunctionPointerE");
+    void **p_lookup_auto = (void **)runtime_symbol("_ZN2nn2ro6detail34g_pLookupGlobalAutoFunctionPointerE");
     void ***p_lookup_manual = (void ***)runtime_symbol("_ZN2nn2ro6detail36g_pLookupGlobalManualFunctionPointerE");
     uint8_t **p_debug = (uint8_t **)runtime_symbol("_ZN2nn2ro6detail14g_pRoDebugFlagE");
 
     if (p_auto) *p_auto = &s_auto_list;
     if (p_manual) *p_manual = &s_manual_list;
     if (p_debug) *p_debug = &s_ro_debug_flag;
-    if (p_lookup_manual) *p_lookup_manual = &s_lookup_manual_fn;
+    if (p_lookup_manual) *p_lookup_manual = &s_lookup_manual_fn;   /* a cell the sdk stores its LookupGlobalManual into (sdk+0x149fd0) */
     if (p_lookup_auto) {
         if (!s_lookup_auto_fn)
             s_lookup_auto_fn = runtime_hle_wrap_named((void *)ro_lookup_global_auto, "ro_lookup_global_auto");
-        *p_lookup_auto = &s_lookup_auto_fn;
+        *p_lookup_auto = s_lookup_auto_fn;   /* called directly (sdk+0x14ab34/0x14c62c: ldr x8, [x8]; blr x8) */
     }
 }
 
