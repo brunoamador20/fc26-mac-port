@@ -45,13 +45,26 @@ EDITS = {
         (' return 0;\n}\nvoid runtime_describe_address(', f' {F["query"]}\n}}\nvoid runtime_describe_address('),
         ('Dl_info di;if(dladdr((void *)(uintptr_t)a,&di)', F['describe'] + 'Dl_info di;if(dladdr((void *)(uintptr_t)a,&di)'),
         (' return 0;\n}\nuintptr_t runtime_frame_controller_return_pc(', f' {F["offset"]}\n}}\nuintptr_t runtime_frame_controller_return_pc('),
-        ('fprintf(stderr,"[totk] caller %s+0x%llx\\n",modules[i].name,(unsigned long long)(lr-(uintptr_t)modules[i].base));\n',
-         'fprintf(stderr,"[totk] caller %s+0x%llx\\n",modules[i].name,(unsigned long long)(lr-(uintptr_t)modules[i].base));\n'
-         f'  {F["trace"]}\n'),
-        ('signal_hex(" offset=",pc-(uintptr_t)modules[i].base);}\n',
-         f'signal_hex(" offset=",pc-(uintptr_t)modules[i].base);}}\n {F["crash_pc"]}\n'),
-        ('signal_hex(" offset=",frame[1]-(uintptr_t)modules[i].base);}if(frame[0]==fp)break;',
-         'signal_hex(" offset=",frame[1]-(uintptr_t)modules[i].base);}' + F['crash_frame'] + 'if(frame[0]==fp)break;'),
+        ([
+            ('fprintf(stderr,"[totk] caller %s%s\\n",modules[i].name,o);}   /* main+0x1234, or main-0x40 in the pre-island (scripts/symbolize.py reads both) */\n',
+             'fprintf(stderr,"[totk] caller %s%s\\n",modules[i].name,o);}   /* main+0x1234, or main-0x40 in the pre-island (scripts/symbolize.py reads both) */\n'
+             f'  {F["trace"]}\n'),
+            ('fprintf(stderr,"[totk] caller %s+0x%llx\\n",modules[i].name,(unsigned long long)(lr-(uintptr_t)modules[i].base));\n',
+             'fprintf(stderr,"[totk] caller %s+0x%llx\\n",modules[i].name,(unsigned long long)(lr-(uintptr_t)modules[i].base));\n'
+             f'  {F["trace"]}\n'),
+        ]),
+        ([
+            ('signal_offset(pc-(uintptr_t)modules[i].base);}\n',
+             f'signal_offset(pc-(uintptr_t)modules[i].base);}}\n {F["crash_pc"]}\n'),
+            ('signal_hex(" offset=",pc-(uintptr_t)modules[i].base);}\n',
+             f'signal_hex(" offset=",pc-(uintptr_t)modules[i].base);}}\n {F["crash_pc"]}\n'),
+        ]),
+        ([
+            ('signal_offset(frame[1]-(uintptr_t)modules[i].base);}if(frame[0]==fp)break;',
+             'signal_offset(frame[1]-(uintptr_t)modules[i].base);}' + F['crash_frame'] + 'if(frame[0]==fp)break;'),
+            ('signal_hex(" offset=",frame[1]-(uintptr_t)modules[i].base);}if(frame[0]==fp)break;',
+             'signal_hex(" offset=",frame[1]-(uintptr_t)modules[i].base);}' + F['crash_frame'] + 'if(frame[0]==fp)break;'),
+        ]),
         (' need(argc==3,', None),   # set_dir goes at the end of main's argument check line (see edit())
         (' for(unsigned i=0;i<NM;i++){seal(&modules[i]);check_permissions(&modules[i]);}\n',
          ' for(unsigned i=0;i<NM;i++){seal(&modules[i]);check_permissions(&modules[i]);}\n'
@@ -74,16 +87,33 @@ EDITS = {
 def edit(name, text):
     """The edited text and how many edits were already in; ValueError when an anchor is not there exactly once."""
     done = 0
-    for old, new in EDITS[name]:
-        if new is None:
-            line = next((l for l in text.splitlines(keepends=True) if l.startswith(old)), None)
-            if line is None: raise ValueError(f'{name}: no line starting with {old!r}')
-            if F['set_dir'] in line: done += 1; continue
-            old, new = line, line.rstrip('\n') + F['set_dir'] + "   /* NRO images sit next to main's */\n"
-        if new in text: done += 1; continue
-        count = text.count(old)
-        if count != 1: raise ValueError(f'{name}: anchor found {count} times: {old.strip()[:90]!r}')
-        text = text.replace(old, new)
+    for item in EDITS[name]:
+        variants = item if isinstance(item, list) else [item]
+        if any(new in text for _, new in variants if new is not None):
+            done += 1
+            continue
+        matched = []
+        for old, new in variants:
+            if new is None:
+                line = next((l for l in text.splitlines(keepends=True) if l.startswith(old)), None)
+                if line is not None:
+                    if F['set_dir'] in line:
+                        matched.append((True, None, None))
+                    else:
+                        matched.append((False, line, line.rstrip('\n') + F['set_dir'] + "   /* NRO images sit next to main's */\n"))
+            else:
+                count = text.count(old)
+                if count == 1:
+                    matched.append((False, old, new))
+                elif count > 1:
+                    raise ValueError(f'{name}: anchor found {count} times: {old.strip()[:90]!r}')
+        if not matched:
+            raise ValueError(f'{name}: anchor found 0 times: {variants[0][0].strip()[:90]!r}')
+        already_in, old_str, new_str = matched[0]
+        if already_in:
+            done += 1
+            continue
+        text = text.replace(old_str, new_str)
     return text, done
 
 

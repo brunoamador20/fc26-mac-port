@@ -1777,7 +1777,7 @@ static void bindprog_log(const prog_t *o, int stages) {
     uint64_t gfp = sw ? sw[0] : 0, glr = sw ? sw[1] : 0;
     for (int d = 0; d < 8 && n < (int)sizeof b - 48; d++) {
         const char *nm; uint64_t off;
-        if (runtime_module_offset(glr, &nm, &off)) n += snprintf(b + n, sizeof b - n, " %s+%#llx", nm, (unsigned long long)off); else n += snprintf(b + n, sizeof b - n, " %#llx", (unsigned long long)glr);
+        if (runtime_module_offset(glr, &nm, &off)) n += snprintf(b + n, sizeof b - n, " %s%s%#llx", nm, (int64_t)off < 0 ? "-" : "+", (unsigned long long)((int64_t)off < 0 ? 0 - off : off));   /* main-0x.. in the pre-island */ else n += snprintf(b + n, sizeof b - n, " %#llx", (unsigned long long)glr);
         if (!gfp || (gfp & 7)) break; uint64_t *f = (uint64_t *)(uintptr_t)gfp; glr = f[1]; gfp = f[0]; if (!glr) break;
     }
     LOG("%s", b);

@@ -40,7 +40,10 @@ class GameConfig(unittest.TestCase):
         pins = json.loads(game_config.EXPECTED_PATH.read_text())
         self.assertEqual(pins['title_id'], game_config.CONFIG['title_id'])
         self.assertEqual(pins['display_version'], game_config.CONFIG['display_version'])
-        self.assertEqual(set(pins['rewritten_sha256']), {f'{m}.patched.bin' for m in game_config.MODULES})
+        # every module's patched.bin; a <module>.pre.bin pin appears once --record measured a rewrite with a pre-island
+        rewritten = set(pins['rewritten_sha256'])
+        self.assertLessEqual({f'{m}.patched.bin' for m in game_config.MODULES}, rewritten)
+        self.assertLessEqual(rewritten, {f'{m}.{p}' for m in game_config.MODULES for p in ('patched.bin', 'pre.bin')})
         self.assertEqual(set(pins['exefs_sha256']), set(game_config.CONFIG['analysis_modules']) | {'main.npdm'})
 
     def test_makefile_reads_the_config(self):

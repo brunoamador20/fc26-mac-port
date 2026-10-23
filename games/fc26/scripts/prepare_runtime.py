@@ -136,12 +136,40 @@ def module_table(work, name, pins, keep_image=False):
     for line in (work / f'rewritten/{VERSION}/{name}.gates.tsv').read_text().splitlines():
         ret, kind, arg, original = line.split()
         need(kind in ['cntpct', 'cntvct', 'svc'], f'{name}: unknown gate kind {kind}')
-        gates.append(dict(ret=int(ret, 0), timer=kind != 'svc', arg=int(arg), original=int(original, 0)))
+        # ret may be negative (a gate in the pre-island); store it as an unsigned 64-bit offset from base, which the
+        # loader adds to base (base + (uint64)ret wraps to base - |ret|), so a negative offset resolves correctly.
+        gates.append(dict(ret=int(ret, 0) & ((1 << 64) - 1), timer=kind != 'svc', arg=int(arg), original=int(original, 0)))
+    pre_size, pre_digest = pre_island(work, name, layout, pins)
     table = dict(name=name, sha256=digest, size=len(image), layout=layout, tags=tags, symbols=symbols,
-                 relocs=relocs, gates=gates, ctor_flag=ctor_flag(image, tags, layout, name))
+                 relocs=relocs, gates=gates, ctor_flag=ctor_flag(image, tags, layout, name),
+                 pre_size=pre_size, pre_digest=pre_digest)
     if keep_image:
         table['_image'] = image
     return table
+
+
+def pre_island(work, name, layout, pins):
+    """Pre-island (games/fc26/docs/ILHAS_NUVEM.md): present only when the rewrite needed a patch area before base.
+    Its SHA-256 is pinned like patched.bin's (rewritten_sha256.<name>.pre.bin: compared, or written by --record) and
+    baked into the table with its size, so the loader verifies the .pre.bin it maps. Returns (pre_size, pre_digest);
+    (0, '') when there is no island, and then a non-null pin for one is an error (it belongs to another rewrite)."""
+    key = f'{name}.pre.bin'
+    pre_size = layout.get('PRE_PATCH_SIZE', 0)
+    if not pre_size:
+        need(pins.data['rewritten_sha256'].get(key) is None,
+             f'{name}: {key} is pinned in {pins.path.name} but {name}.fixups.tsv declares no pre-island')
+        return 0, ''
+    pre_path = work / f'rewritten/{VERSION}/{key}'
+    need(pre_path.exists(), f'{pre_path} missing but {name}.fixups.tsv declares a pre-island')
+    pre_bytes = pre_path.read_bytes()
+    need(len(pre_bytes) == pre_size, f'{name}: {pre_path.name} is {len(pre_bytes)} bytes, fixups says {pre_size}')
+    need(layout.get('PRE_PATCH_OFF', 0) == -pre_size, f'{name}: PRE_PATCH_OFF {layout.get("PRE_PATCH_OFF")} != -PRE_PATCH_SIZE')
+    used = layout.get('PRE_PATCH_USED', 0)
+    need(0 < used <= pre_size and pre_bytes[used:] == bytes(pre_size - used),
+         f'{name}: PRE_PATCH_USED {used:#x} missing or the island past it is not zero padding')
+    pre_digest = hashlib.sha256(pre_bytes).hexdigest()
+    pins.check(['rewritten_sha256', key], pre_digest, f'pre-island {name}')
+    return pre_size, pre_digest
 
 
 def ctor_flag(image, tags, layout, name):
@@ -252,7 +280,7 @@ def runtime_tables(work, out, pins):
         f.write('static Module modules[] = {\n')
         for n, m in enumerate(modules):
             l = m['layout']
-            f.write('{' + f'.name={json.dumps(m["name"])},.digest={json.dumps(m["sha256"])},.file_size={m["size"]}ULL,.text_end={l["TEXT_END"]}ULL,.ro_off={l["RO_OFF"]}ULL,.data_off={l["DATA_OFF"]}ULL,.patch_off={l["PATCH_OFF"]}ULL,.key_off={l["KEY_PAGE_OFF"]}ULL,.symbols=symbol_{n},.nsym={len(m["symbols"])},.relocs=reloc_{n},.nreloc={len(m["relocs"])},.gates=gate_{n},.ngate={len(m["gates"])},.init={m["tags"].get(12,0)}ULL,.ctor_flag={m["ctor_flag"]}ULL,.init_array={m["tags"].get(25,0)}ULL,.init_size={m["tags"].get(27,0)}ULL' + '},\n')
+            f.write('{' + f'.name={json.dumps(m["name"])},.digest={json.dumps(m["sha256"])},.pre_digest={json.dumps(m["pre_digest"])},.file_size={m["size"]}ULL,.text_end={l["TEXT_END"]}ULL,.ro_off={l["RO_OFF"]}ULL,.data_off={l["DATA_OFF"]}ULL,.patch_off={l["PATCH_OFF"]}ULL,.key_off={l["KEY_PAGE_OFF"]}ULL,.pre_size={m["pre_size"]}ULL,.symbols=symbol_{n},.nsym={len(m["symbols"])},.relocs=reloc_{n},.nreloc={len(m["relocs"])},.gates=gate_{n},.ngate={len(m["gates"])},.init={m["tags"].get(12,0)}ULL,.ctor_flag={m["ctor_flag"]}ULL,.init_array={m["tags"].get(25,0)}ULL,.init_size={m["tags"].get(27,0)}ULL' + '},\n')
         f.write('};\n')
         f.write(f'#define PROBE_PLT {plt}ULL\n#define PROBE_SLOT {slot}ULL\n')
         size = f.tell()

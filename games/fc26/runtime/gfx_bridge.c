@@ -1,5 +1,6 @@
 /* Bind the donor graphics interface to this native runtime, without donor game hooks. */
 #include "runtime.h"
+#include "module_offset.h"
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include <stdio.h>
@@ -36,7 +37,7 @@ static unsigned char watch_snap[32];static int watch_snap_valid;static _Atomic i
 static void *watch_rearm_thread(void *arg){(void)arg;for(;;){usleep(100);if(watch_lo&&atomic_load(&watch_armed))mprotect((void *)watch_lo,watch_hi-watch_lo,watch_read?PROT_NONE:PROT_READ);}return NULL;}
 int runtime_module_offset(uint64_t pc,const char **name,uint64_t *off);
 static void watch_hex(char *b,size_t *n,const char *label,uint64_t v){while(*label)b[(*n)++]=*label++;b[(*n)++]='0';b[(*n)++]='x';for(int i=15;i>=0;i--)b[(*n)++]="0123456789abcdef"[(v>>(i*4))&15];}
-static void watch_sym(char *b,size_t *n,const char *label,uint64_t pc){const char *nm;uint64_t off;while(*label)b[(*n)++]=*label++;if(runtime_module_offset(pc,&nm,&off)){while(*nm)b[(*n)++]=*nm++;watch_hex(b,n,"+",off);}else watch_hex(b,n,"host:",pc);}
+static void watch_sym(char *b,size_t *n,const char *label,uint64_t pc){const char *nm;uint64_t off;while(*label)b[(*n)++]=*label++;if(runtime_module_offset(pc,&nm,&off)){while(*nm)b[(*n)++]=*nm++;if((int64_t)off<0)*n+=module_offset_hex(b+*n,off);else watch_hex(b,n,"+",off);}else watch_hex(b,n,"host:",pc);}   /* main+0x.. as before; main-0x.. in the pre-island */
 /* TOTK: watch a guest range [addr, addr+len); TOTK_WATCH_READ=1 also catches reads (pages become inaccessible after each present).
    Set from the environment (TOTK_WATCH_ADDR) or at runtime by the graphics layer (DM_NVN_WATCH_SB: a storage buffer bound to a given shader). */
 int totk_vpool_backing(uintptr_t va,uint64_t len,uintptr_t *cpu);

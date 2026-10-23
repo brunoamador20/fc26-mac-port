@@ -20,6 +20,7 @@ FC26_build/
 romfs.bin
 runtime-index.bin
 *.patched.bin
+*.pre.bin
 *.fixups.tsv
 *.gates.tsv
 *.nro

@@ -248,15 +248,94 @@ KEYS = {'K18': 508, 'KTLS': 509, 'KTLR': 510, 'KGATE': 511, 'KRES0': 506, 'KRES1
 KEY_INDEX = {k: i for i, k in enumerate(('K18', 'KTLS', 'KTLR', 'KGATE', 'KRES0', 'KRES1', 'KASPECT', 'KASPECTUI'))}
 
 md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
-patch = bytearray(); fix = []; gates = []; stats = {}
+# 两块补丁区：后区 AFTER（一直在映像之后，偏移 ≥ PATCH_OFF）与前导岛 PRE（在模块基址之前，偏移为负）。
+# 每个改写单元按它够得着的那块落位（见 place）。模块装得下时只用后区、前导岛为空，产物与改前逐字节相同。
+# Two patch areas: the after-area AFTER (always after the image, offsets ≥ PATCH_OFF) and the pre-island PRE (before the
+# module base, negative offsets). Each rewrite unit lands in whichever it can reach (see place). When the module fits,
+# only the after-area is used, the pre-island stays empty and the output is byte-identical to before.
+patch = bytearray(); pre = bytearray(); fix = []; gates = []; stats = {}
+REACH = 1 << int(os.environ.get('DM_REACH_BITS', '27'))   # 分路判据的触及范围；B() 的硬件 ±128 MiB 不随它变（仅测试调小以在小模块上逼出前导岛）| routing reach; B()'s hardware ±128 MiB does not follow it (only tests shrink it to force a pre-island on small modules)
+PRE_PATCH_SIZE = 0; PRE_PATCH_OFF = 0   # 扫描后按补丁总量上界算定 | fixed after the scan from an upper bound on the total patch size
+AFTER = (patch, PATCH_OFF); PRE = (pre, PRE_PATCH_OFF)
+cur = AFTER
+def use_after():
+    global cur; cur = AFTER
 def stat(k): stats[k] = stats.get(k, 0) + 1
-def here(): return PATCH_OFF + len(patch)
+
+import collections
+# DM_CHUNK 必须为 >= 64 的整数：负数会使超大函数视为空并静默跳过所有改写，0 导致崩溃，< 64 破坏 3 块 LRU 的 48 条指令回溯假设。
+# DM_CHUNK must be an integer >= 64: a negative value would silently make the giant function look empty and skip all its rewrites, 0 crashes, and values below 64 break the 48-instruction look-back assumption of the 3-chunk LRU.
+try:
+    CHUNK = int(os.environ.get('DM_CHUNK', '262144'))
+    if CHUNK < 64:
+        raise ValueError
+except ValueError:
+    raise SystemExit(f'DM_CHUNK 必须为 >= 64 的整数 | DM_CHUNK must be an integer >= 64: {os.environ.get("DM_CHUNK")!r}')
+
+# 惰性指令序列：按块反汇编与 LRU 缓存，行为与指令列表完全一致。
+# Lazy instruction sequence: chunked disassembly with LRU cache, behaving like a list.
+class LazyInsns:
+    def __init__(self, fa, fb):
+        stat('lazy_function')
+        self.fa = fa
+        self.cache = collections.OrderedDict()
+        end = fa
+        for p0 in range(fa, fb, CHUNK * 4):
+            p1 = min(p0 + CHUNK * 4, fb)
+            count = 0
+            for addr, size, _, _ in md.disasm_lite(bytes(IMG[p0:p1]), p0):
+                count += 1
+                end = addr + size
+            if count < (p1 - p0) // 4:
+                break
+        self.n = (end - fa) // 4
+
+    def __len__(self):
+        return self.n
+
+    def _chunk(self, k):
+        if k in self.cache:
+            self.cache.move_to_end(k)
+            return self.cache[k]
+        c0 = self.fa + 4 * k * CHUNK
+        c1 = min(c0 + 4 * CHUNK, self.fa + 4 * self.n)
+        chunk = list(md.disasm(bytes(IMG[c0:c1]), c0))
+        if len(chunk) != (c1 - c0) // 4:
+            raise ValueError(f'chunk length mismatch: {len(chunk)} != {(c1 - c0) // 4}')
+        self.cache[k] = chunk
+        if len(self.cache) > 3:
+            self.cache.popitem(last=False)
+        return chunk
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            start, stop, step = idx.indices(self.n)
+            if step != 1:
+                raise ValueError(f'unsupported slice step: {step}')
+            if start >= stop:
+                return []
+            res = []
+            for k in range(start // CHUNK, (stop - 1) // CHUNK + 1):
+                c0_idx = k * CHUNK
+                res.extend(self._chunk(k)[max(start, c0_idx) - c0_idx : min(stop, c0_idx + CHUNK) - c0_idx])
+            return res
+        if idx < 0:
+            idx += self.n
+        if not (0 <= idx < self.n):
+            raise IndexError('list index out of range')
+        return self._chunk(idx // CHUNK)[idx % CHUNK]
+
+    def __iter__(self):
+        num_chunks = (self.n + CHUNK - 1) // CHUNK if self.n else 0
+        for k in range(num_chunks):
+            yield from self._chunk(k)
+def here(): return cur[1] + len(cur[0])   # 当前补丁区（AFTER 或 PRE）的下一处偏移 | next offset in the active patch area (AFTER or PRE)
 def emit(w, kind=None):
-    if kind: fix.append((len(patch), kind))
-    patch.extend(struct.pack('<I', w & 0xFFFFFFFF))
+    if kind: fix.append((len(cur[0]), kind))
+    cur[0].extend(struct.pack('<I', w & 0xFFFFFFFF))
 
 def emit_key_addr(reg, kind):
-    fix.append((len(patch), kind)); emit(ADRP(reg, here(), KEY_PAGE_OFF)); emit(LDRX(reg, reg, KEY_INDEX[kind]))
+    fix.append((len(cur[0]), kind)); emit(ADRP(reg, here(), KEY_PAGE_OFF)); emit(LDRX(reg, reg, KEY_INDEX[kind]))
 
 def emit_slot_addr(base, key_reg, kind):
     emit_key_addr(key_reg, kind); emit(ADDR(base, base, key_reg))
@@ -523,7 +602,7 @@ def site_window_group(segments):
     for seg in segments:
         entries[seg[0].address] = here()
         emit(STP(S, T, 31, -16)); emit(MRS_TPIDRRO(T)); emit_slot_addr(T, S, 'K18'); emit(LDRX(S, T))
-        entry_branches.append((len(patch), seg[0].address)); emit(NOP)
+        entry_branches.append((len(cur[0]), seg[0].address)); emit(NOP)   # 当前补丁区内的下标（前导岛时不是 patch）| index into the active patch area (not patch when routed to the pre-island)
     copied = {}; cursor = here()
     for seg in segments:
         for ins in seg: copied[ins.address] = cursor; cursor += 4
@@ -538,7 +617,7 @@ def site_window_group(segments):
     exits = list(dict.fromkeys(exits))
     exit_addresses = {target: cursor + 16 * i for i, target in enumerate(exits)}
     for offset, target in entry_branches:
-        struct.pack_into('<I', patch, offset, B(PATCH_OFF + offset, copied[target]))
+        struct.pack_into('<I', cur[0], offset, B(cur[1] + offset, copied[target]))
     for seg in segments:
         for ins in seg:
             assert here() == copied[ins.address]
@@ -647,7 +726,12 @@ SIGNED_TABLES = {'277178b7dba1b6d4949a84778d4abc58': {
     0x598ef4: (0x598ee4, 0x2d89038, (680,688,20,696,704,712,720,-5688,-2640), '12000010207ab0b85202008bdef747f940021fd6'),
     0x5f2a9c: (0x5f2a90, 0x2d892e0, (884,892,16,900,-6516), 'f0030f2a12000010207ab0b85202008b40021fd6'),
     0x6397d8: (0x6397cc, 0x2d88e7c, (1376,1384,16,1392,1400,1408,-7264), 'fb0301aa12000010207ab0b85202008b40021fd6'),
-}}
+},
+    # FC 26 1.0.0 main：唯一具有该形态的 br x18（adr x18 基址 + 来自 adrp/add 表的 ldrsw + add x18, x18, xE），23 项，边界 cmp w17, #0x16 | FC 26 1.0.0 main: the only `br x18` with this shape (adr x18 base + ldrsw from an adrp/add table + add x18, x18, xE), 23 entries, bound cmp w17, #0x16.
+    '863e52bfec7ab17b92fb347967f0619d': {
+        0x8c42c14: (0x8c42c08, 0xad44ecc, (16, 36, 48, -100, -124, 68, 104, 208, 208, 208, 208, 208, 208, 208, 208, 208, 16, 36, 48, -100, -124, 68, 104), '10323b9112000010007ab1b85202008b40021fd6'),
+    },
+}
 FLAG_SETTERS = ('cmp', 'cmn', 'tst', 'adds', 'subs', 'ands', 'bics', 'adcs', 'sbcs', 'ccmp', 'ccmn', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'negs', 'ngcs')
 def ldrsw_table(insl, j, fa, fb):
     """Breath of the Wild 1.6.0 (older clang): a table of signed 32-bit offsets from its own base,
@@ -715,7 +799,7 @@ def ldrsw_table(insl, j, fa, fb):
 
 funcs = sorted({func_of(a) for a, (k, _) in kinds.items() if k == 'x18'})
 for fa, fb in funcs:
-    insl = list(md.disasm(bytes(IMG[fa:fb]), fa))
+    insl = LazyInsns(fa, fb) if (fb - fa) // 4 > CHUNK else list(md.disasm(bytes(IMG[fa:fb]), fa))
     ws = find_windows(insl)
     groups, linked_edges = linked_windows(insl, ws)
     window_groups.extend(groups)
@@ -797,18 +881,62 @@ if calls:
                 assert info & 0xFFFFFFFF != 1027 or addend not in call_targets, 'relative pointer enters unprepared call'
 
 def put_branch(at, to): struct.pack_into('<I', IMG, at, B(at, to))
+
+# ---- 两块补丁区的定容与分路 ----
+# ---- Sizing and routing of the two patch areas ----
+# 补丁总量上界（逐块字数的保守上界；窗口 / 跳转表按结构）：前导岛据此定容，分路判据用它问「后区填满后还够得着吗」。
+# 多算无妨（上界越松，两区各自的触及阈值越向中间靠；只要上界 < 2^REACH − PATCH_OFF/2 就不会留下两边都够不着的死区，发射末尾再断言实际用量没超上界）。
+# Upper bound on the total patch size (a conservative per-block word bound; windows / jump tables by structure): the
+# pre-island is sized from it, and the routing test uses it to ask "does the after-area still reach once full?".
+# Over-counting is safe (a looser bound just pulls both reach thresholds toward the middle; as long as the bound is
+# < 2^REACH − PATCH_OFF/2 there is no dead zone that neither area reaches, and the end asserts the real use fit the bound).
+_simple = [a for a in kinds if a not in done]   # done 此刻已含窗口成员；调用窗口成员发射时才入 done，这里按普通块多算无妨 | done already holds window members; call members enter done at emit time, over-counting them here is harmless
+_cap_words = 16 * (len(_simple) + len(calls) + len(OBS.get(BUILD_ID, [])) + 256)   # +256 覆盖参数门 / 私有门 / 规则跳板（PARAMS 在文件后面才定义）| +256 covers parameter / private gates / rule trampolines (PARAMS is defined later)
+for _w in windows: _cap_words += 5 * len(_w) + 12
+for _g in window_groups: _cap_words += sum(5 * len(_s) + 12 for _s in _g)
+for _b, _c in jumps.values(): _cap_words += 28 + 3 * _c
+TOTAL_CAP = _cap_words * 4
+PRE_PATCH_SIZE = (TOTAL_CAP + 0xFFFF) & ~0xFFFF
+PRE_PATCH_OFF = -PRE_PATCH_SIZE
+PRE = (pre, PRE_PATCH_OFF)
+def place(lo, hi):
+    """把一个改写单元（点 / 窗口组 / 跳转表 / 调用窗口）放进它够得着的补丁区（去 + 回）。优先后区：模块装得下时
+    前导岛为空、产物与改前逐字节相同。| Put one rewrite unit (site / window group / jump table / call window) into the
+    patch area it can reach (out and back). The after-area is preferred: when the module fits, the pre-island stays empty
+    and the output is byte-identical to before."""
+    global cur
+    if PATCH_OFF + PRE_PATCH_SIZE - lo < REACH:        # 后区即便填到上界，最高块仍够得着最低目标 | even at the cap the top block still reaches the lowest target
+        cur = AFTER
+    elif hi - PRE_PATCH_OFF < REACH:                   # 前导岛最低块够得着最高目标 | the pre-island's lowest block reaches the highest target
+        cur = PRE
+    else:
+        raise RuntimeError(f'改写单元跨度 [{lo:#x},{hi:#x}] 两块补丁区都够不着（需多于两块）| span reaches neither patch area (needs more than two)')
+def span_of(seglist):
+    """一组片段（窗口 / 窗口组）会分支到的全部 text 地址的 [最低, 最高]。 | [min, max] of every text address a group of fragments (window / window group) branches to."""
+    lo = hi = seglist[0][0].address
+    for seg in seglist:
+        for ins in seg:
+            lo = min(lo, ins.address); hi = max(hi, ins.address + 4)
+            if ins.mnemonic in ('b', 'cbz', 'cbnz', 'tbz', 'tbnz') or ins.mnemonic.startswith('b.'):
+                t = ins.operands[-1].imm; lo = min(lo, t); hi = max(hi, t + 4)
+        hi = max(hi, seg[-1].address + 4)
+    return lo, hi
+
 grouped_heads = set()
 for group in window_groups:
+    place(*span_of(group))
     for head, entry in site_window_group(group).items():
         grouped_heads.add(head); put_branch(head, entry); stat('window')
 for wseg in windows:
     if wseg[0].address in grouped_heads: continue
+    place(*span_of([wseg]))
     st, lo, hi = site_window(wseg); stat('window'); put_branch(lo, st)
 for prefix, (call, word) in sorted(calls.items()):
+    place(prefix, call + 4)
     st = here()
-    block = prepare_call(word, prefix, call, st, KEY_PAGE_OFF, KEY_INDEX['K18'])
-    fix.append((len(patch) + 12, 'K18'))
-    patch.extend(block)
+    block = prepare_call(word, prefix, call, st, KEY_PAGE_OFF, KEY_INDEX['K18'], build_id=BUILD_ID)
+    fix.append((len(cur[0]) + 12, 'K18'))
+    cur[0].extend(block)
     put_branch(prefix, st)
     assert struct.unpack_from('<I', IMG, call)[0] == BLR_X18
     struct.pack_into('<I', IMG, call, BLR_X30)
@@ -817,6 +945,12 @@ for a in sorted(kinds):
     if a in done: continue
     k, arg = kinds[a]
     ins = dis(struct.unpack_from('<I', IMG, a)[0], a)
+    lo = a; hi = a + 4                       # 这个点会分支到的 text 地址跨度（跳转表 / 条件跳转有额外目标）| text span this site branches to (jump tables / conditional jumps have extra targets)
+    if k == 'x18' and ins.mnemonic == 'br':
+        _base, _count = jumps[a]; lo = min(lo, _base); hi = max(hi, _base + 4 * _count)
+    elif k == 'x18' and (ins.mnemonic in ('cbz', 'cbnz', 'tbz', 'tbnz') or ins.mnemonic.startswith('b.')):
+        _t = ins.operands[-1].imm; lo = min(lo, _t); hi = max(hi, _t + 4)
+    place(lo, hi)
     if k == 'x18':
         m = ins.mnemonic
         if m == 'br': st = site_br(ins, *jumps[a]); stat('br')
@@ -831,6 +965,7 @@ for a in sorted(kinds):
     elif k == 'svc': st = site_gate(ins, 'svc', arg); stat(k)
     elif k in ('cntpct', 'cntvct'): st = site_gate(ins, k, arg); stat(k)
     put_branch(a, st)
+use_after()   # 其余发射（私有门 / 规则跳板）默认进后区；观测门 / 参数门各自按 place 分路 | the rest (private gates / rule trampolines) default to the after-area; observation and parameter gates route per place
 
 # 私有视觉分支；非OBS，0x85只读查询。只有本实验构建显式opt-in；原Qty/children和Update不变。
 # Private visual branch; not OBS, 0x85 is a read-only query. Only this experimental build explicitly opts in; the original Qty/children and Update are unchanged.
@@ -879,6 +1014,7 @@ for off, oid, ow, why in obs:
     # Function entries only: dm_gate writes back only x0–x8 / x30, and host C code may modify x9–x17; at entry these carry no values under AAPCS64 (arguments are only in x0–x7 / x8)
     assert off in set(starts) or (oid == 6 and off == 0x43ecc8), f'private obs point not approved {off:#x}'
     assert off < TEXT_END and off not in kinds and not any(lo <= off < hi for wseg in windows for lo, hi in [(wseg[0].address, wseg[-1].address + 4)]), f'观测门与改写点冲突 {off:#x}'
+    place(off, off + 4)
     put_branch(off, site_obs(off, oid, w)); stat('obs')
 
 # 秘境出口改道（r36 起）：分支门 0x89，挂在「按出口砖的连接换关」main+0x7cc1e0(游戏, 玩家, 砖) 的入口。它的四个调用者（点出口砖 0x6dbea0、
@@ -890,6 +1026,7 @@ for off, oid, ow, why in obs:
 # In a rift run the host replaces w2 / w3 with (the rift's next map, 11) and makes x8≠0 → the gate block jumps straight to "change level by level id" 0x634000, same caller, exactly one level change; in all other cases the original instruction is executed and control returns to 0x7cc1e4.
 # The gate block is word-for-word isomorphic with the 0x85 branch gate (structck ⑪ checks it against the hle.h registry); like observation gates 15 / 16 it exists only in build outputs with host-private gates (touch)
 if RULE_RUN and PRIVATE_GATES:
+    use_after()   # 观测门 place 之后复位到后区（这些私有门按具体偏移改写，留在后区即原行为）| reset to the after-area after the obs-loop place (these private gates rewrite fixed offsets; keeping them after preserves the original behavior)
     off, word, tgt = 0x7cc1e0, 0xd10183ff, 0x634000
     assert struct.unpack_from('<I', IMG, off)[0] == word and off in set(starts) and tgt in set(starts)
     assert off < TEXT_END and off not in kinds and not any(seg[0].address <= off < seg[-1].address + 4 for seg in windows)
@@ -1018,6 +1155,7 @@ for oa, wa, ob_, wb, r, key, why in params:
     for o in range(oa + 4, ob_, 4):
         ins = dis(struct.unpack_from('<I', IMG, o)[0], o)
         assert r not in regs_in(ins), f'参数位中间用到 x{r}：{o:#x} {ins.mnemonic} {ins.op_str}'
+    place(min(oa, ob_), max(oa, ob_) + 4)
     start = here()
     tmp = 16 if r != 16 else 17
     emit(STUR(tmp, 31, -16)); emit(MRS_TPIDRRO(r)); emit_slot_addr(r, tmp, key); emit(LDRX(r, r)); emit(LDUR(tmp, 31, -16)); emit(B(here(), oa + 4))
@@ -1029,6 +1167,7 @@ for oa, wa, ob_, wb, r, key, why in params:
 # 6c6290 is after the original mode3 gate; the Blaze / reference count and data invalidation 6c62dc branches before it and the state update after it are untouched.
 rule_blocks = []
 if RULE_RUN:
+    use_after()   # 参数门 place 之后复位到后区 | reset to the after-area after the parameter-gate place
     def run_branch(off, old, body, why):
         assert struct.unpack_from('<I', IMG, off)[0] == old, f'Run跳板原字不符 {off:#x}'
         start = here()
@@ -1067,6 +1206,21 @@ if RULE_RUN:
 os.makedirs(outdir, exist_ok=True)
 P = lambda ext: os.path.join(outdir, f'{NAME}.{ext}')
 open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
+# 前导岛单独出一个 .pre.bin（偏移 PRE_PATCH_OFF，为负）：这样 patched.bin 的偏移空间（text 在 0）一字不动，
+# 没用到前导岛的模块产物与改前逐字节相同（见 ILHAS_NUVEM.md 的「为什么分文件」）。
+# The pre-island ships as its own .pre.bin (offset PRE_PATCH_OFF, negative): that keeps patched.bin's offset space (text
+# at 0) untouched, so a module that does not use the pre-island comes out byte-identical (see ILHAS_NUVEM.md "why a
+# separate file"). It carries the used blocks plus zero padding to PRE_PATCH_SIZE (the padding is never branched into).
+PRE_USED = len(pre) > 0
+if PRE_USED:
+    assert len(pre) <= PRE_PATCH_SIZE, f'前导岛超出预留 {len(pre):#x} > {PRE_PATCH_SIZE:#x} | pre-island over its reservation'
+    # place 的后区判据假定后区最高块不超过 PATCH_OFF + 上界：两区实际总量须在上界内（不用前导岛时不查，产物不变）
+    # place's after-area test assumes the highest after-area block stays under PATCH_OFF + the cap: the real total of both
+    # areas must fit the cap (not checked without a pre-island, so that output is unchanged)
+    assert len(patch) + len(pre) <= TOTAL_CAP, f'补丁总量超出上界 {len(patch) + len(pre):#x} > {TOTAL_CAP:#x} | patch total over the cap'
+    open(P('pre.bin'), 'wb').write(bytes(pre) + bytes(PRE_PATCH_SIZE - len(pre)))
+elif os.path.exists(P('pre.bin')):
+    os.unlink(P('pre.bin'))   # 重出时清掉旧前导岛，别让装载器用到过期文件 | clear a stale pre-island on rebuild so the loader never uses an out-of-date file
 import hashlib
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:
     f.write(hashlib.sha256(open(os.path.abspath(__file__), 'rb').read()).hexdigest() + '  patch_nso.py\n')
@@ -1083,6 +1237,11 @@ elif os.path.exists(P('rules.tsv')):
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
+    # 前导岛布局（仅在用到时写）：偏移为负（相对模块基址），装载器把 .pre.bin 映射到 [base+PRE_PATCH_OFF, base)。
+    # PRE_PATCH_USED = 块实际占用的字节（其后到 PRE_PATCH_SIZE 全是 0 填充，不是代码）：核对工具只把这一段当补丁区。
+    # Pre-island layout (written only when used): the offset is negative (relative to the module base); the loader maps .pre.bin into [base+PRE_PATCH_OFF, base).
+    # PRE_PATCH_USED = the bytes the blocks really occupy (the rest up to PRE_PATCH_SIZE is zero padding, not code): the checkers take only this part as patch area.
+    if PRE_USED: f.write(f'# PRE_PATCH_OFF\t{PRE_PATCH_OFF:#x}\n# PRE_PATCH_SIZE\t{PRE_PATCH_SIZE:#x}\n# PRE_PATCH_USED\t{len(pre):#x}\n')
 with open(P('gates.tsv'), 'w') as f:
     for ret, k, arg, orig in gates: f.write(f'{ret:#x}\t{k}\t{arg}\t{orig:#x}\n')
 with open(P('sites.tsv'), 'w') as f:
@@ -1100,7 +1259,8 @@ with open(P('params.tsv'), 'w') as f:
 with open(P('obs.tsv'), 'w') as f:
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
     for off, oid, ow, why in obs: f.write(f'{off:#x}\t{oid}\t{ow}\t{why}\n')
-print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch), 'PATCH_OFF', hex(PATCH_OFF), 'slot_refs', len(fix), 'gates', len(gates))
+print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch), 'PATCH_OFF', hex(PATCH_OFF),
+      'pre', (hex(PRE_PATCH_OFF), len(pre)) if PRE_USED else 'none', 'slot_refs', len(fix), 'gates', len(gates))
 # 启动块清单随 main 出：取仓库版本化数据 dm/data/bootlist_<main 构建号>.tsv 原样拷进产物目录并写 sha256（清单入库、不每版重录；
 # 记录本身有竞态——同产物三次记录块集合 5292 / 5114 / 5281、发起线程亦有不同——重录只在构建号变化或主动改进时做，提交附 mini A/B）
 # The boot block list ships with main: take the repository's versioned data dm/data/bootlist_<main build ID>.tsv, copy it as is into the build output directory and write its sha256 (the list is checked in, not re-recorded for every version;

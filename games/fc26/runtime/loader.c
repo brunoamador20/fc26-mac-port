@@ -1,5 +1,6 @@
 /* Native ARM64 module loader. Guest images and generated metadata stay local. */
 #include "runtime.h"
+#include "module_offset.h"
 #include "totk_ui_lang.h"
 #include <TargetConditionals.h>
 #include <dlfcn.h>
@@ -118,12 +119,12 @@ int runtime_module_query(uint64_t address,uint64_t *base,uint64_t *size,unsigned
  }
  return 0;
 }
-void runtime_describe_address(uint64_t a,char *out,size_t n){for(unsigned i=0;i<NM;i++)if(a>=(uintptr_t)modules[i].base&&a<(uintptr_t)modules[i].base+modules[i].size){snprintf(out,n,"%s+0x%llx",modules[i].name,(unsigned long long)(a-(uintptr_t)modules[i].base));return;}Dl_info di;if(dladdr((void *)(uintptr_t)a,&di)&&di.dli_sname){snprintf(out,n,"%s+0x%llx",di.dli_sname,(unsigned long long)(a-(uintptr_t)di.dli_saddr));return;}snprintf(out,n,"0x%llx",(unsigned long long)a);}
+void runtime_describe_address(uint64_t a,char *out,size_t n){for(unsigned i=0;i<NM;i++)if(a>=(uintptr_t)modules[i].base-modules[i].pre_size&&a<(uintptr_t)modules[i].base+modules[i].size){char o[MODULE_OFFSET_HEX];module_offset_hex(o,a-(uintptr_t)modules[i].base);snprintf(out,n,"%s%s",modules[i].name,o);return;}Dl_info di;if(dladdr((void *)(uintptr_t)a,&di)&&di.dli_sname){snprintf(out,n,"%s+0x%llx",di.dli_sname,(unsigned long long)(a-(uintptr_t)di.dli_saddr));return;}snprintf(out,n,"0x%llx",(unsigned long long)a);}
 /* Guest frame-pointer chain. Guest threads run on guest stacks (not the host pthread stack), so frames are read with
    mach_vm_read_overwrite (a bad pointer ends the walk instead of faulting); the chain must grow upwards. */
 void runtime_trace_guest(uint64_t fp,uint64_t lr) {
  for(unsigned n=0;n<16;n++) {
-  for(unsigned i=0;i<NM;i++)if(lr>=(uintptr_t)modules[i].base&&lr<(uintptr_t)modules[i].base+modules[i].size)fprintf(stderr,"[totk] caller %s+0x%llx\n",modules[i].name,(unsigned long long)(lr-(uintptr_t)modules[i].base));
+  for(unsigned i=0;i<NM;i++)if(lr>=(uintptr_t)modules[i].base-modules[i].pre_size&&lr<(uintptr_t)modules[i].base+modules[i].size){char o[MODULE_OFFSET_HEX];module_offset_hex(o,lr-(uintptr_t)modules[i].base);fprintf(stderr,"[totk] caller %s%s\n",modules[i].name,o);}   /* main+0x1234, or main-0x40 in the pre-island (scripts/symbolize.py reads both) */
   if(!fp||fp%8)break;uint64_t f[2];mach_vm_size_t got=0;
   if(mach_vm_read_overwrite(mach_task_self(),fp,16,(uintptr_t)f,&got)!=KERN_SUCCESS||got!=16)break;
   lr=f[1];if(f[0]<=fp||f[0]-fp>(64u<<20))break;fp=f[0];
@@ -149,6 +150,10 @@ static void remap_at(Module *m,uintptr_t to,const void *from,size_t size,boolean
 static void digest_hex(const void *p,size_t n,char hex[65]){unsigned char d[32];CC_SHA256(p,(CC_LONG)n,d);for(unsigned i=0;i<32;i++)snprintf(hex+i*2,3,"%02x",d[i]);}
 static void map_module(Module *m,const char *dir) {
  (void)dir;
+ /* TODO(mac): the pre-island (games/fc26/docs/ILHAS_NUVEM.md) is not embedded for iOS yet — ios/tools/gen_embed.py
+    would need a __TOTK<name>P r-x section mapped just before base, like the __TOTKX split. FC 26's main needs it; the
+    kit's smaller games do not, so iOS stays unaffected until an iOS target for main is built. */
+ need(m->pre_size==0,"TODO(mac): pre-island not embedded for iOS");
  const IosEmbed *e=NULL;for(unsigned i=0;i<sizeof(ios_embed)/sizeof(*ios_embed);i++)if(!strcmp(ios_embed[i].name,m->name))e=&ios_embed[i];
  need(e!=NULL,"module missing from ios_embed.h");
  char sx0[17],sx1[17],sw[17];snprintf(sx0,sizeof sx0,"__%sx0",m->name);snprintf(sx1,sizeof sx1,"__%sx1",m->name);snprintf(sw,sizeof sw,"__TOTK%sW",m->name);
@@ -181,16 +186,31 @@ static void map_module(Module *m,const char *dir) {
  /* The main module gets one private, writable page after its rewritten image. The
     real-time frame-step patch reads its two floats from this page via ADRP. */
  m->size=page_up(m->file_size)+(!strcmp(m->name,"main")?0x4000:0);
- m->base=mmap(NULL,m->size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
- need(m->base!=MAP_FAILED,"map module");need(fread(m->base,1,m->file_size,f)==m->file_size,"read image");fclose(f);
+ /* Pre-island (games/fc26/docs/ILHAS_NUVEM.md): a rewrite whose text is too big for the
+    after-area to reach also gets a patch area BEFORE the module. Reserve one contiguous range
+    [base-pre_size, base+size) so every b/adrp offset the rewriter computed holds, and place the
+    module's base (image offset 0) after the island. pre_size is 0 for a module that fits. */
+ need(m->pre_size%0x4000==0,"pre-island alignment");
+ uint8_t *region=mmap(NULL,m->pre_size+m->size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+ need(region!=MAP_FAILED,"map module");
+ m->base=region+m->pre_size;
+ need(fread(m->base,1,m->file_size,f)==m->file_size,"read image");fclose(f);
  unsigned char digest[32];CC_SHA256(m->base,(CC_LONG)m->file_size,digest);char hex[65];
  for(unsigned i=0;i<32;i++)snprintf(hex+i*2,3,"%02x",digest[i]);
  need(!strcmp(hex,m->digest),"image SHA256 differs from verified rewrite");
+ if(m->pre_size){
+  need(snprintf(path,sizeof(path),"%s/%s.pre.bin",dir,m->name)<(int)sizeof(path),"pre-island path");
+  FILE *pf=fopen(path,"rb");need(pf!=NULL,"open pre-island");
+  struct stat ps;need(fstat(fileno(pf),&ps)==0&&(uint64_t)ps.st_size==m->pre_size,"pre-island size");
+  need(fread(region,1,m->pre_size,pf)==m->pre_size,"read pre-island");fclose(pf);
+  CC_SHA256(region,(CC_LONG)m->pre_size,digest);for(unsigned i=0;i<32;i++)snprintf(hex+i*2,3,"%02x",digest[i]);
+  need(m->pre_digest&&!strcmp(hex,m->pre_digest),"pre-island SHA256 differs from verified rewrite");
+ }
  need(m->key_off%0x4000==0&&m->key_off+0x4000<=m->patch_off&&m->patch_off<m->size,"key and patch layout");
  uint64_t *key=(void *)(m->base+m->key_off);
  for(unsigned i=0;i<8;i++)key[i]=runtime_keys[i]*8;
  make_hash(m);
- fprintf(stderr,"[totk] mapped %s size=%zu symbols=%u\n",m->name,m->size,m->nsym);
+ fprintf(stderr,"[totk] mapped %s size=%zu pre=%#llx symbols=%u\n",m->name,m->size,(unsigned long long)m->pre_size,m->nsym);
 }
 /* TOTK_EXPORT_IOS=<dir>: after the game patches, write each module's text [0, page_up(TEXT_END)) for ios/tools/gen_embed.py.
    Relocations never reach the text (they start at DATA_OFF), so the exported bytes differ from the verified image only at
@@ -251,18 +271,22 @@ static void seal(Module *m) {
  size_t patch_end=page_up(m->file_size);
  need(mprotect(m->base+m->patch_off,patch_end-m->patch_off,PROT_READ|PROT_EXEC)==0,"patch RX");
  sys_icache_invalidate(m->base,rx);sys_icache_invalidate(m->base+m->patch_off,patch_end-m->patch_off);
+ /* The pre-island is executable code just like the after-area patch; same RX + icache. */
+ if(m->pre_size){need(mprotect(m->base-m->pre_size,m->pre_size,PROT_READ|PROT_EXEC)==0,"pre-island RX");sys_icache_invalidate(m->base-m->pre_size,m->pre_size);}
 }
 static void check_permissions(Module *m) {
- mach_vm_address_t a=(uintptr_t)m->base,end=a+m->size;
+ mach_vm_address_t a=(uintptr_t)m->base-m->pre_size,end=(uintptr_t)m->base+m->size;
  while(a<end) {
   mach_vm_size_t size=0;vm_region_basic_info_data_64_t info;mach_msg_type_number_t count=VM_REGION_BASIC_INFO_COUNT_64;mach_port_t obj=0;
   mach_vm_address_t requested=a;
   need(mach_vm_region(mach_task_self(),&a,&size,VM_REGION_BASIC_INFO_64,(vm_region_info_t)&info,&count,&obj)==KERN_SUCCESS&&a==requested&&size>0,"mapped region query");
   if(obj)mach_port_deallocate(mach_task_self(),obj);
-  uint64_t off=a-(uintptr_t)m->base;
-  vm_prot_t expected=off>=page_up(m->file_size)?(VM_PROT_READ|VM_PROT_WRITE):
-   (off<page_up(m->text_end)||off>=m->patch_off)?(VM_PROT_READ|VM_PROT_EXECUTE):
-   ((off>=page_up(m->text_end)&&off<(m->data_off&~0x3fffULL))||off==m->key_off)?VM_PROT_READ:(VM_PROT_READ|VM_PROT_WRITE);
+  vm_prot_t expected;
+  if(a<(uintptr_t)m->base)expected=VM_PROT_READ|VM_PROT_EXECUTE;   /* the pre-island is RX, like the after-area patch */
+  else{uint64_t off=a-(uintptr_t)m->base;
+   expected=off>=page_up(m->file_size)?(VM_PROT_READ|VM_PROT_WRITE):
+    (off<page_up(m->text_end)||off>=m->patch_off)?(VM_PROT_READ|VM_PROT_EXECUTE):
+    ((off>=page_up(m->text_end)&&off<(m->data_off&~0x3fffULL))||off==m->key_off)?VM_PROT_READ:(VM_PROT_READ|VM_PROT_WRITE);}
   need(info.protection==expected,"module permission mismatch");a+=size;
  }
 }
@@ -308,6 +332,12 @@ static void signal_hex(const char *label,uint64_t value) {
  char b[128];size_t n=0;while(*label)b[n++]=*label++;b[n++]='0';b[n++]='x';
  for(int i=15;i>=0;i--)b[n++]="0123456789abcdef"[(value>>(i*4))&15];b[n++]='\n';write(2,b,n);
 }
+/* " offset=0x<16 hex>" as before for a pc at or after the module base; a pc in the pre-island (negative offset) as
+   " offset=-0x<hex>" (module_offset.h), never the wrapped 0xffff... */
+static void signal_offset(uint64_t off) {
+ if((int64_t)off>=0){signal_hex(" offset=",off);return;}
+ char b[64];size_t n=0;const char *l=" offset=";while(*l)b[n++]=*l++;n+=module_offset_hex(b+n,off);b[n++]='\n';write(2,b,n);
+}
 /* CTR_EL0 for 128-byte host cache lines: DminLine=IminLine=5 (32 words), ERG=CWG=5, PIPT I-cache, IDC/DIC clear. */
 #define HOST_CTR_EL0 0x8555c005ULL
 static void crash(int num,siginfo_t *info,void *context) {
@@ -323,9 +353,9 @@ static void crash(int num,siginfo_t *info,void *context) {
  signal_hex("[totk] signal=",num);signal_hex("fault=",(uintptr_t)info->si_addr);signal_hex("esr=",u->uc_mcontext->__es.__esr);
  {mach_vm_address_t ra=(uintptr_t)info->si_addr;mach_vm_size_t rs=0;vm_region_basic_info_data_64_t ri;mach_msg_type_number_t rc=VM_REGION_BASIC_INFO_COUNT_64;mach_port_t ro=0;
   if(mach_vm_region(mach_task_self(),&ra,&rs,VM_REGION_BASIC_INFO_64,(vm_region_info_t)&ri,&rc,&ro)==KERN_SUCCESS){signal_hex("region=",ra);signal_hex("region size=",rs);signal_hex("region prot=",(uint64_t)ri.protection|((uint64_t)ri.max_protection<<8));}}signal_hex("pc=",pc);signal_hex("lr=",u->uc_mcontext->__ss.__lr);signal_hex("fp=",fp);
- for(unsigned i=0;i<NM;i++)if(pc>=(uintptr_t)modules[i].base&&pc<(uintptr_t)modules[i].base+modules[i].size){write(2,modules[i].name,strlen(modules[i].name));signal_hex(" offset=",pc-(uintptr_t)modules[i].base);}
+ for(unsigned i=0;i<NM;i++)if(pc>=(uintptr_t)modules[i].base-modules[i].pre_size&&pc<(uintptr_t)modules[i].base+modules[i].size){write(2,modules[i].name,strlen(modules[i].name));signal_offset(pc-(uintptr_t)modules[i].base);}
  for(unsigned i=0;i<29;i++)signal_hex("x=",u->uc_mcontext->__ss.__x[i]);signal_hex("sp=",u->uc_mcontext->__ss.__sp);
- for(unsigned depth=0;depth<24&&fp&&!(fp&15);depth++){uint64_t frame[2];mach_vm_size_t got=0;if(mach_vm_read_overwrite(mach_task_self(),fp,16,(uintptr_t)frame,&got)!=KERN_SUCCESS||got!=16)break;signal_hex("frame lr=",frame[1]);for(unsigned i=0;i<NM;i++)if(frame[1]>=(uintptr_t)modules[i].base&&frame[1]<(uintptr_t)modules[i].base+modules[i].size){write(2,modules[i].name,strlen(modules[i].name));signal_hex(" offset=",frame[1]-(uintptr_t)modules[i].base);}if(frame[0]==fp)break;fp=frame[0];   /* host-stack switch: frames may move between stacks */}
+ for(unsigned depth=0;depth<24&&fp&&!(fp&15);depth++){uint64_t frame[2];mach_vm_size_t got=0;if(mach_vm_read_overwrite(mach_task_self(),fp,16,(uintptr_t)frame,&got)!=KERN_SUCCESS||got!=16)break;signal_hex("frame lr=",frame[1]);for(unsigned i=0;i<NM;i++)if(frame[1]>=(uintptr_t)modules[i].base-modules[i].pre_size&&frame[1]<(uintptr_t)modules[i].base+modules[i].size){write(2,modules[i].name,strlen(modules[i].name));signal_offset(frame[1]-(uintptr_t)modules[i].base);}if(frame[0]==fp)break;fp=frame[0];   /* host-stack switch: frames may move between stacks */}
  /* TOTK_CRASH_MEM=<reg>[:<signed offset>[:<bytes>]]: dump words at register+offset; TOTK_CRASH_MEM_FOLLOW=k1,k2,...: for each
     listed word index, dump 0x100 bytes at that pointer and the ASCII of every readable pointer inside it (data-structure faults). */
  {const char *e=getenv("TOTK_CRASH_MEM");if(e){unsigned r=(unsigned)strtoul(e,NULL,0);const char *c=strchr(e,':');int64_t off=c?strtoll(c+1,NULL,0):0;const char *c2=c?strchr(c+1,':'):NULL;
@@ -385,8 +415,10 @@ static void probe(void) {
  for(unsigned i=0;i<NM;i++){Module *m=&modules[i];printf("%s{\"name\":\"%s\",\"relative\":%u,\"symbolic\":%u,\"cross\":%u,\"weak_zero\":%u}",i?",":"",m->name,m->relative,m->symbolic,m->cross,m->weak);}
  puts("],\"scope\":\"cross-module calls; constructors and game entry not run\"}");
 }
+/* *off = pc - base as two's complement: (int64_t)*off < 0 in the pre-island. Callers print it signed with
+   module_offset_hex (gfx_bridge.c) or an explicit sign (hle_nvn.c, nvn_mtl.m), never as a plain %llx. */
 int runtime_module_offset(uint64_t pc,const char **name,uint64_t *off) {
- for(unsigned i=0;i<NM;i++)if(pc>=(uintptr_t)modules[i].base&&pc<(uintptr_t)modules[i].base+modules[i].size){*name=modules[i].name;*off=pc-(uintptr_t)modules[i].base;return 1;}
+ for(unsigned i=0;i<NM;i++)if(pc>=(uintptr_t)modules[i].base-modules[i].pre_size&&pc<(uintptr_t)modules[i].base+modules[i].size){*name=modules[i].name;*off=pc-(uintptr_t)modules[i].base;return 1;}
  return 0;
 }
 uintptr_t runtime_frame_controller_return_pc(void) {

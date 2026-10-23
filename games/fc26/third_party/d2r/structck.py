@@ -42,6 +42,25 @@ h = nsoimg.header(out_dir, mod)
 PO, TE = h['PATCH_OFF'], h['TEXT_END']
 pat = open(f'{out_dir}/{mod}.patched.bin', 'rb').read()
 W = lambda b, o: struct.unpack_from('<I', b, o)[0]
+# 前导岛（.pre.bin，仅在用到时存在）：偏移为负（相对模块基址）。补丁区访问统一经 PW / pbytes / is_patch，
+# 这样对后区与前导岛同一套核对；没有前导岛时 pre 为空、所有判据与改前完全一致（不放宽）。
+# Pre-island (.pre.bin, present only when used): negative offsets (relative to the module base). All patch-area access
+# goes through PW / pbytes / is_patch, so the after-area and the pre-island are checked by the same code; without a
+# pre-island, pre is empty and every check is exactly as before (nothing loosens).
+# 前导岛只有 [PRE_PATCH_OFF, PRE_PATCH_OFF + PRE_PATCH_USED) 是块；其后的 0 填充不是代码（udf #0），不算补丁区。
+# Only [PRE_PATCH_OFF, PRE_PATCH_OFF + PRE_PATCH_USED) of the pre-island holds blocks; the zero padding after it is not
+# code (udf #0) and is not patch area.
+PRE_BASE = h.get('PRE_PATCH_OFF', 0); PRE_SIZE = h.get('PRE_PATCH_SIZE', 0); PRE_USED = h.get('PRE_PATCH_USED', 0)
+pre = b''
+if PRE_SIZE:
+    pre = open(f'{out_dir}/{mod}.pre.bin', 'rb').read()
+def _pbuf(off): return (pre, off - PRE_BASE) if off < 0 else (pat, off)   # 模块偏移 → (缓冲区, 下标) | module offset -> (buffer, index)
+def PW(off):
+    b, i = _pbuf(off); return struct.unpack_from('<I', b, i)[0]
+def pbytes(off, n):
+    b, i = _pbuf(off); return bytes(b[i:i + n])
+def in_pre(off): return bool(PRE_SIZE) and PRE_BASE <= off < PRE_BASE + PRE_USED
+def is_patch(off): return off is not None and (in_pre(off) or PO <= off < len(pat))
 fails = []
 def bad(msg):
     fails.append(msg)
@@ -196,12 +215,18 @@ cutw = {o & ~3 for o in cutb if o < TE}
 _exp = (heads | set(calls.values()) | obs_heads | par_words) - cutw; _got = diff - cutw
 if _got != _exp: bad(f'text 改动与改写点不一致：多改 {len(_got - _exp)} 漏改 {len(_exp - _got)} 例 {[hex(x) for x in sorted(_got ^ _exp)[:5]]}')
 def btarget(o):
-    w = W(pat, o)
+    w = PW(o)
     if w & 0xFC000000 != 0x14000000: return None
     imm = w & 0x3FFFFFF
     if imm & 0x2000000: imm -= 0x4000000
     return o + 4 * imm
-nb = [a for a in heads | obs_heads if not (btarget(a) is not None and PO <= btarget(a) < len(pat))]
+if PRE_SIZE and (len(pre) != PRE_SIZE or PRE_BASE != -PRE_SIZE):
+    bad(f'前导岛文件 / 表头不一致：size {len(pre):#x} vs {PRE_SIZE:#x}, off {PRE_BASE:#x} | pre-island file / header mismatch')
+if PRE_SIZE and not (0 < PRE_USED <= len(pre) and PRE_USED % 4 == 0):
+    bad(f'前导岛表头 PRE_PATCH_USED 缺失或越界：{PRE_USED:#x} / {PRE_SIZE:#x} | pre-island PRE_PATCH_USED missing or out of range')
+elif PRE_SIZE and pre[PRE_USED:] != bytes(len(pre) - PRE_USED):
+    bad(f'前导岛 PRE_PATCH_USED {PRE_USED:#x} 之后不全是 0 | the pre-island is not all zero past PRE_PATCH_USED')
+nb = [a for a in heads | obs_heads if not is_patch(btarget(a))]
 if nb: bad(f'改写点头不是跳进补丁区的 B：{len(nb)} 例 {[hex(x) for x in nb[:5]]}')
 
 # ③ 独立分母
@@ -233,6 +258,7 @@ nwin_ref = sum(1 for o in ind if o in inwin)
 # ④ 补丁区干净
 # ④ Patch area is clean
 P = llvm_dis(pat[PO:], PO)
+if PRE_SIZE: P.update(llvm_dis(pre[:PRE_USED], PRE_BASE))   # 前导岛（用到的部分）同样必须干净 | the pre-island (its used part) must be clean too
 left = sorted(o for o, t in P.items() if RX18.search(t) or sysk(t) not in (None, 'tpidrro_r'))
 if left: bad(f'补丁区残留 x18/系统寄存器/svc：{len(left)} 例 {[(hex(x), P[x]) for x in left[:5]]}')
 
@@ -241,48 +267,54 @@ if left: bad(f'补丁区残留 x18/系统寄存器/svc：{len(left)} 例 {[(hex(
 KEY = {k[4:-4]: v for k, v in h.items() if k.startswith('KEY_') and k.endswith('_IDX')}
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 _md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); _md.detail = True
+def adrp_target(word, pc):
+    """adrp 解出的页目标，按真实模块偏移算（capstone 对前导岛的负地址页基址不可靠）。 | the adrp page target from the true module offset (capstone's page base is unreliable for the pre-island's negative address)."""
+    imm = (((word >> 29) & 3) | (((word >> 5) & 0x7FFFF) << 2)); imm = (imm ^ (1 << 20)) - (1 << 20)
+    return ((pc & ~0xFFF) + (imm << 12))
 def keyseq(at):
-    q = list(_md.disasm(pat[at:at + 20], at))
+    code = pbytes(at, 20)
+    q = list(_md.disasm(code, at & ((1 << 64) - 1)))   # 以无符号地址反汇编（前导岛偏移为负）| disassemble at the unsigned address (pre-island offsets are negative)
     if len(q) < 5 or q[0].mnemonic != 'mrs' or 'tpidrro_el0' not in q[0].op_str \
-            or q[1].mnemonic != 'adrp' or q[1].operands[1].imm != h['KEY_PAGE_OFF'] \
+            or q[1].mnemonic != 'adrp' or adrp_target(W(code, 4), at + 4) != h['KEY_PAGE_OFF'] \
             or q[2].mnemonic != 'ldr' or q[2].operands[1].mem.base != q[1].operands[0].reg \
             or q[3].mnemonic != 'add' or q[3].operands[0].reg != q[0].operands[0].reg \
             or q[3].operands[1].reg != q[0].operands[0].reg:
         return None
     d = q[2].operands[1].mem.disp
-    return (q[3].address + 4, d // 8) if d % 8 == 0 and 0 <= d // 8 < 8 else None
+    return (at + 16, d // 8) if d % 8 == 0 and 0 <= d // 8 < 8 else None   # at+16：add 之后（模块偏移，非 capstone 的无符号地址）| at+16: after the add (module offset, not capstone's unsigned address)
 # C windows intentionally change the call word as well as the preceding head.
 # Inspect the actual decoded sequence, including the original link-producing PC.
 for prefix, call in calls.items():
     start = btarget(prefix)
-    if start is None or not PO <= start < len(pat):
+    if not is_patch(start):
         bad(f'call preparation has no trampoline {prefix:#x}'); continue
-    decoded = list(_md.disasm(pat[start:start + 36], start))
+    decoded = list(_md.disasm(pbytes(start, 36), start & ((1 << 64) - 1)))
     first = next(_md.disasm(orig[prefix:prefix + 4], prefix), None)
     safe = first and first.mnemonic in ('str', 'stp', 'stur', 'ldr', 'ldp', 'ldur') and not first.writeback \
         and first.reg_name(first.operands[-1].mem.base) in ('sp', 'fp') and not first.operands[-1].mem.index \
         and (first.reg_name(first.operands[-1].mem.base) != 'sp' or first.operands[-1].mem.disp >= 0) and not RX18.search(first.op_str)
     slot = keyseq(start + 8)
-    if len(decoded) != 9 or not safe or W(pat, start) != W(orig, prefix) \
+    if len(decoded) != 9 or not safe or PW(start) != W(orig, prefix) \
             or W(orig, call) != 0xD63F0240 or W(pat, call) != 0xD63F03C0 \
-            or W(pat, start + 4) != 0xF81F03E0 or W(pat, start + 8) != 0xD53BD07E \
+            or PW(start + 4) != 0xF81F03E0 or PW(start + 8) != 0xD53BD07E \
             or not slot or slot[1] != KEY['K18'] \
-            or W(pat, start + 20) != 0x8B0003DE or W(pat, start + 24) != 0xF94003DE \
-            or W(pat, start + 28) != 0xF85F03E0 or btarget(start + 32) != call:
+            or PW(start + 20) != 0x8B0003DE or PW(start + 24) != 0xF94003DE \
+            or PW(start + 28) != 0xF85F03E0 or btarget(start + 32) != call:
         bad(f'call window does not preserve store/scratch/link PC {prefix:#x}')
     elif decoded[3].reg_name(decoded[3].operands[0].reg) != 'x0' \
             or decoded[4].reg_name(decoded[4].operands[0].reg) != 'x0':
         bad(f'call window key scratch mismatch {prefix:#x}')
 
 def paramseq(at, r):
-    q = list(_md.disasm(pat[at:at + 40], at))
+    code = pbytes(at, 40)
+    q = list(_md.disasm(code, at & ((1 << 64) - 1)))
     tmp = 17 if r == 16 else 16
     rn = lambda ins, i: ins.reg_name(ins.operands[i].reg)
     if len(q) < 8 or q[0].mnemonic not in ('stur', 'str') or rn(q[0], 0) != f'x{tmp}' \
             or q[0].operands[1].mem.base != capstone.arm64_const.ARM64_REG_SP or q[0].operands[1].mem.disp not in (-16, -24) \
             or q[1].mnemonic != 'mrs' or rn(q[1], 0) != f'x{r}' \
             or 'tpidrro_el0' not in q[1].op_str or q[2].mnemonic != 'adrp' \
-            or q[2].operands[1].imm != h['KEY_PAGE_OFF'] or q[3].mnemonic != 'ldr' \
+            or adrp_target(W(code, 8), at + 8) != h['KEY_PAGE_OFF'] or q[3].mnemonic != 'ldr' \
             or q[3].operands[1].mem.base != q[2].operands[0].reg or q[4].mnemonic != 'add' \
             or q[4].operands[0].reg != q[1].operands[0].reg or q[4].operands[1].reg != q[1].operands[0].reg \
             or q[5].mnemonic != 'ldr' or q[5].operands[0].reg != q[1].operands[0].reg \
@@ -292,7 +324,7 @@ def paramseq(at, r):
             or q[6].operands[1].mem.disp != q[0].operands[1].mem.disp or q[7].mnemonic != 'b':
         return None
     d = q[3].operands[1].mem.disp
-    return (q[6].address + 4, d // 8)
+    return (at + 24, d // 8)   # at+24：ldur 之后（模块偏移）| at+24: after the ldur (module offset)
 gates = {}
 for l in open(f'{out_dir}/{mod}.gates.tsv'):
     r, k, arg, oa = l.split(); gates[int(r, 16)] = (k, int(arg), int(oa, 16))
@@ -304,10 +336,10 @@ gsites = sorted(a for a, k in sites.items() if k in ('svc', 'cntpct', 'cntvct'))
 seen = set()
 for a in gsites:
     s = btarget(a); ow = W(orig, a) if a not in _hostcall else (0xD4000001 | _hostcall[a] << 5)
-    ks = keyseq(s + 4)
-    if W(pat, s) != 0xA9BF7BFD or not ks or ks[1] != KEY.get('KGATE') \
-            or W(pat, ks[0]) & 0xFFC00000 != 0xF9400000 or W(pat, ks[0] + 4) != LDR_X29_SP or W(pat, ks[0] + 8) != 0xD63F03C0 \
-            or W(pat, ks[0] + 12) != 0xA8C17BFD or W(pat, ks[0] + 16) != B(ks[0] + 16, a + 4):
+    ks = keyseq(s + 4) if is_patch(s) else None
+    if not is_patch(s) or PW(s) != 0xA9BF7BFD or not ks or ks[1] != KEY.get('KGATE') \
+            or PW(ks[0]) & 0xFFC00000 != 0xF9400000 or PW(ks[0] + 4) != LDR_X29_SP or PW(ks[0] + 8) != 0xD63F03C0 \
+            or PW(ks[0] + 12) != 0xA8C17BFD or PW(ks[0] + 16) != B(ks[0] + 16, a + 4):
         bad(f'门块不符键页模板 {a:#x}'); continue
     arg = (ow >> 5) & 0xFFFF if sites[a] == 'svc' else ow & 31
     g = gates.get(ks[0] + 12)
@@ -331,12 +363,12 @@ for off, oid, ow, why in obs:
     # this ABI is checked functionally by gatefn (the stub deliberately clobbers x9–x17 and NZCV, and full restoration is checked), not approximated here by position
     if set(range(off, off + 4)) & _busy: bad(f'观测门 {off:#x} 与改写点 / 窗口 / 剪口重叠')
     s_ = btarget(off)
-    if s_ is None or not (PO <= s_ < len(pat)): bad(f'观测门头 {off:#x} 不是跳进补丁区的 B'); continue
+    if not is_patch(s_): bad(f'观测门头 {off:#x} 不是跳进补丁区的 B'); continue
     ks = keyseq(s_ + 4)
-    if W(pat, s_) != 0xA9BF7BFD or not ks or ks[1] != KEY.get('KGATE') \
-            or W(pat, ks[0]) & 0xFFC00000 != 0xF9400000 or W(pat, ks[0] + 4) != LDR_X29_SP or W(pat, ks[0] + 8) != 0xD63F03C0 \
-            or W(pat, ks[0] + 12) != 0xA8C17BFD or W(pat, ks[0] + 16) != ow \
-            or W(pat, ks[0] + 20) != B(ks[0] + 20, off + 4):
+    if PW(s_) != 0xA9BF7BFD or not ks or ks[1] != KEY.get('KGATE') \
+            or PW(ks[0]) & 0xFFC00000 != 0xF9400000 or PW(ks[0] + 4) != LDR_X29_SP or PW(ks[0] + 8) != 0xD63F03C0 \
+            or PW(ks[0] + 12) != 0xA8C17BFD or PW(ks[0] + 16) != ow \
+            or PW(ks[0] + 20) != B(ks[0] + 20, off + 4):
         bad(f'观测门块不符键页模板 {off:#x}'); continue
     if gates.get(ks[0] + 12) != ('obs', oid, off): bad(f'观测门行不符 {off:#x}：表 {gates.get(ks[0] + 12)}')
     seen.add(ks[0] + 12)
@@ -353,11 +385,11 @@ for n, (roff, form) in _hreg.items():
     if cut is None: continue                                       # 本产物没开这扇私有门 | This build output does not enable this private gate
     mt, mb = re.search(r'跳 (0x[0-9a-fA-F]+)', form), re.search(r'回 (0x[0-9a-fA-F]+)', form)
     if not mt or not mb or int(mb[1], 16) != roff + 4: bad(f'分支门 svc #{n:#x}：登记表形态缺跳转目标或回点 ≠ 原处+4：{form}'); continue
-    tgt = int(mt[1], 16); s_ = btarget(roff); ks = keyseq(s_ + 8) if s_ is not None else None
-    if s_ is None or not (PO <= s_ < len(pat)) or W(pat, s_) != 0xA9BF7FE8 or W(pat, s_ + 4) != 0xA9BF7BFD or not ks or ks[1] != KEY.get('KGATE') \
-            or W(pat, ks[0]) & 0xFFC00000 != 0xF9400000 or W(pat, ks[0] + 4) != LDR_X29_SP or W(pat, ks[0] + 8) != 0xD63F03C0 or W(pat, ks[0] + 12) != 0xA8C17BFD \
-            or W(pat, ks[0] + 16) != 0x34000068 or W(pat, ks[0] + 20) != 0xA8C17FE8 or W(pat, ks[0] + 24) != B(ks[0] + 24, tgt) \
-            or W(pat, ks[0] + 28) != 0xA8C17FE8 or W(pat, ks[0] + 32) != W(orig, roff) or W(pat, ks[0] + 36) != B(ks[0] + 36, roff + 4):
+    tgt = int(mt[1], 16); s_ = btarget(roff); ks = keyseq(s_ + 8) if is_patch(s_) else None
+    if not is_patch(s_) or PW(s_) != 0xA9BF7FE8 or PW(s_ + 4) != 0xA9BF7BFD or not ks or ks[1] != KEY.get('KGATE') \
+            or PW(ks[0]) & 0xFFC00000 != 0xF9400000 or PW(ks[0] + 4) != LDR_X29_SP or PW(ks[0] + 8) != 0xD63F03C0 or PW(ks[0] + 12) != 0xA8C17BFD \
+            or PW(ks[0] + 16) != 0x34000068 or PW(ks[0] + 20) != 0xA8C17FE8 or PW(ks[0] + 24) != B(ks[0] + 24, tgt) \
+            or PW(ks[0] + 28) != 0xA8C17FE8 or PW(ks[0] + 32) != W(orig, roff) or PW(ks[0] + 36) != B(ks[0] + 36, roff + 4):
         bad(f'分支门 svc #{n:#x} {roff:#x}：块不符模板'); continue
     if gates.get(ks[0] + 12) != ('svc', n, roff): bad(f'分支门 svc #{n:#x} gates.tsv 行不符：{gates.get(ks[0] + 12)}')
     seen.add(ks[0] + 12); nbranch += 1
@@ -370,13 +402,15 @@ if set(KEY) != {'K18', 'KTLS', 'KTLR', 'KGATE', 'KRES0', 'KRES1', 'KASPECT', 'KA
         or not {k for *_, k in params} <= set(KEY) or set(KEY.values()) != set(range(8)):
     bad(f'表头键页下标不合规：{KEY}（须含八个键且下标恰为 0..7）')
 kv = {v: k for k, v in KEY.items()}; nk = {}
-for o in range(PO, len(pat) - 4, 4):
-    w = W(pat, o)
-    if w & 0xFFFFFFE0 != 0xD53BD060: continue           # mrs xN, tpidrro_el0
-    n = w & 31; ks = keyseq(o); k = kv.get(ks[1]) if ks else None
-    if not ks or k is None:
-        bad(f'补丁区 {o:#x} 读 tpidrro 后不是键页间接槽序列'); continue
-    nk[k] = nk.get(k, 0) + 1
+_slot_scan = [range(PO, len(pat) - 4, 4)] + ([range(PRE_BASE, PRE_BASE + PRE_USED, 4)] if PRE_SIZE else [])   # 两块补丁区都要扫（前导岛只扫用到的部分）| scan both patch areas (the pre-island's used part)
+for words in _slot_scan:
+    for o in words:
+        w = PW(o)
+        if w & 0xFFFFFFE0 != 0xD53BD060: continue        # mrs xN, tpidrro_el0
+        n = w & 31; ks = keyseq(o); k = kv.get(ks[1]) if ks else None
+        if not ks or k is None:
+            bad(f'补丁区 {o:#x} 读 tpidrro 后不是键页间接槽序列'); continue
+        nk[k] = nk.get(k, 0) + 1
 expected = {}
 for kind in sites.values():
     key = {'x18': 'K18', 'W': 'K18', 'C': 'K18', 'tpidr_r': 'KTLS', 'tpidr_w': 'KTLS', 'tpidrro_r': 'KTLR'}.get(kind)
@@ -489,11 +523,10 @@ def _mem_sp(ins, load, alias=None):
     return None
 def _block(start):
     out = []
-    for ins in _md.disasm(pat[start:start + 256], start):
+    for i, ins in enumerate(_md.disasm(pbytes(start, 256), start & ((1 << 64) - 1))):
         out.append(ins)
         if ins.mnemonic == 'b':
-            t = ins.operands[0].imm
-            if not (PO <= t < len(pat)): break
+            if not is_patch(btarget(start + 4 * i)): break   # 目标按模块偏移算（capstone 对前导岛负地址不可靠）| target from the module offset (capstone unreliable for the pre-island's negative address)
     return out
 static_entries = [(a, set()) for a in sites]
 for a, b, r, _ in params:
@@ -547,7 +580,7 @@ print(f'STATIC {mod} scanned={static_seen} violations={sum(1 for x in fails if x
 #   for every b in text that jumps into the patch area (trampoline head a), follow the patch block through all exits back to text (sequential b and conditional branches; bl is treated as returning; ret / br do not count as returning to text).
 #   Legal exits: a+4; the address after skipped words that are all words absorbed by the rewrite (≠ the original word and not another trampoline head, e.g. the nop at parameter-gate B);
 #   window (W row [lo, hi)) heads: hi and the branch targets of the original instructions inside the window; non-window heads: the branch targets of the original instructions inside the contiguous absorbed span.
-_heads = {o for o in range(0, TE & ~3, 4) if W(pat, o) & 0xFC000000 == 0x14000000 and btarget(o) is not None and btarget(o) >= PO}
+_heads = {o for o in range(0, TE & ~3, 4) if W(pat, o) & 0xFC000000 == 0x14000000 and is_patch(btarget(o))}   # text 里跳进任一补丁区（后区或前导岛）的 b | b in text jumping into either patch area (after or pre-island)
 _wend = dict(wins)
 def _bt(w, o):
     if w & 0x7C000000 == 0x14000000: return o + 4 * (((w & 0x3FFFFFF) ^ 0x2000000) - 0x2000000)
@@ -566,23 +599,28 @@ if calls:
             bad('relocation enters call without preparation')
 
 def _exits(start):
-    ex, seen, st = set(), set(), [start]
+    """补丁块回 text 的全部出口；第二项是顺序执行（没有分支）走出补丁区的位置——块尾漏了出口 b，会落进前导岛的 0 填充、
+    模块 text 的开头或映像之外，一律判失败。| Every exit of the patch block back to text; the second item lists where the
+    walk ran out of the patch area in sequence (no branch) -- a block missing its exit b falls into the pre-island's zero
+    padding, the start of the module text or past the image, and fails."""
+    ex, seen, st, off_end = set(), set(), [start], []
     while st:
         o = st.pop()
-        while o not in seen and o + 4 <= len(pat):
-            seen.add(o); w = W(pat, o)
+        while o not in seen:
+            if not is_patch(o): off_end.append(o); break   # 补丁区边界（后区或前导岛用到的部分）| the patch-area bound (after-area or the pre-island's used part)
+            seen.add(o); w = PW(o)
             if w & 0xFC000000 == 0x14000000:
                 t = _bt(w, o)
-                if t < PO: ex.add(t); break
+                if not is_patch(t): ex.add(t); break   # 跳出补丁区 = 回 text（一个出口）| leaving the patch area = back to text (an exit)
                 o = t; continue
             if w & 0xFC000000 == 0x94000000: o += 4; continue
             if w == 0xD65F03C0 or w & 0xFFFFFC1F == 0xD61F0000: break
             t = _bt(w, o)
             if t is not None:
-                if t < PO: ex.add(t)
+                if not is_patch(t): ex.add(t)
                 else: st.append(t)
             o += 4
-    return ex
+    return ex, off_end
 nexit = 0; _cutoff = {c[0] for c in cuts}; _cutex = []
 for a in sorted(_heads):
     if a in _wend:
@@ -594,7 +632,9 @@ for a in sorted(_heads):
         while e < TE and W(pat, e) != W(orig, e) and e not in _heads: e += 4
         seg = range(a, e, 4); legal = {a + 4 * k for k in range(1, len(seg) + 1)}
     legal |= {t for o in seg for t in [_bt(W(orig, o), o)] if t is not None}
-    for t in _exits(btarget(a)):
+    _ex, _off_end = _exits(btarget(a))
+    for o in _off_end: bad(f'跳板 {a:#x}：补丁块在 {o:#x} 没有分支就走出补丁区 | the patch block runs out of the patch area at {o:#x} without a branch')
+    for t in _ex:
         nexit += 1
         if t not in legal and a in _cutoff: _cutex.append(f'{a:#x}→{t:#x}'); continue   # 已登记剪口（带理由，故意改控制流）：放行并列出 | Registered cuts (with a reason, deliberately changing control flow): let through and listed
         if t not in legal: bad(f'跳板出口 {a:#x} → {t:#x}：既不是 {a + 4:#x} / 吸收段尾 / 窗口尾，也不是段内原指令的分支目标（越过未改原指令或别的跳板头）')

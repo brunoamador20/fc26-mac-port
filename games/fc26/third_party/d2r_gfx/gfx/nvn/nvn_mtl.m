@@ -2524,8 +2524,9 @@ static void wb_write_list(wb_ent **list, int nl, int force) {
                 uint64_t pc = rec[q].pc; int dup = 0; for (int w = 0; w < ns; w++) if (seen[w] == pc) dup = 1; if (dup) continue; if (ns < 8) seen[ns++] = pc;
                 const char *mn = "?", *ln = "?"; uint64_t mo = 0, lo2 = 0; int okp = runtime_module_offset(pc, &mn, &mo), okl = rec[q].lr && runtime_module_offset(rec[q].lr, &ln, &lo2);
                 Dl_info di; if (!okp && dladdr((void *)(uintptr_t)pc, &di) && di.dli_fbase) { mn = di.dli_sname ? di.dli_sname : "host"; mo = pc - (uint64_t)(uintptr_t)di.dli_fbase + 0x100000000ull; okp = 1; }
-                o2 += snprintf(line + o2, sizeof line - o2, " [%s pc=%s+%#llx lr=%s+%#llx page+%#llx]", rec[q].src ? "host" : "guest", okp ? mn : "?", (unsigned long long)(okp ? mo : pc),
-                               okl ? ln : "-", (unsigned long long)(okl ? lo2 : 0), (unsigned long long)(rec[q].page - (uintptr_t)t->mem)); shown++;
+                o2 += snprintf(line + o2, sizeof line - o2, " [%s pc=%s%s%#llx lr=%s%s%#llx page+%#llx]", rec[q].src ? "host" : "guest", okp ? mn : "?",
+                               okp && (int64_t)mo < 0 ? "-" : "+", (unsigned long long)(!okp ? pc : (int64_t)mo < 0 ? 0 - mo : mo),   /* main-0x.. in the pre-island */
+                               okl ? ln : "-", okl && (int64_t)lo2 < 0 ? "-" : "+", (unsigned long long)(!okl ? 0 : (int64_t)lo2 < 0 ? 0 - lo2 : lo2), (unsigned long long)(rec[q].page - (uintptr_t)t->mem)); shown++;
             }
             TILELOG(t, "writers since the render (%d records):%s", nr, line);
         }
