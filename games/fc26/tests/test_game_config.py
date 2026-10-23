@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parents[1]
@@ -54,6 +55,24 @@ class GameConfig(unittest.TestCase):
         self.assertIn('rewrite-env', run.stdout)
         check = subprocess.run(['make', '-s', '-C', str(HERE), 'check-config', f'PY={sys.executable}'], capture_output=True, text=True)
         self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+
+    def test_makefile_propagates_runtime_failure(self):
+        if not shutil.which('make'):
+            self.skipTest('make is required')
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            build_dir = work / 'build'
+            build_dir.mkdir(parents=True)
+            fake_bin = build_dir / 'fc26-native'
+            fake_bin.write_text('#!/bin/sh\nexit 37\n')
+            fake_bin.chmod(0o755)
+            make_cmd = shutil.which('make') or 'make'
+            for target in ('probe', 'boot', 'boot-nnmain'):
+                cmd = [make_cmd, '-C', str(HERE), '-o', 'runtime', target, f'WORK={work}', f'PY={sys.executable}']
+                if target == 'boot-nnmain':
+                    cmd.append(f'MAKE={make_cmd} -o runtime')
+                run = subprocess.run(cmd, capture_output=True, text=True)
+                self.assertNotEqual(run.returncode, 0, f'{target} succeeded unexpectedly: {run.stdout} {run.stderr}')
 
 
 if __name__ == '__main__':
