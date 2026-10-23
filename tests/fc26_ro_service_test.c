@@ -236,11 +236,10 @@ static void test_sdk_init(void) {
     *mf = (void *)0x12345678ULL;
     CHECK_EQ(*mf, (void *)0x12345678ULL);
 
+    /* The sdk calls this variable's value itself (sdk+0x14ab34/0x14c62c: ldr x8, [x8]; blr x8): it holds the function. */
     CHECK(fake_g_pLookupGlobalAutoFunctionPointer != NULL);
-    void **af_slot = (void **)fake_g_pLookupGlobalAutoFunctionPointer;
-    CHECK(af_slot != NULL && *af_slot != NULL);
     typedef void *(*LookupFn)(const char *);
-    LookupFn lookup = (LookupFn)(*af_slot);
+    LookupFn lookup = (LookupFn)fake_g_pLookupGlobalAutoFunctionPointer;
 
     CHECK_EQ(lookup("__cxa_guard_acquire"), (void *)stub_guard_override);
     CHECK_EQ(lookup("pthread_mutex_lock"), (void *)stub_mutex_lock);
