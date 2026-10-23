@@ -62,8 +62,9 @@ static void play(int side, const VibrationValue *v) {
     pthread_mutex_lock(&lastLock); last[side] = c; pthread_mutex_unlock(&lastLock); atomic_fetch_add(&values_in, 1);
     static _Atomic int first; if (!atomic_exchange(&first, 1)) fprintf(stderr, "[hid] first vibration value from the game: %s %.2f@%.0f Hz %.2f@%.0f Hz\n",
                                                                          side ? "right" : "left", c.amp_low, c.freq_low, c.amp_high, c.freq_high);
-    if (atomic_load(&rumble_muted)) c.amp_low = c.amp_high = 0;
-    runtime_rumble_set((unsigned)side, c.amp_low, c.freq_low, c.amp_high, c.freq_high);
+    if (atomic_load(&rumble_muted) || !runtime_rumble_enabled()) c.amp_low = c.amp_high = 0;
+    if (runtime_rumble_enabled() && !atomic_load(&rumble_muted))
+        runtime_rumble_set((unsigned)side, c.amp_low, c.freq_low, c.amp_high, c.freq_high);
 }
 static uint32_t vib_init(const uint32_t *h) {
     int side = vibration_side(h); static _Atomic int once;
@@ -118,6 +119,7 @@ static uint32_t six_states(int *out, SixAxisState *s, int max, const uint32_t *h
     }
     *out = n; return 0;
 }
+static void vib_node_update(void) {}
 static uint32_t six_state(SixAxisState *s, const uint32_t *h) { int n; return six_states(&n, s, 1, h); }
 static int no_handles(void *out, int max, const uint32_t *id, uint32_t style) { (void)out; (void)max; (void)id; (void)style; return 0; }
 
@@ -140,7 +142,11 @@ void *runtime_hid_feedback_override(const char *name) {
         return rumble ? NULL : (void *)no_handles;   /* on: the SDK's own (nn::hid::utility) */
     if (!strcmp(name, "_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE"))
         return gyro ? NULL : (void *)no_handles;
+    /* VibrationNode::Update (sdk+0x503ab0) flushes the mixed values through the hid service and aborts on failure; with rumble
+       on, the flush reaches detail::SendVibrationValues below, so only the no-rumble run (no device handles) skips it. */
+    if (!strcmp(name, "_ZN2nn3hid13VibrationNode6UpdateEv")) return rumble ? NULL : (void *)vib_node_update;
     static const struct { const char *name; void *fn; bool gyro; } entries[] = {
+        {"_ZN2nn3hid25InitializeVibrationDeviceERKNS0_21VibrationDeviceHandleE", (void *)vib_init, false},
         {"_ZN2nn3hid6detail25InitializeVibrationDeviceERKNS0_21VibrationDeviceHandleE", (void *)vib_init, false},
         {"_ZN2nn3hid6detail18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14VibrationValueE", (void *)vib_send, false},
         {"_ZN2nn3hid6detail19SendVibrationValuesEPKNS0_21VibrationDeviceHandleEPKNS0_14VibrationValueEi", (void *)vib_send_many, false},
@@ -152,7 +158,11 @@ void *runtime_hid_feedback_override(const char *name) {
         {"_ZN2nn3hid6detail17StopSixAxisSensorERKNS0_19SixAxisSensorHandleE", (void *)six_stop, true},
         {"_ZN2nn3hid6detail22GetSixAxisSensorStatesEPiPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE", (void *)six_states, true},
         {"_ZN2nn3hid6detail21GetSixAxisSensorStateEPNS0_18SixAxisSensorStateERKNS0_19SixAxisSensorHandleE", (void *)six_state, true}};
-    for (unsigned i = 0; i < sizeof entries / sizeof *entries; i++)
-        if (!strcmp(name, entries[i].name)) return (entries[i].gyro ? gyro : rumble) ? entries[i].fn : NULL;
+    for (unsigned i = 0; i < sizeof entries / sizeof *entries; i++) {
+        if (!strcmp(name, entries[i].name)) {
+            if (entries[i].gyro) return gyro ? entries[i].fn : NULL;
+            return entries[i].fn;
+        }
+    }
     return NULL;
 }
