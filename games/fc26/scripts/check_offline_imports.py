@@ -13,6 +13,8 @@ For every undefined symbol of a module in those namespaces:
 Then, for the service names of story 4: whether each rewritten module holds it as a string and whether the host
 registers it (a name built in code instead of stored as a string is not found: absence proves nothing).
 --all lists every MISSING import of every namespace, not only these six (boot stops at the first one).
+"host (name)" is read from the sources: any string literal naming the symbol counts, also one that names it for another
+reason (an observer, a symbol lookup); in the six namespaces every such string today is a replacement.
 Exit 1 when something is MISSING.
 Usage: python3 scripts/check_offline_imports.py [--work <work>] [--all]   (default work: FC26_WORK or assets/game.json)"""
 import argparse
