@@ -40,4 +40,5 @@ rtld
 FC 26.app/
 # shader caches if pointed inside this folder (TOTK_SHADER_CACHE / FC26_SHADER_JOURNAL): they hold the game's shaders
 shader-cache/
+shader-seed-fc26/
 fc26-journal/

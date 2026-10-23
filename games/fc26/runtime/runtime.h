@@ -67,6 +67,7 @@ void hle_signal_system_event(void *event);
 uint64_t runtime_svc(unsigned num, uint64_t *regs, const char *module, uint64_t offset);
 void runtime_gate(void);
 void runtime_thread_init(void);
+void runtime_oodle_tool(void);   /* runtime/oodle_tool.c: "oodle" mode, the game's OodleLZ_Decompress over a pipe (scripts/shader_seed.py) */
 void runtime_dispatch(uint64_t ret, uint64_t *regs);
 
 uint64_t runtime_image_bytes(void);

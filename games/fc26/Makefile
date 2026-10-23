@@ -150,6 +150,17 @@ shader-keys:
 	@test -n "$(DUMPS)" || { echo 'DUMPS="<TOTK_CTL_DUMP of start 1> <of start 2>" (docs/SHADERS_NUVEM.md)'; exit 2; }
 	"$(PY)" scripts/shader_key_check.py $(DUMPS)
 
+# Offline shader pre-translation (docs/SHADER_SEED.md): the game's shaders out of its .cas (decompressed by fc26-native's
+# "oodle" mode, i.e. the game's own Oodle), then translated into a shader cache. SEED: extracted shaders (game data);
+# CACHE: the cache to fill (rt-<chain> with its fc26-cache.id; no run may hold it).
+SEED ?= $(WORK)/build/shader-seed-fc26
+.PHONY: shader-seed shader-seed-translate
+shader-seed: runtime
+	"$(PY)" scripts/shader_seed.py scan --out "$(SEED)" --native "$(OUT)/$(BINARY)" --romfs "$(WORK)/extracted/$(VERSION)/romfs" --rewritten "$(WORK)/rewritten/$(VERSION)"
+shader-seed-translate:
+	@test -n "$(CACHE)" || { echo 'CACHE=<shader cache folder> (docs/SHADER_SEED.md)'; exit 2; }
+	"$(PY)" scripts/shader_seed.py translate --out "$(SEED)" --cache "$(CACHE)" --translator "$(OUT)/shader-service/totk_xlate" --spirv-cross "$(OUT)/spirv-cross/spirv-cross"
+
 # The slow pre-island proof (docs/ILHAS_NUVEM.md): build a > 140 MiB synthetic NSO, rewrite it at the real ±128 MiB
 # reach so a pre-island is forced, and prove every branch is in range and round-trips (+ structck). Not in `make test`.
 .PHONY: island-giant
