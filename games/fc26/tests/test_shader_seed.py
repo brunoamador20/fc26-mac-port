@@ -198,6 +198,35 @@ class Scan(unittest.TestCase):
 
 
 @unittest.skipUnless(platform.machine() in ('arm64', 'aarch64'), 'the stand-in decoder is AArch64 code')
+class Version(unittest.TestCase):
+    """The scan reads the RomFS of the version the port runs (assets/game.json): since story H1 the update's merged image
+    (extracted/v1638400/romfs, base Data/ + Patch/ in one romfs.bin), with its own extraction next to the base's."""
+
+    def test_defaults_follow_game_json(self):
+        version = json.loads((HERE / 'assets/game.json').read_text())['version_dir']
+        self.assertEqual(version, 'v1638400')
+        work = Path('/w')
+        scan = shader_seed.parser(work).parse_args(['scan'])
+        self.assertEqual(scan.romfs, work / 'extracted/v1638400/romfs')
+        self.assertEqual(scan.rewritten, work / 'rewritten/v1638400')
+        self.assertEqual(scan.out, work / 'shader-seed-fc26/v1638400')
+        self.assertEqual(shader_seed.parser(work).parse_args(['coverage']).out, scan.out)
+
+    def test_cas_files_from_the_index_of_that_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            romfs = Path(tmp)
+            (romfs / 'romfs.bin').write_bytes(bytes(0x300))
+            files = [{'path': 'Data/NX/a/cas_01.cas', 'offset': 0x100, 'size': 0x80},
+                     {'path': 'Patch/NX/a/cas_01.cas', 'offset': 0x200, 'size': 0x40},
+                     {'path': 'Patch/layout.toc', 'offset': 0x280, 'size': 0x10}]
+            (romfs / 'index.json').write_text(json.dumps({'romfs_size': 0x300, 'files': files}))
+            self.assertEqual(shader_seed.cas_files(romfs), [('Data/NX/a/cas_01.cas', 0x100, 0x80),
+                                                            ('Patch/NX/a/cas_01.cas', 0x200, 0x40)])
+            (romfs / 'index.json').write_text(json.dumps({'romfs_size': 0x400, 'files': files}))   # another image's index
+            with self.assertRaises(SystemExit):
+                shader_seed.cas_files(romfs)
+
+
 class OodlePipe(unittest.TestCase):
     """runtime/oodle_tool.c with the Python client, a stand-in decoder at the offset (raw[i] = comp[i % n] ^ 0x5a; the
     stand-in fails a 7-byte request, as Oodle stops on bad data, to check the restart)."""

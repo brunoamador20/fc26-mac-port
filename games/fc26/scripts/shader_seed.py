@@ -35,6 +35,9 @@ import threading
 import time
 
 HERE = Path(__file__).resolve().parents[1]
+# the version the port runs (assets/game.json): its RomFS has its own .cas (the update's merged RomFS: base + Patch/), so
+# each version has its own extraction
+VERSION = json.loads((HERE / 'assets/game.json').read_text())['version_dir']
 CONTROL_MAGIC = struct.pack('<I', 0x98761234)
 CONTROL_LEN = 0x880
 CODE_MAGIC = {0x12345678: 'graphics', 0x12345679: 'compute'}
@@ -268,8 +271,12 @@ class Oodle:
 
 
 def cas_files(romfs):
-    """(path, offset, size) of every .cas inside romfs.bin (scripts/extract_romfs.py index.json)."""
+    """(path, offset, size) of every .cas inside romfs.bin (scripts/extract_romfs.py index.json; the update's merged image
+    has the same layout). The offsets are the index's: an image of another size is not the one it describes."""
     index = json.loads((Path(romfs) / 'index.json').read_text())
+    size = (Path(romfs) / 'romfs.bin').stat().st_size
+    if index.get('romfs_size', size) != size:
+        raise SystemExit(f'{romfs}: romfs.bin has {size} bytes, index.json describes {index["romfs_size"]}')
     return [(f['path'], f['offset'], f['size']) for f in index['files'] if f['path'].endswith('.cas')]
 
 
@@ -571,20 +578,19 @@ def cmd_coverage(args):
     return 0 if len(hit) == len(journal) else 1
 
 
-def main(argv=None):
-    work = Path(os.environ.get('WORK', Path.home() / 'fc26-switch/work'))
+def parser(work):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest='cmd', required=True)
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument('--out', default=work / 'build/shader-seed-fc26', help='extracted shaders + inventory (game data)')
+    common.add_argument('--out', default=work / 'shader-seed-fc26' / VERSION, help='extracted shaders + inventory (game data)')
     tools = argparse.ArgumentParser(add_help=False)
     tools.add_argument('--translator', default=work / 'build/shader-service/totk_xlate')
     tools.add_argument('--spirv-cross', default=work / 'build/spirv-cross/spirv-cross')
     tools.add_argument('--chain', default=re.search(r'#define DMSH_CHAIN "([^"]+)"',
                        (HERE / 'third_party/d2r_gfx/gfx/nvn/dmsh_chain.h').read_text()).group(1))
     s = sub.add_parser('scan', parents=[common])
-    s.add_argument('--romfs', default=work / 'extracted/v100/romfs')
-    s.add_argument('--rewritten', default=work / 'rewritten/v100')
+    s.add_argument('--romfs', default=work / 'extracted' / VERSION / 'romfs')
+    s.add_argument('--rewritten', default=work / 'rewritten' / VERSION)
     s.add_argument('--native', default=work / 'build/fc26-native', help='an fc26-native with the "oodle" mode')
     s.add_argument('--only', nargs='*', help='only .cas whose path contains one of these')
     t = sub.add_parser('translate', parents=[common, tools])
@@ -601,7 +607,11 @@ def main(argv=None):
     c = sub.add_parser('coverage', parents=[common])
     c.add_argument('--journal', default=work / 'build/shader-cache/fc26-journal', help='read only')
     c.add_argument('--json', action='store_true')
-    args = ap.parse_args(argv)
+    return ap
+
+
+def main(argv=None):
+    args = parser(Path(os.environ.get('WORK', Path.home() / 'fc26-switch/work'))).parse_args(argv)
     return dict(scan=cmd_scan, translate=cmd_translate, prove=cmd_prove, coverage=cmd_coverage)[args.cmd](args)
 
 

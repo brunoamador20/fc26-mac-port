@@ -152,8 +152,9 @@ shader-keys:
 
 # Offline shader pre-translation (docs/SHADER_SEED.md): the game's shaders out of its .cas (decompressed by fc26-native's
 # "oodle" mode, i.e. the game's own Oodle), then translated into a shader cache. SEED: extracted shaders (game data);
-# CACHE: the cache to fill (rt-<chain> with its fc26-cache.id; no run may hold it).
-SEED ?= $(WORK)/build/shader-seed-fc26
+# CACHE: the cache to fill (rt-<chain> with its fc26-cache.id; no run may hold it). One SEED per version: each version's
+# RomFS has its own .cas (the update's merged one has the base's Data/ and its Patch/).
+SEED ?= $(WORK)/shader-seed-fc26/$(VERSION)
 .PHONY: shader-seed shader-seed-translate
 shader-seed: runtime
 	"$(PY)" scripts/shader_seed.py scan --out "$(SEED)" --native "$(OUT)/$(BINARY)" --romfs "$(WORK)/extracted/$(VERSION)/romfs" --rewritten "$(WORK)/rewritten/$(VERSION)"

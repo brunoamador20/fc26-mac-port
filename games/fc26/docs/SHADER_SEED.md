@@ -36,15 +36,23 @@ pedido do runtime, no cache `rt-<cadeia>`, com a mesma chave e o mesmo nome de a
 ```sh
 cd games/fc26
 export PY=$HOME/fc26-switch/venv/bin/python WORK=$HOME/fc26-switch/work
-make runtime PY=$PY WORK=$WORK                     # fc26-native com o modo "oodle"
-make shader-seed PY=$PY WORK=$WORK                 # ~2 min: $WORK/build/shader-seed-fc26/{shaders/,inventory.tsv,summary.json}
+# a versão é a do assets/game.json (v1638400, o update): RomFS extracted/<versão>/romfs, semente
+# $WORK/shader-seed-fc26/<versão>; OUT= um runtime com os cabeçalhos dessa versão (o do update: build-update)
+make runtime PY=$PY WORK=$WORK OUT=$WORK/build-update     # fc26-native com o modo "oodle"
+make shader-seed PY=$PY WORK=$WORK OUT=$WORK/build-update # {shaders/,inventory.tsv,summary.json}
 # com o jogo FECHADO (o script recusa se uma rodada segura o cache):
-make shader-seed-translate PY=$PY WORK=$WORK CACHE=$WORK/build/shader-cache/rt-totk-native-v4-unverified
+make shader-seed-translate PY=$PY WORK=$WORK OUT=$WORK/build-update CACHE=$WORK/build-update/shader-cache/rt-update
 # prova com um shader que o runtime já traduziu (só lê o cache e o diário):
-$PY scripts/shader_seed.py prove --out $WORK/build/shader-seed-fc26 --key <chave> --scratch /tmp/prova
+$PY scripts/shader_seed.py prove --key <chave> --scratch /tmp/prova \
+  --cache $WORK/build-update/shader-cache/rt-update --journal $WORK/build-update/shader-cache/fc26-journal
 # quantos shaders do diário (os que o jogo ligou) a extração dá, pela chave dos bytes:
-$PY scripts/shader_seed.py coverage --out $WORK/build/shader-seed-fc26
+$PY scripts/shader_seed.py coverage --journal $WORK/build-update/shader-cache/fc26-journal
 ```
+
+O `scan` lê os `.cas` pela imagem e pelo `index.json` da versão (o `index.json` do `extract_romfs.py`; o da RomFS
+mesclada do update tem o mesmo formato, com `Data/` do base e `Patch/` do update num só `romfs.bin`) e recusa uma
+imagem de tamanho diferente do que o índice descreve. A 1.0.0: `--romfs $WORK/extracted/v100/romfs --rewritten
+$WORK/rewritten/v100 --out $WORK/shader-seed-fc26/v100`, cache `$WORK/build/shader-cache/rt-totk-native-v4-unverified`.
 
 `translate`, `prove` e `coverage` chaveiam os arquivos extraídos pelos bytes, então uma extração feita com a regra
 antiga (nomes antigos, 10.844 arquivos) serve sem `scan` de novo: vira 9.358 shaders.
@@ -73,4 +81,7 @@ antiga (nomes antigos, 10.844 arquivos) serve sem `scan` de novo: vira 9.358 sha
   com 10.800 shaders a abertura fica bem mais longa (medir; `FC26_SHADER_WARM=kit` evita a espera).
 - O limite padrão do cache (`FC26_SHADER_CACHE_MAX_MIB=2048`) fica perto do tamanho da semente (1,5 GiB + o que o jogo
   traduzir).
-- Só a 1.0.0 (`extracted/v100`); a atualização tem `.cas` próprios (rodar `scan` na RomFS dela quando houver).
+- Os números acima são da 1.0.0. Update (v1638400, RomFS mesclada de 37,8 GB, M1, 23/10/2026): 72 `.cas`, 2.051.077
+  blocos, 84 GiB descomprimidos em 507 s (9 reinícios do decodificador); **9.710 shaders** pela chave nova (3.188
+  vértice, 3.636 fragmento, 2.846 compute, 40 de tesselação), 104 MiB extraídos; shaders em `installpackage_00/02/03/05`
+  do `Data/` e 335 novos em `Patch/` (`installpackage_00/02/03`). `coverage` no diário do update: 455/455.
