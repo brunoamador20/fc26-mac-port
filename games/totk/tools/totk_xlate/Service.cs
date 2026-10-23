@@ -333,7 +333,7 @@ static class ShaderService
         return dr;
     }
 
-    static JsonArray Unfillable(JsonObject dr, string stage)
+    static JsonArray Unfillable(string src, JsonObject dr, string stage)
     {
         var bad = new JsonArray();
         foreach (var kv in dr)
@@ -345,7 +345,40 @@ static class ShaderService
             foreach (JsonNode o in d["vec4_offsets"].AsArray())
             {
                 long ov = Long(o);
-                if (!ranges.Any(r => r.lo <= ov && ov < r.hi)) bad.Add((JsonNode)$"c{kv.Key}+0x{ov.ToString("x", CultureInfo.InvariantCulture)}");
+                long idx = ov / 16;
+                string pat = StagePrefix[stage] + "_c" + bank.ToString(CultureInfo.InvariantCulture) + @"\)\._m0\[\s*" + idx.ToString(CultureInfo.InvariantCulture) + @"u?\s*\](?:\.([xyzw]+))?";
+                var matches = Regex.Matches(src, pat);
+                bool anyAccessBad = matches.Count == 0;
+                foreach (Match m in matches)
+                {
+                    if (m.Groups[1].Success)
+                    {
+                        foreach (char c in m.Groups[1].Value)
+                        {
+                            long compOff = c == 'x' ? 0 : c == 'y' ? 4 : c == 'z' ? 8 : 12;
+                            long byteOff = ov + compOff;
+                            if (!ranges.Any(r => r.lo <= byteOff && byteOff < r.hi))
+                            {
+                                anyAccessBad = true;
+                                break;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        for (long compOff = 0; compOff < 16; compOff += 4)
+                        {
+                            long byteOff = ov + compOff;
+                            if (!ranges.Any(r => r.lo <= byteOff && byteOff < r.hi))
+                            {
+                                anyAccessBad = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (anyAccessBad) break;
+                }
+                if (anyAccessBad) bad.Add((JsonNode)$"c{kv.Key}+0x{ov.ToString("x", CultureInfo.InvariantCulture)}");
             }
         }
         return bad;
@@ -427,7 +460,7 @@ static class ShaderService
             File.WriteAllText(msl, src);
         Match entry = Regex.Match(src, @"(vertex|fragment|kernel)\s+\S+\s+(\w+)\s*\(");
         JsonObject dr = DrvReads(src, stage);
-        JsonArray unfillable = Unfillable(dr, stage);
+        JsonArray unfillable = Unfillable(src, dr, stage);
         var vertexInputs = new JsonArray(Regex.Matches(src, @"(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]")
             .Select(m => (JsonNode)new JsonObject { ["location"] = ParseInt(m.Groups[2].Value), ["msl_type"] = m.Groups[1].Value }).ToArray());
         Match outStruct = Regex.Match(src, @"struct main0_out\s*\{(.*?)\};", RegexOptions.Singleline);

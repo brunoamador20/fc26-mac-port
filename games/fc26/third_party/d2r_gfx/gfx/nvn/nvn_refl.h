@@ -49,9 +49,14 @@ typedef struct {
     uint8_t c1[4096];        // c1 常数段原样（B） | c1 constant segment as-is (B)
 } nvn_refl;
 
+int drv_fillable(int stage, int bank, unsigned off);
+int drv_access_components_fillable(int stage, int bank, unsigned long idx, const char *after);
+int msl_drv_unfillable_check(const char *msl, int stage, const char *entry);
+
 #ifdef __OBJC__
 #import <Foundation/Foundation.h>
 // 成功 0；失败返回非 0 并把原因写进 err（未知绑定类型、超定长上限、字段缺失）
 // 0 on success; on failure returns non-0 and writes the reason into err (unknown binding type, fixed-length limit exceeded, missing field)
 int nvn_refl_from_json(NSDictionary *j, nvn_refl *out, char *err, int errlen);
+int nvn_refl_from_json_msl(NSDictionary *j, NSString *msl, nvn_refl *out, char *err, int errlen);
 #endif

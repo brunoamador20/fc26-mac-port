@@ -4923,15 +4923,7 @@ static id<MTLLibrary> totk_msl_library(NSString *src, NSError **err) {
    fills (encode_args): c0 storage-buffer table at 0x110 (vertex) / 0x310 (compute) / 0x510 (fragment), 16 bytes per slot
    {address, size}; compute thread-group counts {x, y, z} at 0x200 and uniform-buffer table at 0x210; vertex point-size
    limit at 0x610; c2 texture / sampler handle tables. Anything else reads 0 and is reported. */
-static int drv_fillable(int stage, int bank, unsigned off) {
-    if (bank == 2) return (off >= 0x20 && off < 0x120) || (off >= 0x168 && off < 0x968);
-    switch (stage) {
-    case 0: return (off >= 0x110 && off < 0x210) || off == 0x610;
-    case 1: return off >= 0x510 && off < 0x610;
-    case 5: return off >= 0x200 && off < 0x410;
-    default: return 0;
-    }
-}
+/* drv_fillable, drv_access_components_fillable, msl_drv_unfillable_check estão definidos em nvn_refl.m / nvn_refl.h */
 /* TOTK 2026-10-16: does the function store through storage binding `name` (spirv-cross names: `(*spvDescriptorSet0.fp_s0)._m0[...] = ...`
    for stores, `&(*spvDescriptorSet0.fp_s1)` for atomics)? The reflection's rw was never set (shader_service.py tested the wrong
    flag bit), and the MSL address space over-approximates (1,140 fragment variants hold a non-const `device` pointer they only
@@ -4991,11 +4983,18 @@ static int drv_scan(NvShader *o, NSString *src) {   // src: the full MSL (iOS do
         if (p - s < 2 || p[-2] != '.' || (p[-1] != 'v' && p[-1] != 'f' && p[-1] != 'c')) continue;
         int bank = p[3] - '0';
         if ((bank != 0 && bank != 2) || strncmp(p + 4, ")._m0[", 6)) continue;
-        const char *q = p + 10; char *end; unsigned long idx = strtoul(q, &end, 10);
-        int dyn = end == q || !(*end == ']' || (*end == 'u' && end[1] == ']'));
+        const char *q = p + 10; while (*q == ' ') q++;
+        char *end = NULL; unsigned long idx = strtoul(q, &end, 10);
+        int dyn = end == q;
+        if (!dyn) {
+            while (*end == ' ') end++;
+            if (*end == 'u') { end++; while (*end == ' ') end++; }
+            if (*end != ']') dyn = 1;
+        }
         if (!o->rf.drv_read[bank]) o->drv_scanned[bank] = 1;
         o->rf.drv_read[bank] = 1;
-        if (!(dyn || !drv_fillable(o->stage, bank, (unsigned)idx * 16))) continue;
+        const char *after = dyn ? NULL : (end + 1);
+        if (!dyn && drv_access_components_fillable(o->stage, bank, idx, after)) continue;
         nunfill++;
         if (nbad < sizeof bad - 24) nbad += (size_t)snprintf(bad + nbad, sizeof bad - nbad, dyn ? " c%d+dynamic" : " c%d+%#lx", bank, idx * 16);
     }
@@ -5050,10 +5049,10 @@ static NvShader *shader_load(NSString *pc, int stage) {
     if (![j[@"chain"] isEqual:@DMSH_CHAIN]) { MLOG("【红】着色器 %s 的翻译链版本 %s 与本宿主期望的 %s 不符", pc.UTF8String, [[j[@"chain"] description] UTF8String], DMSH_CHAIN); return nil; }
     NvShader *o = [NvShader new];
     char err[160];
-    if (nvn_refl_from_json(j, &o->rf, err, sizeof err)) { MLOG("【红】着色器 %s 反射转换失败：%s", pc.UTF8String, err); return nil; }
+    NSString *full = rt ? [NSString stringWithContentsOfFile:rt_src encoding:NSUTF8StringEncoding error:nil] : nil;   // without the MSL a drv_unfillable entry stays a failure
+    if (nvn_refl_from_json_msl(j, full, &o->rf, err, sizeof err)) { MLOG("【红】着色器 %s 反射转换失败：%s", pc.UTF8String, err); return nil; }
     if (rt_range_on()) o->range_ro=rt_range_bindings_ro(j);
     o->fn = [lib newFunctionWithName:j[@"entry"]]; o->stage = stage; strlcpy(o->key, pc.UTF8String, sizeof o->key);
-    NSString *full = rt ? [NSString stringWithContentsOfFile:rt_src encoding:NSUTF8StringEncoding error:nil] : nil;
     for (int i = 0; !full && i < o->rf.nb; i++)
         if (o->rf.b[i].kind == NVN_RB_TEXIMG) { MLOG("【红】着色器 %s 反射转换失败：tex sobre imagem sem o MSL para provar que só consulta tamanho", o->key); return nil; }
     o->writes_depth = full && [full rangeOfString:@"[[depth("].location != NSNotFound;

@@ -57,7 +57,86 @@ static int parse_tcb_image_handle(NSString *name, int is_sampler, int *out_slot)
     return 0;
 }
 
-int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
+int drv_fillable(int stage, int bank, unsigned off) {
+    if (bank == 2) return (off >= 0x20 && off < 0x120) || (off >= 0x168 && off < 0x968);
+    switch (stage) {
+    case 0: return (off >= 0x110 && off < 0x210) || off == 0x610;
+    case 1: return off >= 0x510 && off < 0x610;
+    case 5: return off >= 0x200 && off < 0x410;
+    default: return 0;
+    }
+}
+
+int drv_access_components_fillable(int stage, int bank, unsigned long idx, const char *after) {
+    unsigned base_off = (unsigned)idx * 16;
+    if (after) {
+        while (*after == ' ') after++;
+    }
+    if (after && *after == '.') {
+        const char *c = after + 1;
+        while (*c == ' ') c++;
+        int found_comp = 0;
+        while (*c == 'x' || *c == 'y' || *c == 'z' || *c == 'w') {
+            found_comp = 1;
+            unsigned comp_off = (*c == 'x' ? 0 : *c == 'y' ? 4 : *c == 'z' ? 8 : 12);
+            if (!drv_fillable(stage, bank, base_off + comp_off))
+                return 0;
+            c++;
+        }
+        if (found_comp) return 1;
+    }
+    // Whole vec4 (no component swizzle)
+    for (unsigned comp_off = 0; comp_off < 16; comp_off += 4) {
+        if (!drv_fillable(stage, bank, base_off + comp_off))
+            return 0;
+    }
+    return 1;
+}
+
+int msl_drv_unfillable_check(const char *msl, int stage, const char *entry) {
+    if (!msl || !entry) return 0;
+    if (strstr(entry, "dynamic") != NULL) return 0;
+    if (entry[0] != 'c') return 0;
+    int bank = entry[1] - '0';
+    if (bank != 0 && bank != 2) return 0;
+    const char *plus = strstr(entry, "+0x");
+    if (!plus) return 0;
+    char *end_off = NULL;
+    unsigned long off = strtoul(plus + 3, &end_off, 16);
+    if (end_off == plus + 3 || (off % 16) != 0) return 0;
+    unsigned long target_idx = off / 16;
+
+    int found_count = 0;
+    for (const char *p = strstr(msl, "p_c"); p; p = strstr(p + 3, "p_c")) {
+        if (p <= msl) continue;
+        char prev = p[-1];
+        if (prev != 'v' && prev != 'f' && prev != 'c') continue;
+        if (p - 1 > msl) {
+            char pprev = p[-2];
+            if ((pprev >= 'a' && pprev <= 'z') || (pprev >= 'A' && pprev <= 'Z') || (pprev >= '0' && pprev <= '9') || pprev == '_')
+                continue;
+        }
+        int b = p[3] - '0';
+        if (b != bank || strncmp(p + 4, ")._m0[", 6) != 0) continue;
+        const char *q = p + 10;
+        while (*q == ' ') q++;
+        char *end = NULL;
+        unsigned long idx_read = strtoul(q, &end, 10);
+        if (end == q) return 0; // dynamic index
+        while (*end == ' ') end++;
+        if (*end == 'u') { end++; while (*end == ' ') end++; }
+        if (*end != ']') return 0; // dynamic index
+        if (idx_read != target_idx) continue;
+        found_count++;
+        const char *after = end + 1;
+        if (!drv_access_components_fillable(stage, bank, idx_read, after)) {
+            return 0; // component out of range
+        }
+    }
+    return found_count > 0;
+}
+
+int nvn_refl_from_json_msl(NSDictionary *j, NSString *msl, nvn_refl *o, char *err, int errlen) {
     memset(o, 0, sizeof *o);
     #define FAIL(...) do { snprintf(err, errlen, __VA_ARGS__); return 1; } while (0)
     if (![j[@"route"] isEqual:@"B"]) FAIL("不是 B 反射（route ≠ B；A 路线 / PC 链反射已退役）");
@@ -111,7 +190,24 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         NSDictionary *dr = j[@"drv_reads"];
         if ([dr isKindOfClass:[NSDictionary class]]) { o->drv_read[0] = dr[@"0"] != nil; o->drv_read[2] = dr[@"2"] != nil; }
         NSArray *uf = j[@"drv_unfillable"];
-        if ([uf isKindOfClass:[NSArray class]] && uf.count) FAIL("运行时读驱动段的回放层填不了的位置：%s", [[uf componentsJoinedByString:@" "] UTF8String]);
+        if ([uf isKindOfClass:[NSArray class]] && uf.count) {
+            int stage = -1;
+            NSString *st = j[@"stage"];
+            if ([st isEqualToString:@"vs"]) stage = 0;
+            else if ([st isEqualToString:@"ps"]) stage = 1;
+            else if ([st isEqualToString:@"cs"]) stage = 5;
+
+            NSMutableArray *unaccepted = [NSMutableArray array];
+            for (id item in uf) {
+                NSString *entry = [item description];
+                if (!msl || stage < 0 || !msl_drv_unfillable_check(msl.UTF8String, stage, entry.UTF8String)) {
+                    [unaccepted addObject:entry];
+                }
+            }
+            if (unaccepted.count) {
+                FAIL("运行时读驱动段的回放层填不了的位置：%s", [[unaccepted componentsJoinedByString:@" "] UTF8String]);
+            }
+        }
         NSString *c1 = j[@"c1"];
         if (c1.length % 2 || c1.length / 2 > sizeof o->c1) FAIL("c1 长 %lu 字节，超上限或不成对", (unsigned long)c1.length / 2);
         if (c1.length) { o->has_c1 = 1; o->c1_len = (uint16_t)(c1.length / 2); for (unsigned i = 0; i < o->c1_len; i++) o->c1[i] = (uint8_t)strtoul([[c1 substringWithRange:NSMakeRange(2 * i, 2)] UTF8String], NULL, 16); }
@@ -154,4 +250,8 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         return 0;
     }
     #undef FAIL
+}
+
+int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
+    return nvn_refl_from_json_msl(j, nil, o, err, errlen);
 }
