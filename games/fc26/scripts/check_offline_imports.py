@@ -8,6 +8,7 @@ For every undefined symbol of a module in those namespaces:
                   host function runs instead of the sdk's
   sdk (native)    another module defines it: the game's own code runs; what it asks over IPC reaches the services the
                   host registers (listed at the end: runtime/offline_services.c, hwopus.c, ...)
+  nro (late)      an NRO loaded later by nn::ro exports it (the layout's late_symbols): the loader leaves the slot for it
   weak, stays 0   a weak import nobody defines: the slot stays 0, which the SDK tests
   MISSING         nobody defines it and the host does not answer it: boot stops with "strong import unresolved"
 Then, for the service names of story 4: whether each rewritten module holds it as a string and whether the host
@@ -58,8 +59,10 @@ def demangle(names):
     return out if len(out) == len(names) else list(names)
 
 
-def classify(modules, exact, prefixes, everything=False):
-    """[(module, name, status, detail)] for the undefined symbols in scope (every namespace's MISSING ones with everything)."""
+def classify(modules, exact, prefixes, everything=False, late=()):
+    """[(module, name, status, detail)] for the undefined symbols in scope (every namespace's MISSING ones with everything).
+    late: the layout's late_symbols, [{name, nro}]."""
+    late = {s['name']: s['nro'] for s in late}
     defined = {}
     for m in modules:
         for s in m['symbols']:
@@ -79,6 +82,8 @@ def classify(modules, exact, prefixes, everything=False):
                 status, detail = 'host (name)', f'runtime/offline_applets.c prefix {prefix}'
             elif name in defined:
                 status, detail = 'sdk (native)', 'defined by ' + ', '.join(defined[name])
+            elif name in late:
+                status, detail = 'nro (late)', f'exported by {late[name]}, bound when nn::ro loads it'
             elif s.get('binding') == 2:
                 status, detail = 'weak, stays 0', 'nobody defines it'
             else:
@@ -110,9 +115,10 @@ def main():
     layout = args.work / 'analysis/runtime-layout.json'
     if not layout.exists():
         raise SystemExit(f'check_offline_imports: {layout} missing: run make prepare first')
-    modules = json.loads(layout.read_text())
+    data = json.loads(layout.read_text())   # {modules, late_symbols} (prepare_runtime.py); a bare module list before
+    modules, late = (data['modules'], data.get('late_symbols', [])) if isinstance(data, dict) else (data, [])
     exact, prefixes, registered = host_names()
-    rows = classify(modules, exact, prefixes, args.all)
+    rows = classify(modules, exact, prefixes, args.all, late)
     names = demangle([r[1] for r in rows])
     print(f'imports in nn::{{{",".join(NAMESPACES)}}}' + (' and every MISSING import' if args.all else '') + f': {len(rows)}')
     for (module, name, status, detail), readable in zip(rows, names):
