@@ -7,6 +7,7 @@
      command        an unknown command of a service (sm name) stops with its name and number (exit 1)
      ldn-command    the same for IUserLocalCommunicationService, reached through ldn:u
      hwopus-range   a frame whose final range does not match stops the runtime (exit 1)
+     csrng          csrng GenerateRandomBytes fills a B buffer (runtime/csrng.c, linked by tests/test_csrng.py)
    Stops go through the runtime's own runtime_fail / runtime_missing (missing.c). */
 #include "runtime.h"
 #include "ipc.h"
@@ -501,6 +502,18 @@ static void hwopus_range(void) {
     puts("unexpected: a wrong final range was accepted");
 }
 
+/* ---------- csrng (runtime/csrng.c; tests/test_csrng.py) ---------- */
+/* GenerateRandomBytes into a B buffer, as nn::crypto asks: every byte written, two calls differ. */
+static void csrng(void) {
+    uint32_t s = open_service("csrng");
+    enum { N = 64 };
+    uint8_t *a = low(N), *b = low(N);
+    Reply r = call(s, 0, NULL, 0, &(Extra){.b = {a, N}});
+    Reply r2 = call(s, 0, NULL, 0, &(Extra){.b = {b, N}});
+    unsigned zero = 0; for (unsigned i = 0; i < N; i++) zero += !a[i];
+    CHECK(!r.result && !r2.result && zero < 8 && memcmp(a, b, N), "csrng GenerateRandomBytes (B buffer): %u random bytes, two calls differ", N);
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) return 2;
     if (pthread_key_create(&runtime_keys[2], NULL) || pthread_setspecific(runtime_keys[2], msg)) return 2;
@@ -519,5 +532,6 @@ int main(int argc, char **argv) {
         puts("unexpected: command answered"); return 1;
     }
     if (!strcmp(argv[1], "hwopus-range")) { hwopus_range(); return 1; }
+    if (!strcmp(argv[1], "csrng")) { csrng(); printf("%s: %d failed\n", failures ? "FAIL" : "ok", failures); return failures != 0; }
     return 2;
 }
