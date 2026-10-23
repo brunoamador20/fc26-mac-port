@@ -123,6 +123,16 @@ boot-nnmain:
 test:
 	"$(PY)" -m unittest discover -s tests -v
 
+# RomFS offline configuration package (Data/nxcert.ini, Scripts/BootIni/MemoryInit.ini) -> <work>/extracted/<version>/romfs-patches
+# Overlays served in place of the originals (runtime/romfs.c, TOTK_ROMFS_PATCHES).
+ROMFS_DIR ?= $(WORK)/extracted/$(VERSION)/romfs
+ROMFS_PATCHES_DIR ?= $(WORK)/extracted/$(VERSION)/romfs-patches
+.PHONY: offline-config romfs-patches
+offline-config:
+	"$(PY)" scripts/make_offline_config.py --work "$(WORK)" --romfs "$(ROMFS_DIR)" --output "$(ROMFS_PATCHES_DIR)"
+
+romfs-patches: offline-config
+
 # exefs patches (mods/<display version>/<name>/exefs/*.pchtxt) -> <work>/patches, applied when FC26_PATCHES names them.
 # FC 26 has none yet: the mechanism is kept, the table is empty.
 .PHONY: patches app
