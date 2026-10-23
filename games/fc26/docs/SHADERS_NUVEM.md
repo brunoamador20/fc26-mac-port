@@ -178,7 +178,7 @@ Na 1ª vez que o kit abre a pasta (`totk_rt_dir`), a camada:
 | `third_party/d2r_gfx/gfx/nvn/nvn_mtl.m` | **2 ganchos** em `warm_start` (`:6741` prefill, `:6793` espera) + declarações (`:82-83`) |
 | `scripts/shader_cache_report.py` | **novo**: relatório por rodada e ganho 1ª → 2ª (`make shader-report`) |
 | `scripts/shader_key_check.py` | **novo**: a chave se repete entre aberturas? (`make shader-keys`) |
-| `tests/test_shader_cache.py` + `tests/shader_cache_check.c`, `tests/test_shader_tools.py` | **novos**: 22 + 8 testes sintéticos |
+| `tests/test_shader_cache.py` + `tests/shader_cache_check.c`, `tests/test_shader_tools.py` | **novos**: 25 + 8 testes sintéticos |
 | `Makefile`, `.gitignore`, `tests/test_runtime_syntax.py` | alvos `shader-report`/`shader-keys`; pastas de cache ignoradas; `shader_cache.c` na lista de fontes portáveis |
 
 Os ganchos são `weak_import`, o mesmo jeito que a camada gráfica já chama `runtime_boot_status`: sem o runtime do FC 26
@@ -190,8 +190,8 @@ ligado, a camada gráfica se comporta exatamente como antes.
 
 | Checagem | Resultado |
 |---|---|
-| `make test` (Linux, Python 3.13): 22 testes da lógica C + 8 das ferramentas + os 30 que a base já tinha | OK (60) |
-| Os 22 testes da lógica C com o arnês compilado com ASan + UBSan + LSan (gcc) | OK, sem erro de memória nem vazamento na biblioteca |
+| `make test` (Linux, Python 3.13): 25 testes da lógica C + 8 das ferramentas + os 31 que a base já tinha | OK (64) |
+| Os 25 testes da lógica C com o arnês compilado com ASan + UBSan + LSan (gcc) | OK, sem erro de memória nem vazamento na biblioteca |
 | `runtime/shader_cache.c` com clang 18 e gcc, `-std=c11 -Wall -Wextra -Werror` | OK |
 | `runtime/shader_cache_mac.m` contra cabeçalhos Foundation de mentira (só sintaxe e tipos) | OK |
 | **CI no macOS do GitHub** (run 39891061410, commit `5155e41`) | **OK**: o passo de testes (`make test`, que no macOS também roda os testes do cache e passa `xcrun clang -Werror` em todo `.c`/`.m` do runtime) passou; `make runtime` compilou e linkou o `fc26-native` com `shader_cache.c`, `shader_cache_mac.m` (`-Werror`) e os ganchos (conferido no log do job); o binário inicia |
