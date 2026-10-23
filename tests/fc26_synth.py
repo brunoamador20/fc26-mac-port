@@ -170,3 +170,45 @@ def fake_rewrite(nro, directory, name):
         ''.join(f'# KEY_{k}_IDX\t{i}\n' for i, k in enumerate(('K18', 'KTLS', 'KTLR', 'KGATE', 'KRES0', 'KRES1', 'KASPECT', 'KASPECTUI'))))
     (directory / f'{name}.gates.tsv').write_text(''.join(g + '\n' for g in gates))
     return patched, gates
+
+
+def make_library(exports=(), imports=(), strings=b'', module_id=bytes(range(0x80, 0x94)) + bytes(12)):
+    """A small module with only symbols (an ExeFS-like main / sdk / rtld stand-in): exports defined in its text,
+    undefined imports, and extra bytes in .rodata (strings a loader would look up by name)."""
+    image = bytearray(0x3000)
+    struct.pack_into('<4I', image, 0, 0, MOD0, MOD0 + 0x34, 0)
+    struct.pack_into('<4sIII', image, 0x10, b'NRO0', 0, 0x3000, 0)
+    struct.pack_into('<8I', image, 0x20, 0, 0x1000, 0x1000, 0x1000, 0x2000, 0x1000, 0, 0)
+    image[0x40:0x60] = module_id
+    struct.pack_into('<I', image, 0x100, RET)
+    names = [(n, True) for n in exports] + [(n, False) for n in imports]
+    dynstr, dynsym, hash_at, extra = 0x1000, 0x1400, 0x1c00, 0x1e00
+    table = bytearray(b'\0'); offsets = []
+    for n, _ in names: offsets.append(len(table)); table += n.encode() + b'\0'
+    image[dynstr:dynstr + len(table)] = table
+    for i, (n, defined) in enumerate(names):
+        struct.pack_into('<IBBHQQ', image, dynsym + 24 * (i + 1), offsets[i], 1 << 4 | 2, 0, 1 if defined else 0, 0x100 if defined else 0, 4)
+    nsym = len(names) + 1
+    struct.pack_into(f'<II1I{nsym}I', image, hash_at, 1, nsym, nsym - 1, *[max(0, i - 1) for i in range(nsym)])
+    image[extra:extra + len(strings)] = strings
+    tags = [(4, hash_at), (5, dynstr), (6, dynsym), (10, len(table)), (11, 24), (0, 0)]
+    for i, (tag, value) in enumerate(tags): struct.pack_into('<qQ', image, 0x2000 + 16 * i, tag, value)
+    struct.pack_into('<4s6i', image, MOD0, b'MOD0', 0x2000 - MOD0, 0x3000 - MOD0, 0x3000 - MOD0, 0, 0, 0x3000 - MOD0)
+    return bytes(image)
+
+
+def make_elf(nro, tls=(0x10, 0x40, 0x10), build_id=None):
+    """The module as an ELF64 (what a .nrs is): one PT_LOAD with the NRO image at file offset 0x1000, PT_DYNAMIC, PT_TLS
+    (filesz, memsz, align) and a GNU build id note (the first 20 bytes of the NRO's module id by default)."""
+    build_id = nro[0x40:0x54] if build_id is None else build_id
+    note = struct.pack('<III', 4, len(build_id), 3) + b'GNU\0' + build_id
+    note += bytes(-len(note) % 4)
+    dynamic = struct.unpack_from('<i', nro, MOD0 + 4)[0] + MOD0
+    phdrs = [(1, 5, 0x1000, 0, 0, len(nro), len(nro), 0x1000), (2, 6, 0x1000 + dynamic, dynamic, dynamic, 0x200, 0x200, 8),
+             (7, 4, 0x1000 + DATA, DATA, DATA, tls[0], tls[1], tls[2]), (4, 4, 0x200, 0, 0, len(note), len(note), 4)]
+    head = bytearray(0x1000)
+    head[0:16] = b'\x7fELF\x02\x01\x01' + bytes(9)
+    struct.pack_into('<HHIQQQIHHHHHH', head, 16, 3, 183, 1, 0, 0x40, 0, 0, 64, 56, len(phdrs), 64, 0, 0)
+    for i, p in enumerate(phdrs): struct.pack_into('<IIQQQQQQ', head, 0x40 + 56 * i, *p)
+    head[0x200:0x200 + len(note)] = note
+    return bytes(head) + nro
