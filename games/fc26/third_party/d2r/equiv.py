@@ -68,7 +68,17 @@ orig, _ = deexcl(orig); pat, _ = deexcl(pat); pre, _ = deexcl(pre)   # 前导岛
 def _pbuf(off): return (pre, off - PRE_BASE) if off < 0 else (pat, off)   # 模块偏移 → (缓冲区, 下标)；偏移为负即前导岛 | module offset -> (buffer, index); negative = pre-island
 def PWO(off): b, i = _pbuf(off); return struct.unpack_from('<I', b, i)[0]
 def pslice(off, n): b, i = _pbuf(off); return bytes(b[i:i + n])
-def in_patch(off): return bool(PRE_SIZE) and PRE_BASE <= off < 0 or off >= PATCH_OFF
+def in_patch(off):
+    """模块偏移是否在补丁区：后区 off ≥ PATCH_OFF（与改前同一判据）；前导岛的范围只在有前导岛时算（ARENA / TSD 在 IB 之下，永远不算）。
+    | Is a module offset in a patch area: the after-area off ≥ PATCH_OFF (the same test as before); the pre-island range
+    counts only when there is a pre-island (ARENA / TSD sit below IB and never count)."""
+    return (bool(PRE_SIZE) and PRE_BASE <= off < 0) or off >= PATCH_OFF
+def adrp_page(word, pc):
+    """adrp 的页目标，按真实模块偏移算（capstone 对前导岛的负地址不可靠）；正偏移时与 capstone 的 imm 相同。
+    | The adrp page target from the true module offset (capstone is unreliable for the pre-island's negative address);
+    for a positive offset it equals capstone's imm."""
+    imm = ((word >> 29) & 3) | (((word >> 5) & 0x7FFFF) << 2)
+    return (pc & ~0xFFF) + (((imm ^ (1 << 20)) - (1 << 20)) << 12)
 
 md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
 md.detail = True
@@ -93,7 +103,7 @@ def plain_block(a):
     ins = list(md.disasm(pslice(s, 36), s & ((1 << 64) - 1)))   # 以无符号地址反汇编（前导岛偏移为负）| disassemble at the unsigned address (pre-island offsets are negative)
     if len(ins) < 8 or ins[1].mnemonic != 'mrs' or 'tpidrro_el0' not in ins[1].op_str:
         return None
-    if ins[2].mnemonic != 'adrp': return None              # 键页目标不在这里按位置核（structck 管），只认序列形态 | the key-page target is checked by structck, here only the sequence shape matters
+    if ins[2].mnemonic != 'adrp' or adrp_page(PWO(s + 8), s + 8) != KEY_PAGE_OFF: return None   # 页按 s+8 精确核（s<0 或 ≥PATCH_OFF 皆同）| the exact page relative to s+8 (s<0 or ≥PATCH_OFF alike)
     if ins[3].mnemonic != 'ldr' or ins[3].operands[1].mem.base != ins[2].operands[0].reg: return None
     T = ins[1].operands[0].reg
     if ins[4].mnemonic != 'add' or ins[4].operands[0].reg != T or ins[4].operands[1].reg != T: return None
@@ -183,7 +193,7 @@ def run(u, st, start, patched, init):
     if patched:
         seen = {'patch': False}
         def hk(uc, addr, size, d):
-            if addr >= IB + PATCH_OFF or addr < IB: seen['patch'] = True   # addr < IB = 落在前导岛（映射在基址之前）| addr < IB = landed in the pre-island (mapped before the base)
+            if in_patch(addr - IB): seen['patch'] = True   # 后区，或（仅有前导岛时）前导岛；ARENA / TSD 不算 | the after-area, or (only with a pre-island) the pre-island; never ARENA / TSD
             elif seen['patch']:
                 if start - IB in callinfo and start <= addr < IB + winend[start - IB]:
                     return

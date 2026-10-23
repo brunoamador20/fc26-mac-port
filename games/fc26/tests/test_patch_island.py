@@ -10,12 +10,15 @@
 The slow > 140 MiB proof is tests/synth_giant.py (run by hand / `make island-giant`), not part of `make test`.
 """
 import os
+import random
+import runpy
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
@@ -63,6 +66,60 @@ def b_of(word, o):
 def adrp_page(word, pc):
     imm = ((word >> 29) & 3) | (((word >> 5) & 0x7FFFF) << 2)
     return (pc & ~0xFFF) + (((imm ^ (1 << 20)) - (1 << 20)) << 12)
+
+
+def adrp_plus_one_page(word):
+    imm = (((word >> 29) & 3) | (((word >> 5) & 0x7FFFF) << 2)) + 1
+    return (word & 0x9F00001F) | ((imm & 3) << 29) | (((imm >> 2) & 0x7FFFF) << 5)
+
+
+def enc_b(frm, to):
+    return 0x14000000 | (((to - frm) >> 2) & 0x3FFFFFF)
+
+
+def enc_movz(rd, imm16, hw=0):
+    return 0xD2800000 | (hw << 21) | (imm16 << 5) | rd
+
+
+def enc_movk(rd, imm16, hw):
+    return 0xF2800000 | (hw << 21) | (imm16 << 5) | rd
+
+
+def enc_br(rn):
+    return 0xD61F0000 | (rn << 5)
+
+
+def equiv_globals(out, nso):
+    """equiv.py's module namespace for one rewrite output: only its top level runs (run_name is not __main__), so the
+    images, sites and helpers (mk / run / plain_block / in_patch ...) are loaded and nothing is emulated yet. The
+    returned dict is the one equiv's functions read their globals from."""
+    argv = sys.argv
+    sys.argv = ['equiv.py', out, 'synth', nso, '--jobs', '1', '--mutate', '0']
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', ResourceWarning)   # equiv's top level reads its .tsv files without closing them
+            ns = runpy.run_path(str(D2R / 'equiv.py'), run_name='equiv_under_test')
+    finally:
+        sys.argv = argv
+    return ns['run'].__globals__
+
+
+# The PR's base (branch estoria1/ilhas-base): the single-area rewriter and checkers, before the pre-island. Addressed by
+# commit so it resolves in any clone of this branch's history, whatever the local branch names are.
+BASE_COMMIT = 'cf81fa19039305e6b7e9ab5bdf92d66b356d1a05'
+BASE_FILES = ('patch_nso.py', 'call_window.py', 'relr.py', 'nsoimg.py', 'equiv.py', 'structck.py')
+
+
+def base_d2r(dest):
+    """Write the base commit's third_party/d2r tools into dest; False when that commit is not in this clone (a shallow
+    checkout, as CI's): the golden rule then falls back to the committed hashes in golden_small.sha256."""
+    os.makedirs(dest, exist_ok=True)
+    for f in BASE_FILES:
+        r = subprocess.run(['git', 'show', f'{BASE_COMMIT}:games/fc26/third_party/d2r/{f}'], capture_output=True, cwd=HERE)
+        if r.returncode:
+            return False
+        Path(dest, f).write_bytes(r.stdout)
+    return True
 
 
 def group_entry_problems(word_at, head_target, key_page):
@@ -252,6 +309,120 @@ class PreIsland(unittest.TestCase):
                             '--jobs', '1', '--mutate', '40'], capture_output=True, text=True, cwd=str(D2R))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn('EQUIV synth OK', r.stdout)
+
+
+class EquivRules(unittest.TestCase):
+    """equiv.py, white box: a module with no island is judged exactly as before (only offsets >= PATCH_OFF are patch
+    code; the ARENA and the TSD, both mapped below the module base, never are), the pre-island counts only through its
+    own range, and plain_block accepts a block only when its adrp lands exactly on the key page."""
+
+    A = 0x100   # a text word of the synthetic module that is a nop and no site / window / call
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import unicorn  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest('unicorn not available for equiv')
+        cls.tmp = tempfile.mkdtemp()
+        cls.nso = os.path.join(cls.tmp, 'synth.nso')
+        synth_module.small(cls.nso)
+        cls.flat, cls.isl = os.path.join(cls.tmp, 'flat'), os.path.join(cls.tmp, 'isl')
+        for out, bits in ((cls.flat, '27'), (cls.isl, '18')):
+            os.makedirs(out)
+            r = run_rewriter(D2R, cls.nso, out, {'DM_REACH_BITS': bits})
+            assert r.returncode == 0, r.stderr
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _end_pc(self, g, image, pre_img, tsd_code=b''):
+        """Run the patched side from text word A in equiv's own emulator; return where equiv's code hook ended it."""
+        u, st = g['mk'](bytes(image), bytes(g['ARENA_SZ']), bytes(pre_img))
+        if tsd_code:
+            u.mem_write(g['TSD'], tsd_code)               # below the TSD key slots (TSD + 8*300 ...)
+        init = g['init_state'](random.Random(7), 0)
+        return g['run'](u, st, g['IB'] + self.A, True, init)[-1]
+
+    def _tsd_back_to_text(self, g):
+        """Code for the TSD page: jump back to text word A+4 (IB + A + 4)."""
+        back = g['IB'] + self.A + 4
+        return struct.pack('<III', enc_movz(17, back & 0xFFFF), enc_movk(17, back >> 32, 2), enc_br(17))
+
+    def test_hook_no_island_stops_outside_patch(self):
+        """No island: a patch block that jumps into the TSD (below IB) leaves patch code there; the run must end at
+        the TSD, as before the pre-island change (counting addr < IB as patch let it run on back into text)."""
+        g = equiv_globals(self.flat, self.nso)
+        self.assertEqual(g['PRE_SIZE'], 0)
+        img = bytearray(g['pat'])
+        S = (len(img) + 0xF) & ~0xF
+        img += bytes(S - len(img)) + struct.pack('<II', enc_movz(16, g['TSD'] >> 16, 1), enc_br(16))
+        struct.pack_into('<I', img, self.A, enc_b(self.A, S))
+        self.assertEqual(self._end_pc(g, img, b'', self._tsd_back_to_text(g)), g['TSD'])
+        for off in (g['ARENA'] - g['IB'], g['TSD'] - g['IB'], -4, g['PATCH_OFF'] - 4):
+            self.assertFalse(g['in_patch'](off), f'{off:#x} must not count as patch code without an island')
+        self.assertTrue(g['in_patch'](g['PATCH_OFF']))
+
+    def test_hook_island_counts_only_the_island(self):
+        g = equiv_globals(self.isl, self.nso)
+        PB = g['PRE_BASE']
+        self.assertLess(PB, 0)
+        img = bytearray(g['pat'])
+        struct.pack_into('<I', img, self.A, enc_b(self.A, PB))
+        pre_img = bytearray(g['pre'])
+        struct.pack_into('<I', pre_img, 0, enc_b(PB, self.A + 4))          # island block straight back to text
+        self.assertEqual(self._end_pc(g, img, pre_img), g['IB'] + self.A + 4, 'the pre-island must count as patch code')
+        struct.pack_into('<II', pre_img, 0, enc_movz(16, g['TSD'] >> 16, 1), enc_br(16))   # island block -> TSD
+        self.assertEqual(self._end_pc(g, img, pre_img, self._tsd_back_to_text(g)), g['TSD'], 'the TSD is not patch code')
+        self.assertFalse(g['in_patch'](g['ARENA'] - g['IB']))
+        self.assertFalse(g['in_patch'](g['TSD'] - g['IB']))
+
+    def test_plain_block_checks_the_exact_key_page(self):
+        """plain_block takes a block only when its adrp (at s+8) lands exactly on KEY_PAGE_OFF: in the after-area as
+        before, and in the pre-island at its negative offset. One page off must reject it."""
+        cases = 0
+        for out in (self.flat, self.isl):
+            g = equiv_globals(out, self.nso)
+            pat0, pre0 = g['pat'], g['pre']
+            by_area = {}
+            for a in g['sites']:
+                if a in g['winend'] or a in g['brinfo'] or not g['plain_block'](a):
+                    continue
+                by_area.setdefault(btarget(pat0, a) < 0, a)
+            self.assertIn(False, by_area, 'an after-area plain block')
+            if out == self.isl:
+                self.assertIn(True, by_area, 'a pre-island plain block')
+            for in_pre, a in by_area.items():
+                s = btarget(pat0, a)
+                self.assertEqual(g['plain_block'](a), s + 24)
+                if in_pre:
+                    buf = bytearray(pre0); i = s + 8 - g['PRE_BASE']
+                else:
+                    buf = bytearray(pat0); i = s + 8
+                struct.pack_into('<I', buf, i, adrp_plus_one_page(struct.unpack_from('<I', buf, i)[0]))
+                g['pre' if in_pre else 'pat'] = bytes(buf)
+                try:
+                    self.assertIsNone(g['plain_block'](a), f'adrp one page off the key page accepted ({out}, site {a:#x})')
+                finally:
+                    g['pat'], g['pre'] = pat0, pre0
+                cases += 1
+        self.assertEqual(cases, 3)
+
+    def test_no_island_judged_exactly_as_the_base(self):
+        """No island: this equiv and the base commit's print the same report (every DIFF / NOEFF / MUTMISS line and the
+        verdict with its trial and mutation counts) for the same output and seed."""
+        old = os.path.join(self.tmp, 'base_d2r')
+        if not base_d2r(old):
+            self.skipTest(f'base commit {BASE_COMMIT[:12]} not in this clone')
+        reports = []
+        for d in (old, str(D2R)):
+            r = subprocess.run([sys.executable, 'equiv.py', self.flat, 'synth', self.nso, '--jobs', '1', '--mutate', '40'],
+                               capture_output=True, text=True, cwd=d)
+            self.assertEqual(r.returncode, 0, r.stdout[-2000:] + r.stderr[-2000:])
+            reports.append(r.stdout.splitlines())
+        self.assertIn('EQUIV synth OK', reports[1][-1])
+        self.assertEqual(reports[1], reports[0])
 
 
 if __name__ == '__main__':
