@@ -27,6 +27,9 @@ void *runtime_handle_get(uint32_t h, int session) { h -= 0x100; return h < nobje
 void *runtime_handle_take_session(uint32_t h) { void *s = runtime_handle_get(h, 1); if (s) objects[h - 0x100] = NULL; return s; }
 void runtime_trace_guest(uint64_t fp, uint64_t lr) { (void)fp; (void)lr; }
 uint64_t runtime_desired_language(void) { uint64_t v = 0; memcpy(&v, "en-US", 5); return v; }
+uint32_t runtime_event_new(void) { return runtime_handle_new(2, (void *)1); }
+uint32_t runtime_event_readable(uint32_t w) { return w; }
+void runtime_event_signal(uint32_t w) { (void)w; }
 
 void *runtime_hid_feedback_override(const char *name) { (void)name; return NULL; }
 int runtime_handheld_mode(void) { return 0; }
