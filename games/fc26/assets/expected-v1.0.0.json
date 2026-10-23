@@ -3,21 +3,22 @@
     "title_id": "01004FF021942000",
     "display_version": "1.0.0",
     "source_nsp_size": 13409283148,
-    "main_build_id": null,
+    "main_build_id": "863E52BFEC7AB17B92FB347967F0619D00000000",
     "exefs_sha256": {
-        "main": null,
-        "main.npdm": null,
-        "rtld": null,
-        "sdk": null
+        "main": "72e17e6bdd325df723c6981919003cf290272296ef69b2b9ab82b6cd3617a5b7",
+        "main.npdm": "e9b34af39b8d1e97783188886ac5b8e1350ebd80c8f139ecc9b0fb90d4be4dfd",
+        "rtld": "a7f51c03c7e3a06aa49f9a114f9c1d876a6cd37a2394c4ebb25b05daaeb0a107",
+        "sdk": "194889754042a3f8180d14829b177ba84105920adf55e6d7d559cf91c0bc0968"
     },
     "rewritten_sha256": {
-        "main.patched.bin": null,
-        "sdk.patched.bin": null
+        "main.patched.bin": "64cdcf845095668ac7178827d2512466a5fa29e41d4d23aca34de351c10a1ecc",
+        "sdk.patched.bin": "8eed8598b56b3951a59418dc45caa29598e335092367100de832e0c00dd15fcb",
+        "main.pre.bin": "bf79d3890a7006531bd0de1e788ce8c8b5e7dc91fc94febfb46d8cde898cd055"
     },
     "romfs": {
         "size": 13263536744,
         "files": 76,
         "sha256_prefix": "b5c10b4bf6b3",
-        "sha256": null
+        "sha256": "b5c10b4bf6b3951acbc16c46e3b1cc62e5a20b2f594da480ce9b60a523ce6af2"
     }
 }
