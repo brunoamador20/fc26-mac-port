@@ -26,6 +26,9 @@ SIGNED_CALL_PREFIXES = {
     '863e52bfec7ab17b92fb347967f0619d': {
         0x814c01c: 0xad090aa1,  # stp q1, q2, [x21, #0x120]
     },
+    '323f3a9f3f0426c97610dc9066f4e67e': {
+        0x827558c: 0xad090aa1,  # stp q1, q2, [x21, #0x120]
+    },
 }
 PREFIX_EXCEPTIONS = SIGNED_CALL_PREFIXES
 
