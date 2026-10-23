@@ -1,14 +1,23 @@
-# Bayonetta 3 native runtime. Self-contained: the Horizon host (runtime/), the rewriter (third_party/d2r), the NVN-on-Metal
-# layer (third_party/d2r_gfx), the shader translator (prebuilt/) and the scripts are this folder's own copies, forked from
-# games/totk; nothing here reads games/totk. Everything generated goes to the work folder.
-# Inputs come from scripts/extract_code.py, scripts/merge_romfs.py and the rewrite (see README.md), then:
-#   make prepare   # scripts/prepare_runtime.py: tables, RomFS index, fonts config
-#   make runtime   # BY3_build/build/by3-native
+# EA SPORTS FC 26 native runtime (story 2: boot to nnMain). Self-contained: the Horizon host (runtime/), the rewriter
+# (third_party/d2r), the NVN-on-Metal layer (third_party/d2r_gfx), the shader translator (prebuilt/) and the scripts are
+# this folder's own copies, forked from games/by3 (which forked games/totk); nothing here reads another game's folder.
+# The game's identity and module list are in assets/game.json (scripts/game_config.py). Everything generated goes to the
+# work folder. Inputs come from scripts/extract_exefs.py, scripts/extract_romfs.py and the rewrite (story 1), then:
+#   make prepare   # scripts/prepare_runtime.py: tables, RomFS index, fonts config (PREPARE_FLAGS=--record the first time)
+#   make runtime   # <work>/build/fc26-native
+#   make probe     # modules mapped and linked, cross-module calls on 4 threads (no game code beyond that)
 #   make boot      # run it from the work folder (cwd: extracted/ and rewritten/ are read relative to it)
+# The whole sequence for the Mac is in docs/ESTORIA2_NUVEM.md.
 
-WORK ?= BY3_build
-OUT := $(WORK)/build
 PY ?= python3
+GAME_CONFIG := "$(PY)" scripts/game_config.py
+WORK ?= $(shell $(GAME_CONFIG) work)
+VERSION := $(shell $(GAME_CONFIG) version_dir)
+MODULES := $(shell $(GAME_CONFIG) modules)
+BINARY := $(shell $(GAME_CONFIG) binary)
+TITLE_ID := $(shell $(GAME_CONFIG) title_id)
+DISPLAY_VERSION := $(shell $(GAME_CONFIG) display_version)
+OUT := $(WORK)/build
 NATIVE_OPT ?= -O2
 
 GFX_SRC := $(wildcard third_party/d2r_gfx/gfx/nvn/*.c third_party/d2r_gfx/gfx/nvn/*.m third_party/d2r_gfx/gfx/nvn/*.S third_party/d2r_gfx/gfx/tex/*.c third_party/d2r_gfx/gfx/tex/*.m)
@@ -16,13 +25,17 @@ GFX_OBJECTS := $(patsubst %,$(OUT)/obj/%.o,$(GFX_SRC))
 GFX_HEADERS := $(wildcard third_party/d2r_gfx/gfx/nvn/*.h third_party/d2r_gfx/gfx/nvn/include/*.h third_party/d2r_gfx/host/*.h)
 GFX_FLAGS := -std=gnu11 -Wno-error -Wno-unused-function -Wno-unused-parameter -fobjc-arc -Ithird_party/d2r_gfx/gfx/nvn/include
 
-RUNTIME_SRC := $(filter-out runtime/frontend_ios.m,$(wildcard runtime/*.c runtime/*.m runtime/*.S))
+RUNTIME_SRC := $(wildcard runtime/*.c runtime/*.m runtime/*.S)
 RUNTIME_HEADERS := $(wildcard runtime/*.h)
 GENERATED := $(OUT)/runtime_tables.h $(OUT)/romfs_config.h $(OUT)/shared_fonts_config.h
 
-.PHONY: prepare runtime boot clean
-prepare:
-	"$(PY)" scripts/prepare_runtime.py --work "$(WORK)"
+.PHONY: check-config prepare runtime probe boot clean rewrite test
+check-config:
+	$(GAME_CONFIG) check
+
+PREPARE_FLAGS ?=
+prepare: check-config
+	"$(PY)" scripts/prepare_runtime.py --work "$(WORK)" $(PREPARE_FLAGS)
 
 $(GENERATED):
 	@echo "missing $@: run make prepare" && false
@@ -31,7 +44,7 @@ $(OUT)/obj/%.o: % $(GFX_HEADERS) Makefile
 	@mkdir -p "$(dir $@)"
 	xcrun clang $(NATIVE_OPT) -g -Wall -Wextra $(GFX_FLAGS) -c "$<" -o "$@"
 
-$(OUT)/by3-native: $(RUNTIME_SRC) $(RUNTIME_HEADERS) $(GENERATED) $(GFX_OBJECTS) Makefile
+$(OUT)/$(BINARY): $(RUNTIME_SRC) $(RUNTIME_HEADERS) $(GENERATED) $(GFX_OBJECTS) Makefile
 	xcrun clang -std=c11 $(NATIVE_OPT) -g -Wall -Wextra -Werror -Wno-deprecated-declarations \
 	  -Ithird_party/d2r_gfx/gfx/nvn/include -I$(OUT) -I/opt/homebrew/opt/opus/include/opus -I/opt/homebrew/opt/libvpx/include \
 	  $(RUNTIME_SRC) $(GFX_OBJECTS) /opt/homebrew/opt/opus/lib/libopus.a /opt/homebrew/opt/libvpx/lib/libvpx.a \
@@ -39,7 +52,20 @@ $(OUT)/by3-native: $(RUNTIME_SRC) $(RUNTIME_HEADERS) $(GENERATED) $(GFX_OBJECTS)
 	  -framework CoreText -framework UniformTypeIdentifiers -fobjc-arc -framework Cocoa -framework CoreVideo -framework CoreFoundation \
 	  -framework AudioToolbox -framework GameController -framework CoreHaptics -framework IOKit -o "$@"
 
-runtime: $(OUT)/by3-native
+runtime: $(OUT)/$(BINARY)
+
+# The rewrite for Apple silicon (story 1): each module of assets/game.json -> <work>/rewritten/<version>/<name>.patched.bin
+# (+ .fixups.tsv, .gates.tsv), with the variables the kit's builds use (game_config.py rewrite-env). MODULES=sdk rewrites
+# one. main's 43.8 M-instruction text needs the rewriter that works in chunks (story 1, BRIEFING): without it the old one
+# grew past 18 GB, so main is refused here unless patch_nso.py has it. Heavy: one module at a time, under a memory limit.
+rewrite:
+	@mkdir -p "$(WORK)/rewritten/$(VERSION)"
+	@for m in $(MODULES); do \
+	  if [ "$$m" = main ] && ! grep -q 'class LazyInsns' third_party/d2r/patch_nso.py; then \
+	    echo "refusing to rewrite main with this patch_nso.py: it has no chunked disassembly (story 1, docs/BRIEFING.md)"; exit 1; fi; \
+	  echo "rewrite $$m"; \
+	  env $$($(GAME_CONFIG) rewrite-env) "$(PY)" third_party/d2r/patch_nso.py "$(WORK)/extracted/$(VERSION)/exefs/$$m" "$(WORK)/rewritten/$(VERSION)" $$m || exit 1; \
+	done
 
 # The runtime shader translation the graphics layer starts on first use: <work>/build/shader-service/totk_xlate (the
 # repository's prebuilt NativeAOT translator, checked against its SHA-256) and <work>/build/spirv-cross/spirv-cross,
@@ -61,49 +87,60 @@ $(OUT)/spirv-cross/spirv-cross:
 	  -c "$(WORK)/src/SPIRV-Cross/$$f" -o "$(dir $@)obj/$$f.o" & done; wait
 	xcrun clang++ -arch arm64 $(addprefix $(dir $@)obj/,$(addsuffix .o,$(SPIRV_CROSS_SOURCES))) -o "$@"
 
-# BY3_LOG: where the boot's stderr goes (the host is loud on purpose; every abort names what is missing).
-BY3_LOG ?= $(WORK)/logs/boot.log
+# FC26_LOG: where stderr goes (the host is loud on purpose; every abort names what is missing: service, command, SVC,
+# symbol). probe prints its JSON verdict on stdout. boot runs headless by default; BOOT_ENV=TOTK_VERIFY_STARTUP=nnmain
+# stops with a JSON verdict at the original nnMain's entry (story 2's goal), =1 when nnMain sets its focus mode.
+FC26_LOG ?= $(WORK)/logs/boot.log
+PROBE_LOG ?= $(WORK)/logs/probe.log
+BOOT_ENV ?= TOTK_HEADLESS=1
+probe: runtime
+	@mkdir -p "$(dir $(PROBE_LOG))"
+	cd "$(WORK)" && ./build/$(BINARY) rewritten/$(VERSION) probe 2> "$(abspath $(PROBE_LOG))"; echo "exit $$?; log: $(PROBE_LOG)"
 boot: runtime
-	@mkdir -p "$(dir $(BY3_LOG))"
-	cd "$(WORK)" && TOTK_HEADLESS=$${TOTK_HEADLESS-} ./build/by3-native rewritten/v120 boot 2> "$(abspath $(BY3_LOG))"; echo "exit $$?; log: $(BY3_LOG)"
+	@mkdir -p "$(dir $(FC26_LOG))"
+	cd "$(WORK)" && env $(BOOT_ENV) ./build/$(BINARY) rewritten/$(VERSION) boot 2> "$(abspath $(FC26_LOG))"; echo "exit $$?; log: $(FC26_LOG)"
 
-# The player's mods, made into checked tables: exefs patches (mods/1.2.0/<name>/exefs/*.pchtxt) -> <work>/patches,
-# RomFS mods (mods/<name>/romfs/...) -> their manifest.tsv (sizes and SHA-256 of the replacements and the originals).
-.PHONY: patches mods app
+# This folder's synthetic tests (no game data): config, RomFS index, unknown service / command messages.
+test:
+	"$(PY)" -m unittest discover -s tests -v
+
+# exefs patches (mods/<display version>/<name>/exefs/*.pchtxt) -> <work>/patches, applied when FC26_PATCHES names them.
+# FC 26 has none yet: the mechanism is kept, the table is empty.
+.PHONY: patches app
 patches:
 	"$(PY)" scripts/prepare_patches.py --work "$(WORK)"
-mods:
-	for d in mods/*/romfs; do [ -d "$$d" ] && "$(PY)" scripts/make_mod_manifest.py "$$d" --romfs "$(WORK)/extracted/v120/romfs"; done; true
 
-# The app: a small launcher bundle (settings window with presets, then the game) that runs the game from the work
-# folder, which it names in Info.plist (BY3WorkFolder): nothing large is copied. Its icon comes from the game's own
-# control data (GAME=<base or update NSP> KEYS=<prod.keys>), or the app goes without one.
-APP ?= Bayonetta 3.app
+# The app: a small launcher bundle (settings window, then the game) that runs the game from the work folder, which it
+# names in Info.plist (FC26WorkFolder): nothing large is copied. Its icon comes from the game's own control data
+# (GAME=<NSP> KEYS=<prod.keys>), or the app goes without one. Not needed for story 2.
+APP ?= FC 26.app
 GAME ?=
 KEYS ?=
 $(OUT)/launcher: app/launcher.m Makefile
-	xcrun clang -std=gnu11 -O2 -Wall -Wextra -Werror -fobjc-arc app/launcher.m -framework Cocoa -o "$@"
+	@mkdir -p "$(dir $@)"
+	xcrun clang -std=gnu11 -O2 -Wall -Wextra -Werror -fobjc-arc -DFC26_BINARY='"$(BINARY)"' -DFC26_VERSION_DIR='"$(VERSION)"' \
+	  app/launcher.m -framework Cocoa -o "$@"
 $(OUT)/AppIcon.icns:
-	@if [ -n "$(GAME)" ] && [ -n "$(KEYS)" ]; then cd scripts && "$(PY)" extract_app_icon.py "$(GAME)" --keys "$(KEYS)" --title 01004a4010fea000 --output "$(abspath $@)"; \
+	@if [ -n "$(GAME)" ] && [ -n "$(KEYS)" ]; then cd scripts && "$(PY)" extract_app_icon.py "$(GAME)" --keys "$(KEYS)" --title $(TITLE_ID) --output "$(abspath $@)"; \
 	 else echo "no GAME= / KEYS=: the app gets no icon"; fi
 app: runtime shader-tools $(OUT)/launcher $(OUT)/AppIcon.icns
 	rm -rf "$(APP)" && mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources"
-	cp "$(OUT)/launcher" "$(APP)/Contents/MacOS/Bayonetta 3"
+	cp "$(OUT)/launcher" "$(APP)/Contents/MacOS/FC 26"
 	[ -f "$(OUT)/AppIcon.icns" ] && cp "$(OUT)/AppIcon.icns" "$(APP)/Contents/Resources/" || true
 	printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
 	  '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
 	  '<plist version="1.0"><dict>' \
-	  '<key>CFBundleExecutable</key><string>Bayonetta 3</string>' \
-	  '<key>CFBundleIdentifier</key><string>org.macnativegames.by3</string>' \
-	  '<key>CFBundleName</key><string>Bayonetta 3</string>' \
+	  '<key>CFBundleExecutable</key><string>FC 26</string>' \
+	  '<key>CFBundleIdentifier</key><string>org.macnativegames.fc26</string>' \
+	  '<key>CFBundleName</key><string>FC 26</string>' \
 	  '<key>CFBundlePackageType</key><string>APPL</string>' \
-	  '<key>CFBundleShortVersionString</key><string>1.2.0</string>' \
+	  '<key>CFBundleShortVersionString</key><string>$(DISPLAY_VERSION)</string>' \
 	  '<key>CFBundleVersion</key><string>1</string>' \
 	  '<key>CFBundleIconFile</key><string>AppIcon</string>' \
 	  '<key>LSMinimumSystemVersion</key><string>26.0</string>' \
-	  '<key>LSApplicationCategoryType</key><string>public.app-category.action-games</string>' \
+	  '<key>LSApplicationCategoryType</key><string>public.app-category.sports-games</string>' \
 	  '<key>NSHighResolutionCapable</key><true/>' \
-	  '<key>BY3WorkFolder</key><string>$(abspath $(WORK))</string>' \
+	  '<key>FC26WorkFolder</key><string>$(abspath $(WORK))</string>' \
 	  '</dict></plist>' > "$(APP)/Contents/Info.plist"
 	codesign --force --sign - "$(APP)"
 	@echo "built $(APP) (game data stay in $(abspath $(WORK)))"
@@ -117,4 +154,4 @@ install: app
 	@echo "installed $(INSTALL_DIR)/$(APP)"
 
 clean:
-	rm -rf "$(OUT)/obj" "$(OUT)/by3-native"
+	rm -rf "$(OUT)/obj" "$(OUT)/$(BINARY)"

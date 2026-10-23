@@ -1,11 +1,33 @@
-# Bayonetta 3: work folder, player mods (they hold game data) and game data by format, wherever it lands in this folder
-BY3_build/
+# FC 26: the work folder, player mods (they hold game data) and game data by format, wherever it lands in this folder.
+# Nothing of the game goes into git (docs/BRIEFING.md, "Nuvem"): no NSP/NCA/RomFS, no main/sdk/rtld/.nro, no rewrite
+# output, no keys, no saves.
+FC26_build/
 /mods/
 /extracted/
 /rewritten/
 /analysis/
 /build/
 /user-data/
+/logs/
+*.nsp
+*.nsz
+*.xci
+*.nca
+*.tik
+*.keys
 romfs.bin
-*.pkz
+runtime-index.bin
+*.patched.bin
+*.fixups.tsv
+*.gates.tsv
+*.nro
+*.nrr
+*.nrs
+*.nso
+*.npdm
+*.cas
+*.cat
+*.toc
+*.sb
 *.pchtxt
+FC 26.app/

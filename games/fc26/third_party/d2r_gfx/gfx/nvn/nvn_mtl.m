@@ -9004,7 +9004,7 @@ static void widen_indices_gpu(const p_draw_idx *di) {
    compute dispatch, ordered after everything replayed so far, writes each record's Metal indirect arguments (instance
    count 0 when index >= *count) into the arena; the draws read them with drawIndexedPrimitives / drawPrimitives
    indirectBuffer. Quads and 8-bit indices keep the CPU path. TOTK_GPU_INDIRECT=0 reads the arguments on the CPU (old). */
-static int ind_gpu_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("TOTK_GPU_INDIRECT"); v = !(e && !strcmp(e, "0")); MLOG("BY3: indirect draw arguments %s", v ? "resolved on the GPU timeline" : "read on the CPU at replay (TOTK_GPU_INDIRECT=0)"); } return v; }
+static int ind_gpu_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("TOTK_GPU_INDIRECT"); v = !(e && !strcmp(e, "0")); MLOG("indirect draw arguments %s", v ? "resolved on the GPU timeline" : "read on the CPU at replay (TOTK_GPU_INDIRECT=0)"); } return v; }
 typedef struct { uint64_t cnt, args; uint32_t index, words; } ind_in;   // GPU addresses (cnt 0 = no count); words 4 (arrays) / 5 (elements)
 #define IND_HB 32768
 static const void *g_ind_key[IND_HB]; static uint64_t g_ind_val[IND_HB]; static uint64_t g_ind_sub = ~0ull; static int g_ind_n;
@@ -9087,8 +9087,8 @@ static void ind_resolve(const uint8_t *op) {   // op: the indirect draw being re
     enc_c_end(ce); args_dirty_all();
     for (uint32_t i = 0; i < g_ind_m; i++) { uint64_t *s = ind_slot(g_ind_rec[i], 1); if (s) *s = ob.gpuAddress + oo + 20ull * i; }
     g_ind_batches++; g_ind_draws += g_ind_m;
-    static int once; if (!once++) MLOG("BY3: first GPU-resolved indirect batch: %u draws (pass %llu)", g_ind_m, g_stat_pass + 1);
-    if (g_ind_batches % 4096 == 0) MLOG("BY3: GPU-resolved indirect draws: %llu batches, %.1f draws per batch, %.1f batches per frame", (unsigned long long)g_ind_batches,
+    static int once; if (!once++) MLOG("indirect: first GPU-resolved indirect batch: %u draws (pass %llu)", g_ind_m, g_stat_pass + 1);
+    if (g_ind_batches % 4096 == 0) MLOG("indirect: GPU-resolved indirect draws: %llu batches, %.1f draws per batch, %.1f batches per frame", (unsigned long long)g_ind_batches,
                                         (double)g_ind_draws / (double)g_ind_batches, (double)g_ind_batches / (double)(atomic_load(&g_cur_frame) + 1));
 }
 static uint64_t g_ind_gpu; static const void *g_ind_cur; static uint64_t g_ind_ibuf;   // the draw being replayed: its resolved arguments and index buffer base
@@ -10238,7 +10238,7 @@ frz_plain:;
         }
         use_rec("buf", di->ibuf, (uint64_t)di->count * (di->itype == 1 ? 2 : 4), 0, NULL);
         if (g_ind_gpu && g_ind_cur == di) {   // BY3: arguments resolved on the GPU timeline (ind_resolve); indexStart counts from the record's index buffer
-            if (!mtl_gpu_addr(g_ind_ibuf, 1, &mb, &mo, &gpu)) { RED_ONCE(61, "BY3: indirect draw index buffer not in a memory pool"); return; }
+            if (!mtl_gpu_addr(g_ind_ibuf, 1, &mb, &mo, &gpu)) { RED_ONCE(61, "indirect draw index buffer not in a memory pool"); return; }
             enc_r_draw_indexed_indirect(en, mp, di->itype == 1 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32, gpu, ((__bridge id<MTLBuffer>)mb).length - mo, g_ind_gpu);
         } else if (di->count) enc_r_draw_indexed(en, mp, di->count, di->itype == 1 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32, gpu, ((__bridge id<MTLBuffer>)mb).length - mo,
                 di->instances ? di->instances : 1, di->base_vertex, di->base_instance);
@@ -10352,7 +10352,7 @@ static int draw_resolve(const op_hdr *h, void *rec, int indexed) {
     if (ind_gpu_on() && ind_tail(indexed ? OP_DRAW_IDX : OP_DRAW, rec, h->size)) {
         uint64_t *s = ind_slot(rec, 0);
         if (!s || !*s) { ind_resolve((const uint8_t *)rec - 8); s = ind_slot(rec, 0); }
-        if (s && *s) gpu = *s; else RED_ONCE(60, "BY3: an indirect draw could not be resolved on the GPU (arguments read on the CPU)");
+        if (s && *s) gpu = *s; else RED_ONCE(60, "an indirect draw could not be resolved on the GPU (arguments read on the CPU)");
     }
     if (!gpu && t.count_addr) { uint32_t cnt; if (g_nupd) upd_guard(t.count_addr, t.count_addr + 4); memcpy(&cnt, (const void *)(uintptr_t)t.count_addr, 4); if (t.index >= cnt) return 0; }
     if (g_nupd) upd_guard(t.args, t.args + 20);
@@ -11755,7 +11755,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
         cx = crop[0]; cy = crop[1]; cw = crop[2]; ch = crop[3];
     }
     if (crop) atomic_store(&g_pic_big, cw > 1920 || ch > 1080);   // a game frame (interpolated frames come without the crop)
-    if (crop) atomic_store(&g_pic_src, (uint64_t)ch << 32 | cw);   // the game frame's size, for the HUD (BY3_HUD_RENDER)
+    if (crop) atomic_store(&g_pic_src, (uint64_t)ch << 32 | cw);   // the game frame's size, for the HUD (DM_HUD_RENDER)
     present_pipeline(dst.pixelFormat);
     double dw = dst.width, dh = dst.height, s = fmin(dw / cw, dh / ch);
     MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};

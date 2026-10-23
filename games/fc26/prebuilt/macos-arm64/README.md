@@ -1,5 +1,5 @@
-Bayonetta 3's own copy of `games/totk/prebuilt/macos-arm64` (the shader translator), taken when PR #62 was merged; it is not
-updated with the Tears of the Kingdom one. Its notes, as they were:
+FC 26's own copy of the kit's shader translator: `games/totk/prebuilt/macos-arm64` as the kit's earlier fork took it when
+PR #62 was merged (same file, same SHA-256); it is not updated with the Tears of the Kingdom one. Its notes, as they were:
 
 # The shader translator, ready-made
 
