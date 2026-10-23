@@ -107,6 +107,11 @@ troca de tradutor:
 É dado do jogo: fica na pasta de trabalho e nunca no git (`.gitignore` cobre `shader-cache/` e `fc26-journal/` se alguém
 apontar para dentro do repositório).
 
+Custo: na 1ª vez de cada shader, uma escrita a mais (`.shader`, sem `fsync`) e uma linha anexada (`.rows`), na thread de
+envio, ao lado da tradução que já está acontecendo ali. O TOTK mediu escritas atômicas do kit nessa thread custando
+10–30 ms e as tirou de lá; aqui é para medir: se a 1ª rodada mostrar isso no relatório, a escrita do diário vai para uma
+fila em segundo plano.
+
 ### 2.3 Versão: o cache velho é descartado
 
 Na 1ª vez que o kit abre a pasta (`totk_rt_dir`), a camada:
