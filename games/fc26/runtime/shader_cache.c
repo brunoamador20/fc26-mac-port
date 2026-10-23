@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -142,9 +143,10 @@ static uint8_t *read_all(const char *path, size_t max, size_t *len) {
     return p;
 }
 /* Written under a temporary name and renamed: a reader sees the old file or the whole new one. */
+static _Atomic uint64_t g_tmp_seq;
 static int write_atomic(const char *path, const void *a, size_t na, const void *b, size_t nb, const void *c, size_t nc) {
     char tmp[PATH_MAX];
-    int n = snprintf(tmp, sizeof tmp, "%s.tmp.%ld", path, (long)getpid());
+    int n = snprintf(tmp, sizeof tmp, "%s.tmp.%ld.%llu", path, (long)getpid(), (unsigned long long)atomic_fetch_add(&g_tmp_seq, 1));
     if (n <= 0 || n >= (int)sizeof tmp) return -1;
     FILE *f = fopen(tmp, "wb");
     if (!f) return -1;
@@ -305,7 +307,8 @@ static int each_row(char *text, fc26_sc_row_fn fn, void *ctx) {
     int rows = 0;
     for (char *line = text, *next; line && *line; line = next) {
         next = strchr(line, '\n');
-        if (next) *next++ = 0;
+        if (!next) break;
+        *next++ = 0;
         if (strncmp(line, "V\t", 2)) continue;
         char *variant = line + 2, *t1 = strchr(variant, '\t'); if (!t1) continue;
         *t1 = 0; char *depth = t1 + 1, *t2 = strchr(depth, '\t'); if (!t2) continue;
@@ -325,24 +328,28 @@ static int row_is(void *ctx, const char *variant, int depth, const char *json) {
     return 0;
 }
 int fc26_sc_journal_add_row(const char *journal, const char *key, const char *variant, int depth_minus_w, const char *json) {
-    char path[PATH_MAX], vkey[65]; size_t len;
+    char path[PATH_MAX], vkey[65]; size_t len = 0;
     if (!fc26_sc_is_key(key) || fc26_sc_variant_key(variant, vkey) || strcmp(vkey, key) || !json || !*json || strpbrk(json, "\t\r\n")) return -1;
     if (ensure_dir(journal) || rows_path(path, journal, key)) return -1;
     char *text = (char *)read_all(path, 64u << 20, &len);
     if (text) {
+        while (len > 0 && text[len - 1] != '\n') len--;
+        text[len] = 0;
+        char *copy = strdup(text);
+        if (!copy) { free(text); return -1; }
         struct has_row h = {variant, 0};
-        each_row(text, row_is, &h); free(text);
-        if (h.found) return 0;
+        each_row(copy, row_is, &h); free(copy);
+        if (h.found) { free(text); return 0; }
     } else if (errno != ENOENT) return -1;
     size_t n = strlen(variant) + strlen(json) + 8;
     char *line = malloc(n);
-    if (!line) return -1;
+    if (!line) { free(text); return -1; }
     int w = snprintf(line, n, "V\t%s\t%d\t%s\n", variant, depth_minus_w ? 1 : 0, json);
-    int fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644);
-    int ok = fd >= 0 && w > 0 && write(fd, line, (size_t)w) == (ssize_t)w;
-    if (fd >= 0) close(fd);
-    free(line);
-    return ok ? 1 : -1;
+    if (w <= 0 || (size_t)w >= n) { free(line); free(text); return -1; }
+    int r = text ? write_atomic(path, text, len, line, (size_t)w, NULL, 0)
+                 : write_atomic(path, line, (size_t)w, NULL, 0, NULL, 0);
+    free(line); free(text);
+    return r ? -1 : 1;
 }
 int fc26_sc_journal_rows(const char *journal, const char *key, fc26_sc_row_fn fn, void *ctx) {
     char path[PATH_MAX]; size_t len;

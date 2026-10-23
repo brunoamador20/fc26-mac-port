@@ -1,6 +1,8 @@
 /* Command-line harness over runtime/shader_cache.c for tests/test_shader_cache.py: one subcommand per function, results
    on stdout. Runs on Linux and on the Mac; no game data (the tests make synthetic shaders and folders). */
 #include "shader_cache.h"
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +21,20 @@ static const char *opt(const char *s) { return strcmp(s, "-") ? s : NULL; }
 static int print_row(void *ctx, const char *variant, int depth, const char *json) {
     (void)ctx; printf("%s %d %s\n", variant, depth, json);
     return 0;
+}
+struct id_writer_arg { const char *path; int iters; _Atomic int *failures; };
+static void *id_writer_fn(void *p) {
+    struct id_writer_arg *a = p;
+    fc26_sc_identity id = {.schema = 1, .depth_minus_w = 0};
+    snprintf(id.chain, sizeof id.chain, "chain");
+    snprintf(id.translator, sizeof id.translator, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    snprintf(id.spirv_cross, sizeof id.spirv_cross, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    snprintf(id.request, sizeof id.request, "kit-1");
+    snprintf(id.debug_mode, sizeof id.debug_mode, "default");
+    for (int i = 0; i < a->iters; i++) {
+        if (fc26_sc_identity_write(a->path, &id)) atomic_fetch_add(a->failures, 1);
+    }
+    return NULL;
 }
 
 int main(int argc, char **argv) {
@@ -54,6 +70,17 @@ int main(int argc, char **argv) {
         snprintf(id.spirv_cross, sizeof id.spirv_cross, "%s", argv[6]); snprintf(id.request, sizeof id.request, "%s", argv[7]);
         snprintf(id.debug_mode, sizeof id.debug_mode, "%s", argv[8]);
         printf("%d\n", fc26_sc_identity_write(argv[2], &id));
+        return 0;
+    }
+    if (!strcmp(c, "concurrent-id-write") && argc == 5) {   /* concurrent-id-write <path> <threads> <iters> */
+        int threads = atoi(argv[3]), iters = atoi(argv[4]);
+        _Atomic int failures = 0;
+        pthread_t *th = malloc((size_t)threads * sizeof *th);
+        struct id_writer_arg arg = {argv[2], iters, &failures};
+        for (int i = 0; i < threads; i++) pthread_create(&th[i], NULL, id_writer_fn, &arg);
+        for (int i = 0; i < threads; i++) pthread_join(th[i], NULL);
+        free(th);
+        printf("failures %d\n", atomic_load(&failures));
         return 0;
     }
     if (!strcmp(c, "id-read") && argc == 3) {

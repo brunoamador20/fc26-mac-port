@@ -42,7 +42,7 @@ class ShaderCache(unittest.TestCase):
             raise unittest.SkipTest('A C compiler is required')
         cls.build = tempfile.TemporaryDirectory()
         cls.exe = Path(cls.build.name) / 'shader_cache_check'
-        flags = ['-std=c11', '-Wall', '-Wextra', '-Werror'] + ([] if platform.system() == 'Darwin' else ['-D_GNU_SOURCE'])
+        flags = ['-std=c11', '-Wall', '-Wextra', '-Werror', '-pthread'] + ([] if platform.system() == 'Darwin' else ['-D_GNU_SOURCE'])
         run = subprocess.run([compiler, *flags, f'-I{HERE / "runtime"}', str(HERE / 'tests/shader_cache_check.c'),
                               str(HERE / 'runtime/shader_cache.c'), '-o', str(cls.exe)], capture_output=True, text=True)
         if run.returncode:
@@ -156,6 +156,13 @@ class ShaderCache(unittest.TestCase):
         self.assertEqual(self.run_check('id-write', self.dir / 'id', *values).strip(), '-1')
         self.assertFalse((self.dir / 'id').exists())
 
+    def test_concurrent_atomic_writes_do_not_collide_tmp_names(self):
+        path = self.dir / 'concurrent.id'
+        self.assertEqual(self.run_check('concurrent-id-write', path, 8, 50).strip(), 'failures 0')
+        self.assertTrue(path.exists())
+        self.assertEqual(self.run_check('id-read', path).split(),
+                         ['1', 'chain', '0123456789abcdef' * 4, '0123456789abcdef' * 4, 'kit-1', 'default', '0'])
+
     # ---------- discarding a cache of another identity ----------
     def cache_files(self, folder, key, variants=('0123456789ab',)):
         names = [f'{key}.variants'] + [f'{key}-{v}{s}' for v in variants for s in ('.code', '_b.metal', '_b.json', '.spv', '.res.json')]
@@ -173,6 +180,20 @@ class ShaderCache(unittest.TestCase):
         self.assertEqual(self.run_check('discard', self.dir / 'rt').strip(), str(6 + 11 + 1))
         self.assertEqual(sorted(p.name for p in (self.dir / 'rt').iterdir()), ['fc26-cache.id', 'notes.txt', 'pso_collected.tsv', 'sub'])
         self.assertEqual(self.run_check('discard', self.dir / 'missing').strip(), '-1')
+
+    def test_hard_linked_variant_handled_by_scan_and_discard(self):
+        key = 'c' * 64
+        v1 = f'{key}-0123456789ab'
+        v2 = f'{key}-ba9876543210'
+        metal1 = self.write(f'rt/{v1}_b.metal', b'metal-code')
+        metal2 = self.dir / f'rt/{v2}_b.metal'
+        os.link(metal1, metal2)
+        self.write(f'rt/{key}.variants', b'[]')
+        out = self.run_check('scan', self.dir / 'rt', self.dir / 'none').splitlines()
+        self.assertTrue(any(line.startswith(key) for line in out))
+        self.assertEqual(self.run_check('discard', self.dir / 'rt').strip(), '3')
+        self.assertFalse(metal1.exists())
+        self.assertFalse(metal2.exists())
 
     def test_old_chains_go_only_when_stamped_and_free(self):
         for name in ['rt-current', 'rt-old', 'rt-foreign', 'rt-busy']:
@@ -244,6 +265,22 @@ class ShaderCache(unittest.TestCase):
         self.assertEqual(self.run_check('rows', journal, key),
                          f'{v1} 1 {{"tex":{{"0":"2d"}}}}\n{v2} 0 {{"tex":{{}}}}\nrows 2\n')
         self.assertEqual(self.run_check('rows', journal, 'c' * 64), 'rows 0\n')
+
+    def test_journal_recovers_from_truncated_row(self):
+        journal = self.dir / 'journal'
+        key = 'a' * 64
+        v1, v2, v3 = f'{key}-0123456789ab', f'{key}-ba9876543210', f'{key}-cdef01234567'
+        self.assertEqual(self.run_check('add-row', journal, key, v1, 1, '{"tex":{"0":"2d"}}').strip(), '1')
+        with open(journal / f'{key}.rows', 'a') as f:
+            f.write('V\t' + v2 + '\t0\t{"incomplete":')
+        self.assertEqual(self.run_check('add-row', journal, key, v3, 0, '{"tex":{"1":"cube"}}').strip(), '1')
+        self.assertEqual(self.run_check('rows', journal, key),
+                         f'{v1} 1 {{"tex":{{"0":"2d"}}}}\n{v3} 0 {{"tex":{{"1":"cube"}}}}\nrows 2\n')
+        key2 = 'b' * 64
+        v4 = f'{key2}-0123456789ab'
+        self.write(f'journal/{key2}.rows', f'V\t{v4}\t0\t{{"cut":'.encode())
+        self.assertEqual(self.run_check('add-row', journal, key2, v4, 0, '{"tex":{}}').strip(), '1')
+        self.assertEqual(self.run_check('rows', journal, key2), f'{v4} 0 {{"tex":{{}}}}\nrows 1\n')
 
     def test_journal_keys_sorted(self):
         journal = self.dir / 'journal'

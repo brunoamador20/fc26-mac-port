@@ -54,57 +54,60 @@ static int copy_field(char *dst, size_t cap, const char *src) {
 }
 
 void fc26_shader_cache_open(NSString *dir, const char *chain) {
-    static int once;
-    if (once++ || !dir.length) return;
-    if (layer_off()) { SCLOG("off (FC26_SHADER_CACHE=0): the kit's cache only"); return; }
-    NSString *journal = getenv("FC26_SHADER_JOURNAL") && *getenv("FC26_SHADER_JOURNAL") ? @(getenv("FC26_SHADER_JOURNAL"))
-                      : [dir.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"fc26-journal"];
-    if (copy_field(g_cache, sizeof g_cache, dir.fileSystemRepresentation) || copy_field(g_journal, sizeof g_journal, journal.fileSystemRepresentation) ||
-        snprintf(g_id_path, sizeof g_id_path, "%s/" FC26_SC_ID_FILE, g_cache) >= (int)sizeof g_id_path) { SCLOG("path too long: %s", dir.UTF8String); return; }
-    [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-    g_on = 1;
+    if (!dir.length) return;
+    /* TODO(mac): dispatch_once ensures thread-safe initialization on macOS (Achado 3). */
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        if (layer_off()) { SCLOG("off (FC26_SHADER_CACHE=0): the kit's cache only"); return; }
+        NSString *journal = getenv("FC26_SHADER_JOURNAL") && *getenv("FC26_SHADER_JOURNAL") ? @(getenv("FC26_SHADER_JOURNAL"))
+                          : [dir.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"fc26-journal"];
+        if (copy_field(g_cache, sizeof g_cache, dir.fileSystemRepresentation) || copy_field(g_journal, sizeof g_journal, journal.fileSystemRepresentation) ||
+            snprintf(g_id_path, sizeof g_id_path, "%s/" FC26_SC_ID_FILE, g_cache) >= (int)sizeof g_id_path) { SCLOG("path too long: %s", dir.UTF8String); return; }
+        [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        g_on = 1;
 
-    /* What the translations here depend on. A missing tool is not a reason to empty the cache: report it and keep it. */
-    NSString *root = root_dir();
-    if (!root) { SCLOG("cannot find the executable's folder: cache left as it is"); return; }
-    NSString *xlate = translator_path(root), *sc = [root stringByAppendingString:@"/build/spirv-cross/spirv-cross"];
-    uint64_t t0 = now_ns();
-    g_id.schema = FC26_SC_SCHEMA;
-    const char *dm = getenv("TOTK_SHADER_DEBUGMODE");
-    if (copy_field(g_id.chain, sizeof g_id.chain, chain) || copy_field(g_id.request, sizeof g_id.request, FC26_SC_REQUEST_REV) ||
-        copy_field(g_id.debug_mode, sizeof g_id.debug_mode, !dm ? "default" : *dm ? dm : "empty")) { SCLOG("identity field too long: cache left as it is"); return; }
-    g_id.depth_minus_w = totk_depth_near_minus_w();
-    if (fc26_sha256_file(xlate.fileSystemRepresentation, g_id.translator) || fc26_sha256_file(sc.fileSystemRepresentation, g_id.spirv_cross)) {
-        SCLOG("translator %s or SPIRV-Cross %s missing (make shader-tools): cache left as it is, nothing translated before play",
-              xlate.UTF8String, sc.UTF8String);
-        return;
-    }
-    int fd = fc26_sc_lock(g_cache);
-    if (fd < 0) { SCLOG("another run holds %s: no discard, trim or prefill this time", g_cache); return; }
-    g_maintainer = 1;   /* fd stays open: the lock lasts until the process ends (O_CLOEXEC: not the translator's) */
+        /* What the translations here depend on. A missing tool is not a reason to empty the cache: report it and keep it. */
+        NSString *root = root_dir();
+        if (!root) { SCLOG("cannot find the executable's folder: cache left as it is"); return; }
+        NSString *xlate = translator_path(root), *sc = [root stringByAppendingString:@"/build/spirv-cross/spirv-cross"];
+        uint64_t t0 = now_ns();
+        g_id.schema = FC26_SC_SCHEMA;
+        const char *dm = getenv("TOTK_SHADER_DEBUGMODE");
+        if (copy_field(g_id.chain, sizeof g_id.chain, chain) || copy_field(g_id.request, sizeof g_id.request, FC26_SC_REQUEST_REV) ||
+            copy_field(g_id.debug_mode, sizeof g_id.debug_mode, !dm ? "default" : *dm ? dm : "empty")) { SCLOG("identity field too long: cache left as it is"); return; }
+        g_id.depth_minus_w = totk_depth_near_minus_w();
+        if (fc26_sha256_file(xlate.fileSystemRepresentation, g_id.translator) || fc26_sha256_file(sc.fileSystemRepresentation, g_id.spirv_cross)) {
+            SCLOG("translator %s or SPIRV-Cross %s missing (make shader-tools): cache left as it is, nothing translated before play",
+                  xlate.UTF8String, sc.UTF8String);
+            return;
+        }
+        int fd = fc26_sc_lock(g_cache);
+        if (fd < 0) { SCLOG("another run holds %s: no discard, trim or prefill this time", g_cache); return; }
+        g_maintainer = 1;   /* fd stays open: the lock lasts until the process ends (O_CLOEXEC: not the translator's) */
 
-    fc26_sc_identity old; int r = fc26_sc_identity_read(g_id_path, &old);
-    const char *why = r == -1 ? NULL : r ? "unreadable identity" : fc26_sc_identity_diff(&old, &g_id);
-    if (r == -1) {   /* no identity: a new folder, or translations from before this layer (their translator is unknown) */
-        fc26_sc_group *g; size_t n; uint64_t total, fixed;
-        if (!fc26_sc_scan(g_cache, NULL, &g, &n, &total, &fixed)) { if (n) why = "no identity"; free(g); }
-    }
-    if (why) {
-        long gone = fc26_sc_discard(g_cache);
-        SCLOG("cache identity differs (%s): %ld translation files removed; the journal re-translates them before play", why, gone);
-    }
-    if (fc26_sc_identity_write(g_id_path, &g_id)) SCLOG("cannot write %s", g_id_path);
-    int old_chains = fc26_sc_remove_old_chains(dir.stringByDeletingLastPathComponent.fileSystemRepresentation, dir.lastPathComponent.UTF8String);
-    if (old_chains) SCLOG("removed %d folder(s) of older translation chains", old_chains);
+        fc26_sc_identity old; int r = fc26_sc_identity_read(g_id_path, &old);
+        const char *why = r == -1 ? NULL : r ? "unreadable identity" : fc26_sc_identity_diff(&old, &g_id);
+        if (r == -1) {   /* no identity: a new folder, or translations from before this layer (their translator is unknown) */
+            fc26_sc_group *g; size_t n; uint64_t total, fixed;
+            if (!fc26_sc_scan(g_cache, NULL, &g, &n, &total, &fixed)) { if (n) why = "no identity"; free(g); }
+        }
+        if (why) {
+            long gone = fc26_sc_discard(g_cache);
+            SCLOG("cache identity differs (%s): %ld translation files removed; the journal re-translates them before play", why, gone);
+        }
+        if (fc26_sc_identity_write(g_id_path, &g_id)) SCLOG("cannot write %s", g_id_path);
+        int old_chains = fc26_sc_remove_old_chains(dir.stringByDeletingLastPathComponent.fileSystemRepresentation, dir.lastPathComponent.UTF8String);
+        if (old_chains) SCLOG("removed %d folder(s) of older translation chains", old_chains);
 
-    int bad; uint64_t limit = fc26_sc_limit_bytes(getenv("FC26_SHADER_CACHE_MAX_MIB"), &bad);
-    if (bad) SCLOG("FC26_SHADER_CACHE_MAX_MIB=%s not understood (MiB, 0 = no limit): %u MiB", getenv("FC26_SHADER_CACHE_MAX_MIB"), FC26_SC_DEFAULT_LIMIT_MIB);
-    fc26_sc_trim_report tr;
-    if (fc26_sc_trim(g_cache, g_journal, limit, &tr)) { SCLOG("cannot read %s to apply the size limit", g_cache); return; }
-    SCLOG("cache %s: %zu shaders, %.1f MiB with the journal (limit %s); %zu least recently used removed%s; identity %.12s/%.12s %s depth_minus_w=%d (%.0f ms)",
-          g_cache, tr.shaders - tr.evicted, tr.after / 1048576.0, limit ? [NSString stringWithFormat:@"%llu MiB", (unsigned long long)(limit >> 20)].UTF8String : "none",
-          tr.evicted, tr.evicted ? [NSString stringWithFormat:@" (%.1f MiB before)", tr.before / 1048576.0].UTF8String : "",
-          g_id.translator, g_id.spirv_cross, g_id.chain, g_id.depth_minus_w, (now_ns() - t0) / 1e6);
+        int bad; uint64_t limit = fc26_sc_limit_bytes(getenv("FC26_SHADER_CACHE_MAX_MIB"), &bad);
+        if (bad) SCLOG("FC26_SHADER_CACHE_MAX_MIB=%s not understood (MiB, 0 = no limit): %u MiB", getenv("FC26_SHADER_CACHE_MAX_MIB"), FC26_SC_DEFAULT_LIMIT_MIB);
+        fc26_sc_trim_report tr;
+        if (fc26_sc_trim(g_cache, g_journal, limit, &tr)) { SCLOG("cannot read %s to apply the size limit", g_cache); return; }
+        SCLOG("cache %s: %zu shaders, %.1f MiB with the journal (limit %s); %zu least recently used removed%s; identity %.12s/%.12s %s depth_minus_w=%d (%.0f ms)",
+              g_cache, tr.shaders - tr.evicted, tr.after / 1048576.0, limit ? [NSString stringWithFormat:@"%llu MiB", (unsigned long long)(limit >> 20)].UTF8String : "none",
+              tr.evicted, tr.evicted ? [NSString stringWithFormat:@" (%.1f MiB before)", tr.before / 1048576.0].UTF8String : "",
+              g_id.translator, g_id.spirv_cross, g_id.chain, g_id.depth_minus_w, (now_ns() - t0) / 1e6);
+    });
 }
 
 void fc26_shader_cache_used(NSString *shader) {
@@ -122,7 +125,10 @@ void fc26_shader_cache_saved(NSString *shader, int stage, const uint8_t *control
     if (!g_on || !shader || !control || !code) return;
     static int said_key, said_put, said_row, said_depth;
     const char *key = shader.UTF8String;
+    /* TODO(mac): g_lock protects fc26_sc_journal_put_shader against concurrent worker threads (Achado 1). */
+    pthread_mutex_lock(&g_lock);
     int put = fc26_sc_journal_put_shader(g_journal, key, stage, control, code);
+    pthread_mutex_unlock(&g_lock);
     if (put == -2 && !said_key++) SCLOG("shader %s: the key rule here (shader_cache.c) differs from nvn_mtl.m ctl_key_len: not journaled", key);
     else if (put == -1 && !said_put++) SCLOG("cannot journal shader %s (stage %d) in %s", key, stage, g_journal);
     if (put < 0) return;
@@ -201,7 +207,20 @@ void fc26_shader_prefill(NSString *dir) {
         NSString *got = totk_rt_variant(key, s.stage, s.control, s.code, answers, local);
         unlink(mark.fileSystemRepresentation);
         if ([got isEqualToString:variant]) translated++;
-        else if (got) { if (other++ < 8) SCLOG("prefill: %s served by %s (an existing variant matches its bind state)", variant.UTF8String, got.UTF8String); }
+        else if (got) {
+            if (other++ < 8) SCLOG("prefill: %s served by %s (an existing variant matches its bind state)", variant.UTF8String, got.UTF8String);
+            /* TODO(mac): link or copy the serving variant files so subsequent runs do not re-enqueue variant (Achado 4). */
+            NSString *gotMetal = [NSString stringWithFormat:@"%s/%@_b.metal", g_cache, got];
+            NSString *varMetal = [NSString stringWithFormat:@"%s/%@_b.metal", g_cache, variant];
+            NSString *gotJson = [NSString stringWithFormat:@"%s/%@_b.json", g_cache, got];
+            NSString *varJson = [NSString stringWithFormat:@"%s/%@_b.json", g_cache, variant];
+            if (![fm fileExistsAtPath:varMetal] && [fm fileExistsAtPath:gotMetal]) {
+                if (![fm linkItemAtPath:gotMetal toPath:varMetal error:nil]) [fm copyItemAtPath:gotMetal toPath:varMetal error:nil];
+            }
+            if (![fm fileExistsAtPath:varJson] && [fm fileExistsAtPath:gotJson]) {
+                if (![fm linkItemAtPath:gotJson toPath:varJson error:nil]) [fm copyItemAtPath:gotJson toPath:varJson error:nil];
+            }
+        }
         if (++done % 16 == 0 || done == todo.count) runtime_boot_count(stage_label, done, todo.count);
     }
     fc26_sc_shader_free(&s); free(keys);
