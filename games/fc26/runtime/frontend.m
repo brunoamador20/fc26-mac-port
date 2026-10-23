@@ -349,10 +349,47 @@ int runtime_front_text_input(const RuntimeTextRequest *req,char *out,size_t out_
  return 1;
 }
 static int viReady;
+static int layerCreated;
+static struct { int x, y, w, h; } s_layer_crop;
+static int s_layer_crop_logged;
 static unsigned displayIdentity,layerIdentity;
-static void vi_initialize(void){if(!metalLayer)runtime_fail("VI requires native macOS window");viReady=1;fprintf(stderr,"[totk] native VI display initialized\n");}
+
+typedef struct {
+ char name[0x40];
+ uint8_t has_layer_limit;
+ uint8_t reserved[7];
+ int64_t max_layers;
+ int64_t max_width;
+ int64_t max_height;
+} vi_display_info_t;
+
+static void vi_initialize(void){if(!metalLayer&&!getenv("TOTK_TEST_VI"))runtime_fail("VI requires native macOS window");viReady=1;fprintf(stderr,"[totk] native VI display initialized\n");}
 static uint32_t vi_open(void **out){if(!viReady||!out)return 0xf601;*out=&displayIdentity;return 0;}
-static uint32_t vi_layer(void **out,void *display){if(!out||display!=&displayIdentity)return 0xf601;*out=&layerIdentity;return 0;}
+static int vi_list_displays(vi_display_info_t *out,int count){
+ if(!out||count<=0)return 0;
+ memset(out,0,sizeof(*out));
+ strncpy(out->name,"Default",sizeof(out->name)-1);
+ out->has_layer_limit=1;
+ out->max_layers=1;
+ out->max_width=1920;
+ out->max_height=1080;
+ return 1;
+}
+static uint32_t vi_create_layer(void **out,void *display,const void *settings){
+ (void)settings;
+ if(!out||display!=&displayIdentity)return 0xf601;
+ if(layerCreated){runtime_missing("vi: second layer requested (single layer supported)");runtime_fail("second vi layer not supported");}
+ layerCreated=1;*out=&layerIdentity;return 0;
+}
+static uint32_t vi_layer(void **out,void *display){return vi_create_layer(out,display,NULL);}
+static void vi_destroy_layer(void *layer){if(layer==&layerIdentity)layerCreated=0;}
+static void vi_set_layer_crop(void *layer,int x,int y,int w,int h){
+ if(layer!=&layerIdentity)return;
+ s_layer_crop.x=x;s_layer_crop.y=y;s_layer_crop.w=w;s_layer_crop.h=h;
+ if(!s_layer_crop_logged){fprintf(stderr,"[totk] vi SetLayerCrop: %d,%d %dx%d (ignored)\n",x,y,w,h);s_layer_crop_logged=1;}
+}
+static void vi_close_display(void *display){(void)display;}
+static void vi_finalize(void){layerCreated=0;viReady=0;}
 static uint32_t vi_window(void **out,void *layer){if(!out||layer!=&layerIdentity)return 0xf601;*out=front_metal_layer();return 0;}
 static uint32_t vi_vsync(void *ev,void *display){
  if(!ev||display!=&displayIdentity)return 0xf601;hle_bind_system_event(ev,1);
@@ -361,7 +398,14 @@ static uint32_t vi_vsync(void *ev,void *display){
 void *runtime_front_override(const char *name){
  static const struct{const char *name;void *fn;} entries[]={
  {"_ZN2nn2vi10InitializeEv",vi_initialize},{"_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE",vi_open},
- {"_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE",vi_layer},{"_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE",vi_window},
+ {"_ZN2nn2vi12ListDisplaysEPNS0_11DisplayInfoEi",vi_list_displays},
+ {"_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayEPKNS0_21LayerCreationSettingsE",vi_create_layer},
+ {"_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE",vi_layer},
+ {"_ZN2nn2vi12DestroyLayerEPNS0_5LayerE",vi_destroy_layer},
+ {"_ZN2nn2vi12SetLayerCropEPNS0_5LayerEiiii",vi_set_layer_crop},
+ {"_ZN2nn2vi12CloseDisplayEPNS0_7DisplayE",vi_close_display},
+ {"_ZN2nn2vi8FinalizeEv",vi_finalize},
+ {"_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE",vi_window},
  {"_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7DisplayE",vi_vsync}};
  for(unsigned i=0;i<sizeof(entries)/sizeof(*entries);i++)if(!strcmp(name,entries[i].name))return entries[i].fn;return NULL;
 }
