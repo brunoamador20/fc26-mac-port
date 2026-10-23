@@ -42,7 +42,8 @@ class UnknownIpc(unittest.TestCase):
         self.assertIn('GetLanguageCode result 0 code en-US', run.stdout)
 
     def test_unknown_service_is_named(self):
-        for name in ['ldr:ro', 'ro:1', 'ldn:u', 'pctl:a', 'hwopus']:
+        # Names the full runtime does not answer either (ldn, pctl, hwopus, ... are answered since story 4: offline_services.c).
+        for name in ['ldr:ro', 'ro:1', 'nim:shp', 'es', 'friend:u']:
             for mode in ['service', 'tipc-service']:
                 with self.subTest(name=name, mode=mode):
                     run = self.run_case(mode, name)

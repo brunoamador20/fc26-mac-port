@@ -15,7 +15,8 @@ HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE / 'scripts'))
 import game_config  # noqa: E402
 PORTABLE = ['applet_host.c', 'audio_effects.c', 'audio_reverb.c', 'autoload.c', 'gfx_probe.c', 'hid_feedback.c', 'hle_stack.c',
-            'input.c', 'ipc.c', 'missing.c', 'motion_fusion.c', 'system_services.c', 'world_survey.c']
+            'input.c', 'ipc.c', 'missing.c', 'motion_fusion.c', 'offline_applets.c', 'offline_services.c',
+            'system_services.c', 'world_survey.c']
 STAND_INS = {
     'runtime_tables.h': '''static const Reloc reloc_0[] = {{0ULL,1027,0,0LL},};
 static const Symbol symbol_0[] = {{"",0ULL,0ULL,0,0,0},};
