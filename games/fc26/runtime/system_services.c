@@ -206,6 +206,9 @@ static uint32_t nifm_unavailable(void) { return NIFM_UNAVAILABLE; }
 static uint32_t ssl_unavailable(void) { return SSL_UNAVAILABLE; }
 static uint32_t nsa_unavailable(void) { return NSA_UNAVAILABLE; }
 static void nifm_request(void) { static int once; if (!once++) fprintf(stderr, "[totk-net] network request: offline\n"); }
+static uint32_t nifm_submit(void) { nifm_request(); return 0; }
+static uint8_t nifm_request_on_hold(void) { return 0; }
+static uint32_t nifm_primary_ip(void *out) { if (out) memset(out, 0, 4); return NIFM_UNAVAILABLE; }
 static int64_t network_clock_now(void) { return (int64_t)time(NULL); }   /* time_point: seconds since the epoch */
 static void environment_identifier(char *out) { if (!out) runtime_fail("nsd environment output"); memset(out, 0, 8); memcpy(out, "lp1", 3); }
 static void execute_program(int index, const void *param, uint64_t size) {
@@ -227,10 +230,13 @@ void *runtime_game_override(const char *name) {
         {"_ZN2nn2oe15EnableRecordingEv", nop}, {"_ZN2nn2oe16DisableRecordingEv", nop},
         {"_ZN2nn2oe14ExecuteProgramEiPKvm", execute_program},
         {"_ZN2nn4nifm10InitializeEv", ok}, {"_ZN2nn4nifm18IsNetworkAvailableEv", network_available},
+        {"_ZN2nn4nifm20SubmitNetworkRequestEv", nifm_submit},
+        {"_ZN2nn4nifm22IsNetworkRequestOnHoldEv", nifm_request_on_hold},
         {"_ZN2nn4nifm27SubmitNetworkRequestAndWaitEv", nifm_request}, {"_ZN2nn4nifm20CancelNetworkRequestEv", nop},
         {"_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", nifm_unavailable},
         {"_ZN2nn4nifm22GetCurrentProxySettingEPNS0_12ProxySettingE", nifm_unavailable},
         {"_ZN2nn4nifm26GetCurrentPrimaryIpAddressEPNS_6socket6InAddrE", nifm_unavailable},
+        {"_ZN2nn4nifm26GetCurrentPrimaryIpAddressEP7in_addr", nifm_primary_ip},
         {"_ZN2nn3ssl10InitializeEv", ok}, {"_ZN2nn3ssl8FinalizeEv", ok},
         {"_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS0_26BuiltInCertificateInfoBaseEPhjPNS0_15CaCertificateIdEj", ssl_unavailable},
         {"_ZN2nn3ssl14BuiltInManager28GetBuiltInCertificateBufSizeEPjPNS0_15CaCertificateIdEj", ssl_unavailable},

@@ -88,6 +88,8 @@ int main(int argc, char **argv) {
     void (*set_crop)(void *, int, int, int, int) = (void (*)(void *, int, int, int, int))runtime_front_override("_ZN2nn2vi12SetLayerCropEPNS0_5LayerEiiii");
     void (*close_disp)(void *) = (void (*)(void *))runtime_front_override("_ZN2nn2vi12CloseDisplayEPNS0_7DisplayE");
     void (*finalize)(void) = (void (*)(void))runtime_front_override("_ZN2nn2vi8FinalizeEv");
+    void *latest_frame = runtime_front_override("_ZN2nn2vi20GetLatestFrameNumberEPmPKNS0_5LayerE");
+    void *list_hist = runtime_front_override("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE");
 
     if (!vi_init) { fprintf(stderr, "FAIL: Initialize not found\n"); return 1; }
     if (!open_disp) { fprintf(stderr, "FAIL: OpenDefaultDisplay not found\n"); return 1; }
@@ -96,6 +98,8 @@ int main(int argc, char **argv) {
     if (!set_crop) { fprintf(stderr, "FAIL: SetLayerCrop not found\n"); return 1; }
     if (!close_disp) { fprintf(stderr, "FAIL: CloseDisplay not found\n"); return 1; }
     if (!finalize) { fprintf(stderr, "FAIL: Finalize not found\n"); return 1; }
+    if (!latest_frame) { fprintf(stderr, "FAIL: GetLatestFrameNumber not found\n"); return 1; }
+    if (!list_hist) { fprintf(stderr, "FAIL: ListFrameHistory not found\n"); return 1; }
 
     /* Initialize and OpenDefaultDisplay */
     vi_init();

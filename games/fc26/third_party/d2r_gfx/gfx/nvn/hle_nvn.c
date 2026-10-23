@@ -2876,6 +2876,7 @@ static void present_exec(win_t *o, int idx, double period, const int crop[4], ui
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     NVN_BLOCKING();
     (void)q; win_t *o = (win_t *)w; o->presents++;
+    front_frame_queued();
     totk_tl_frame(o->presents); totk_tl(TL_PRES_IN, (uint64_t)idx, 0);
     if (runtime_frame_step_update) runtime_frame_step_update(now_ns());
     if (movie_host_tick) movie_host_tick();

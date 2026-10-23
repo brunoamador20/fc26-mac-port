@@ -124,8 +124,17 @@ static unsigned nfp_no_device(void) { return NFP_DEVICE_NOT_FOUND; }
 static int nfp_device_state(const void *h) { (void)h; return 0; }
 
 /* ---------- nn::err (nn::swkbd is in runtime/swkbd_host.c) ---------- */
+typedef struct {
+    uint32_t category;
+    uint32_t number;
+} err_error_code_t;
+
 static void show_error(uint32_t result) {
     fprintf(stderr, "[totk] game error dialog: %04u-%04u (result %#x)\n", 2000 + (result & 0x1ff), (result >> 9) & 0x1fff, result);
+}
+static void show_error_code(err_error_code_t code) {
+    fprintf(stderr, "[totk] game error dialog: %04u-%04u (category %u, number %u)\n",
+            code.category, code.number, code.category, code.number);
 }
 
 void *runtime_applet_override(const char *name) {
@@ -160,6 +169,7 @@ void *runtime_applet_override(const char *name) {
         {"_ZN2nn3nfp10GetTagInfoEPNS0_7TagInfoERKNS0_12DeviceHandleE", nfp_no_device},
         {"_ZN2nn3nfp12GetModelInfoEPNS0_9ModelInfoERKNS0_12DeviceHandleE", nfp_no_device},
         {"_ZN2nn3err9ShowErrorENS_6ResultE", show_error},
+        {"_ZN2nn3err9ShowErrorENS0_9ErrorCodeE", show_error_code},
     };
     for (size_t i = 0; i < sizeof map / sizeof *map; i++) if (!strcmp(name, map[i].name)) return map[i].fn;
     return NULL;

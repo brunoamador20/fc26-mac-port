@@ -19,6 +19,7 @@ static NSProgressIndicator *bootProgress;
 static NSView *shortcutHelp;
 static uint64_t bootStartNS;
 static _Atomic uint64_t presentedFrames;
+static _Atomic uint64_t queuedFrames;   /* the game's nvnQueuePresentTexture calls: what nn::vi calls the queued frame number */
 static _Atomic int warmPending;
 static CVDisplayLinkRef displayLink;
 static _Atomic int focused;
@@ -28,6 +29,7 @@ static unsigned vsyncCount;
 void hle_bind_system_event(void *,int);
 void hle_signal_system_event(void *);
 void *front_metal_layer(void){return (__bridge void *)metalLayer;}
+void front_frame_queued(void){atomic_fetch_add_explicit(&queuedFrames,1,memory_order_relaxed);}
 void front_frame_presented(void){
  if(atomic_fetch_add_explicit(&presentedFrames,1,memory_order_relaxed)==0){
   fprintf(stderr,"[totk-boot] %.3f first presented frame\n",(runtime_now_ns()-bootStartNS)/1e9);
@@ -375,6 +377,22 @@ static int vi_list_displays(vi_display_info_t *out,int count){
  out->max_height=1080;
  return 1;
 }
+/* sdk+0x43dea0: *out = android::Surface::getQueuedFrameNumber (frames queued by the game, counted here at nvnQueuePresentTexture);
+   0x1672 while it is still 0. */
+static uint32_t vi_get_latest_frame_number(uint64_t *out,const void *layer){
+ if(!out||layer!=&layerIdentity)return 0xf601;
+ uint64_t current=atomic_load_explicit(&queuedFrames,memory_order_relaxed);
+ if(current==0)return 0x1672;
+ *out=current;
+ return 0;
+}
+/* sdk+0x43df10 returns the compositor's frame history. The host has no compositor history (presented times exist only with GPU
+   submission on), so it reports no entries; PlatformNvn+0x77054 skips its frame-timing update when the count is below 1. */
+static int vi_list_frame_history(void *out,int count,const void *layer){
+ (void)out;(void)count;(void)layer;
+ static int once; if(!once++)fprintf(stderr,"[totk] nn::vi::ListFrameHistory: no compositor frame history on the host, 0 entries\n");
+ return 0;
+}
 static uint32_t vi_create_layer(void **out,void *display,const void *settings){
  (void)settings;
  if(!out||display!=&displayIdentity)return 0xf601;
@@ -406,6 +424,8 @@ void *runtime_front_override(const char *name){
  {"_ZN2nn2vi12CloseDisplayEPNS0_7DisplayE",vi_close_display},
  {"_ZN2nn2vi8FinalizeEv",vi_finalize},
  {"_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE",vi_window},
+ {"_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE",vi_list_frame_history},
+ {"_ZN2nn2vi20GetLatestFrameNumberEPmPKNS0_5LayerE",vi_get_latest_frame_number},
  {"_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7DisplayE",vi_vsync}};
  for(unsigned i=0;i<sizeof(entries)/sizeof(*entries);i++)if(!strcmp(name,entries[i].name))return entries[i].fn;return NULL;
 }
