@@ -13,7 +13,6 @@
 #include "game_version.h"
 #include <pthread.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #define RESULT(module, description) ((uint32_t)(module) | ((uint32_t)(description) << 9))
@@ -94,7 +93,8 @@ static void pctl_factory(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
    5 StationConnected, 6 Error) with its preconditions; a command in the wrong state gets 2203-0037 (not initialized) or
    2203-0039. Offline: opening an access point or a station works, Scan finds no network (count 0), and creating a network
    (CreateNetwork*) or joining one (Connect*) fails with LDN_WIRELESS_OFF, so states 3 and 5 are never reached. One
-   wireless device: the state is shared by every session, as the monitor service (ldn:m) reports it. */
+   wireless device: the state is shared by every session, as the monitor service (ldn:m) reports it, and no session keeps
+   state of its own (a clone made by the sdk's session manager shares the original's handler; only the original closes). */
 enum { LDN_NONE, LDN_INITIALIZED, LDN_ACCESS_POINT, LDN_ACCESS_POINT_CREATED, LDN_STATION, LDN_STATION_CONNECTED };
 enum { NETWORK_INFO_SIZE = 0x480, ADVERTISE_MAX = 0x180 };
 static pthread_mutex_t ldn_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -106,7 +106,6 @@ static uint32_t ldn_event(void) {
     pthread_once(&once, ldn_event_make);
     return ldn_event_w;
 }
-typedef struct { int system, initialized; } LdnSession;
 static uint32_t ldn_need(unsigned lo, unsigned hi) {
     return ldn_state >= lo && ldn_state <= hi ? 0 : ldn_state == LDN_NONE ? LDN_NOT_INITIALIZED : LDN_INVALID_STATE;
 }
@@ -117,9 +116,8 @@ static void ldn_set(unsigned state) {   /* ldn_lock held; GetStateChangeEvent is
 }
 /* Commands that read the current network (State 3 or 5): there never is one offline. */
 static uint32_t ldn_no_network(void) { return ldn_state == LDN_NONE ? LDN_NOT_INITIALIZED : LDN_INVALID_STATE; }
-static uint32_t ldn_initialize(LdnSession *l) {
+static uint32_t ldn_initialize(void) {
     if (ldn_state == LDN_NONE) ldn_set(LDN_INITIALIZED);   /* already initialized: kept as it is */
-    l->initialized = 1;
     return 0;
 }
 static uint32_t ldn_scan(const IpcRequest *rq, IpcResponse *rs) {
@@ -136,11 +134,11 @@ static uint32_t ldn_scan(const IpcRequest *rq, IpcResponse *rs) {
     if (!logged++) fprintf(stderr, "[fc26-net] ldn Scan: no network (offline)\n");
     return 0;
 }
-static uint32_t ldn_command(IpcSession *s, LdnSession *l, const IpcRequest *rq, IpcResponse *rs) {
+static uint32_t ldn_command(IpcSession *s, int system, const IpcRequest *rq, IpcResponse *rs) {
     unsigned cmd = rq->cmd;
     /* 402-404 differ between the user and the system interface (switchbrew tables). */
-    if (l->system && (cmd == 402 || cmd == 403 || cmd == 404)) cmd = cmd == 402 ? 1403 : cmd == 403 ? 1402 : 1404;
-    else if (!l->system && (cmd == 402 || cmd == 403)) cmd = cmd == 402 ? 1402 : 1403;
+    if (system && (cmd == 402 || cmd == 403 || cmd == 404)) cmd = cmd == 402 ? 1403 : cmd == 403 ? 1402 : 1404;
+    else if (!system && (cmd == 402 || cmd == 403)) cmd = cmd == 402 ? 1402 : 1403;
     switch (cmd) {
     case 0: { uint32_t v = ldn_state; IPC_OUT(rs, v); return 0; }               /* GetState */
     case 1: case 2: case 4: case 5: case 101: return ldn_no_network();         /* GetNetworkInfo, GetIpv4Address, GetSecurityParameter,
@@ -188,27 +186,28 @@ static uint32_t ldn_command(IpcSession *s, LdnSession *l, const IpcRequest *rq, 
         return LDN_WIRELESS_OFF;
     }
     case 304: return ldn_need(LDN_STATION_CONNECTED, LDN_STATION_CONNECTED);    /* Disconnect: never 5 */
-    case 400: return ldn_initialize(l);                                         /* Initialize(pid, u64) */
+    case 400: return ldn_initialize();                                         /* Initialize(pid, u64) */
     case 401: {                                                                 /* Finalize: any state but None -> None */
-        uint32_t r = ldn_need(LDN_INITIALIZED, LDN_STATION_CONNECTED); if (!r) { ldn_set(LDN_NONE); l->initialized = 0; } return r;
+        uint32_t r = ldn_need(LDN_INITIALIZED, LDN_STATION_CONNECTED); if (!r) ldn_set(LDN_NONE); return r;
     }
-    case 1402: if (IPC_ARG(rq, int32_t, 0) < 0) return LDN_INVALID_ARGUMENT; return ldn_initialize(l);   /* InitializeWithVersion(s32, pid, u64) */
+    case 1402: if (IPC_ARG(rq, int32_t, 0) < 0) return LDN_INVALID_ARGUMENT; return ldn_initialize();   /* InitializeWithVersion(s32, pid, u64) */
     case 1403: return ldn_need(LDN_INITIALIZED, LDN_INITIALIZED);               /* SetOperationMode */
-    case 1404: if (IPC_ARG(rq, int32_t, 0) < 0) return LDN_INVALID_ARGUMENT; return ldn_initialize(l);   /* InitializeWithPriority (ldn:s) */
+    case 1404: if (IPC_ARG(rq, int32_t, 0) < 0) return LDN_INVALID_ARGUMENT; return ldn_initialize();   /* InitializeWithPriority (ldn:s) */
     default: ipc_unimplemented(s, rq);                                          /* action frames, tx power, ... */
     }
 }
-static void ldn_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {   /* I{User,System}LocalCommunicationService */
+static void ldn_handle(IpcSession *s, const IpcRequest *rq, IpcResponse *rs, int system) {
     pthread_mutex_lock(&ldn_lock);
-    rs->result = ldn_command(s, s->state, rq, rs);
+    rs->result = ldn_command(s, system, rq, rs);
     pthread_mutex_unlock(&ldn_lock);
 }
-static void ldn_close(void *p) {   /* closed without Finalize: the service finalizes it */
-    LdnSession *l = p;
+static void ldn_user(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) { ldn_handle(s, rq, rs, 0); }     /* IUserLocalCommunicationService */
+static void ldn_system(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) { ldn_handle(s, rq, rs, 1); }   /* ISystemLocalCommunicationService */
+static void ldn_close(void *unused) {   /* the client went away (with or without Finalize): the service finalizes it */
+    (void)unused;
     pthread_mutex_lock(&ldn_lock);
-    if (l->initialized) ldn_set(LDN_NONE);
+    ldn_set(LDN_NONE);
     pthread_mutex_unlock(&ldn_lock);
-    free(l);
 }
 static void ldn_client_monitor(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {   /* IClientProcessMonitor */
     (void)rs;
@@ -227,13 +226,10 @@ static void ldn_monitor(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) { 
 }
 static void ldn_creator(IpcSession *s, const IpcRequest *rq, IpcResponse *rs, int system) {
     switch (rq->cmd) {
-    case 0: {                                                                   /* Create{User,System}LocalCommunicationService */
-        LdnSession *l = calloc(1, sizeof *l);
-        if (!l) runtime_fail("ldn session allocation");
-        l->system = system;
-        new_object(rs, system ? "ISystemLocalCommunicationService" : "IUserLocalCommunicationService", ldn_handler, l, ldn_close);
+    case 0:                                                                     /* Create{User,System}LocalCommunicationService */
+        new_object(rs, system ? "ISystemLocalCommunicationService" : "IUserLocalCommunicationService", system ? ldn_system : ldn_user,
+                   NULL, ldn_close);
         return;
-    }
     case 1: new_object(rs, "IClientProcessMonitor", ldn_client_monitor, NULL, NULL); return;   /* CreateClientProcessMonitor [18.0.0+] */
     default: ipc_unimplemented(s, rq);
     }

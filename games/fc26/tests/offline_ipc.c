@@ -63,12 +63,13 @@ typedef struct { const void *p; uint64_t size; } Buf;
 typedef struct { Buf x, a, b, c; uint32_t copy; int pid; } Extra;   /* at most one of each: what these commands use */
 typedef struct { uint32_t result; uint8_t data[64]; uint32_t copy[8], move[8]; unsigned ncopy, nmove, nxout; } Reply;
 
+static unsigned msg_type = 4;                                       /* 4: CMIF request, 5: control request */
 static void request(uint32_t cmd, const void *args, unsigned n, const Extra *e) {
     static const Extra none;
     if (!e) e = &none;
     memset(msg, 0, sizeof msg);
     unsigned nx = e->x.size != 0, na = e->a.size != 0, nb = e->b.size != 0, nc = e->c.size != 0, special = e->pid || e->copy;
-    msg[0] = 4 | nx << 16 | na << 20 | nb << 24;
+    msg[0] = msg_type | nx << 16 | na << 20 | nb << 24;
     uint32_t *p = msg + 2;
     if (special) {
         *p++ = (e->pid ? 1u : 0u) | (e->copy ? 1u : 0u) << 1;
@@ -135,6 +136,12 @@ static uint32_t open_service(const char *name) {
 static uint32_t object(uint32_t handle, uint32_t cmd, const void *args, unsigned n, const Extra *e) {
     Reply r = call(handle, cmd, args, n, e);
     if (r.result || r.nmove != 1) { fprintf(stderr, "command %u made no object (result %#x)\n", cmd, r.result); exit(1); }
+    return r.move[0];
+}
+/* CloneCurrentObject (control request 2): another session to the same object, as the sdk's session manager makes. */
+static uint32_t clone_of(uint32_t handle) {
+    msg_type = 5; Reply r = call(handle, 2, NULL, 0, NULL); msg_type = 4;
+    if (r.result || r.nmove != 1) runtime_fail("test CloneCurrentObject");
     return r.move[0];
 }
 static int event_readable(uint32_t h) { return runtime_handle_get(h, KIND_EVENT_R) != NULL; }
@@ -244,6 +251,10 @@ static void ldn(void) {
     CHECK(!call(sys, 402, &mode, 4, NULL).result, "ldn:s SetOperationMode (cmd 402)");
     r = call(mon, 0, NULL, 0, NULL);
     CHECK(!r.result && u32_at(&r, 0) == 1, "ldn:m GetState = Initialized");
+    uint32_t clone = clone_of(sys);
+    CHECK(state_of(clone) == 1, "ldn:s a clone of the session sees the same state");
+    runtime_ipc_session_closed(runtime_handle_get(clone, 1));
+    CHECK(state_of(sys) == 1, "ldn:s closing the clone keeps the state");
     runtime_ipc_session_closed(runtime_handle_get(sys, 1));
     r = call(mon, 0, NULL, 0, NULL);
     CHECK(!r.result && u32_at(&r, 0) == 0, "ldn:s closed without Finalize: None again");
