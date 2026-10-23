@@ -19,6 +19,7 @@
 
 pthread_key_t runtime_keys[8];
 void *runtime_symbol(const char *name) { (void)name; return NULL; }   /* fs_host.c: the sdk libc behind descriptors that are not ours */
+void hle_signal_system_event(void *ev) { (void)ev; }   /* account.c: the async contexts signal their event (threads.c in the runtime) */
 static void *objects[64];
 static int kinds[64];
 static unsigned nobjects;

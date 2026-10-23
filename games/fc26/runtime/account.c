@@ -48,6 +48,99 @@ static uint32_t open_user(UserHandle *out,const Uid *uid){
  lock_release();return 0x7c67;
 }
 static uint32_t show_user_selector(Uid *out,const void *settings){(void)settings;if(!out)return 0x7c67;initialize();*out=local;return 0;}
+
+#define RESULT(module, description) ((uint32_t)(module) | ((uint32_t)(description) << 9))
+#define NSA_UNAVAILABLE RESULT(124, 280)
+
+
+static uint32_t list_all_users(int32_t *count, Uid *users, int32_t max_users) {
+ if(!count)return 0x7c67;
+ initialize();lock_acquire();
+ if(max_users>=1&&users)users[0]=local;
+ *count=1;
+ lock_release();return 0;
+}
+static uint32_t list_open_users(int32_t *count, Uid *users, int32_t max_users) {
+ if(!count)return 0x7c67;
+ initialize();lock_acquire();
+ int has_open=0;
+ for(unsigned i=0;i<64;i++)if(tokens[i]){has_open=1;break;}
+ if(has_open){
+  if(max_users>=1&&users)users[0]=local;
+  *count=1;
+ }else{
+  *count=0;
+ }
+ lock_release();return 0;
+}
+static uint32_t is_network_account_available(bool *out, const UserHandle *handle) {
+ if(!out)return 0x7c67;
+ initialize();lock_acquire();
+ if(!valid(handle)){lock_release();return 0x7c67;}
+ *out=false;
+ lock_release();return 0;
+}
+static uint32_t load_license_info_async(void *ctx, const UserHandle *handle) {
+ if(!ctx)return 0x7c67;
+ initialize();lock_acquire();
+ if(!valid(handle)){lock_release();return 0x7c67;}
+ lock_release();return 0;
+}
+static void show_license_requirements(const UserHandle *handle) {
+ (void)handle;
+}
+static uint32_t create_auth_request(void *ctx, const UserHandle *handle, const void *param, void *buf, size_t buf_size) {
+ (void)param;(void)buf;(void)buf_size;
+ if(!ctx)return 0x7c67;
+ initialize();lock_acquire();
+ if(!valid(handle)){lock_release();return 0x7c67;}
+ lock_release();return 0;
+}
+static uint32_t async_get_system_event(void *ctx, void *ev) {
+ (void)ctx;if(!ev)return 0x7c67;
+ hle_signal_system_event(ev);
+ return 0;
+}
+static void async_cancel(void *ctx) {
+ (void)ctx;
+}
+static uint32_t async_has_done(void *ctx, bool *out) {
+ (void)ctx;if(!out)return 0x7c67;
+ *out=true;
+ return 0;
+}
+static uint32_t async_get_result(void *ctx) {
+ (void)ctx;
+ return NSA_UNAVAILABLE;
+}
+static int async_license_kind(void *ctx) {
+ (void)ctx;
+ runtime_fail("nn::account::AsyncNetworkServiceLicenseInfoContext::GetNetworkServiceLicenseKind: no valid license offline");
+ return 0;
+}
+static uint32_t auth_get_system_event(void *ctx, void *ev) {
+ (void)ctx;if(!ev)return 0x7c67;
+ hle_signal_system_event(ev);
+ return 0;
+}
+static void auth_cancel(void *ctx) {
+ (void)ctx;
+}
+static uint32_t auth_get_result_with_interaction(void *ctx) {
+ (void)ctx;
+ return NSA_UNAVAILABLE;
+}
+static uint32_t auth_get_auth_code(void *ctx, size_t *out_size, char *out_buf, size_t buf_size) {
+ (void)ctx;(void)out_buf;(void)buf_size;
+ if(out_size)*out_size=0;
+ return NSA_UNAVAILABLE;
+}
+static uint32_t auth_get_state(void *ctx, size_t *out_size, char *out_buf, size_t buf_size) {
+ (void)ctx;(void)out_buf;(void)buf_size;
+ if(out_size)*out_size=0;
+ return NSA_UNAVAILABLE;
+}
+
 void runtime_account_uid(uint64_t out[2]){initialize();out[0]=local.lo;out[1]=local.hi;}
 void *runtime_account_override(const char *name){
  static const struct{const char *name;void *fn;} entries[]={
@@ -55,6 +148,23 @@ void *runtime_account_override(const char *name){
  {"_ZN2nn7account8OpenUserEPNS0_10UserHandleERKNS0_3UidE",open_user},
  {"_ZN2nn7account16ShowUserSelectorEPNS0_3UidERKNS0_21UserSelectionSettingsE",show_user_selector},
  {"_ZN2nn7account9CloseUserERKNS0_10UserHandleE",close_user},{"_ZN2nn7account9GetUserIdEPNS0_3UidERKNS0_10UserHandleE",user_id},
- {"_ZN2nn7account16GetUserExistenceEPbRKNS0_3UidE",existence},{"_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE",nickname}};
+ {"_ZN2nn7account16GetUserExistenceEPbRKNS0_3UidE",existence},{"_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE",nickname},
+ {"_ZN2nn7account12ListAllUsersEPiPNS0_3UidEi",list_all_users},
+ {"_ZN2nn7account13ListOpenUsersEPiPNS0_3UidEi",list_open_users},
+ {"_ZN2nn7account32IsNetworkServiceAccountAvailableEPbRKNS0_10UserHandleE",is_network_account_available},
+ {"_ZN2nn7account34LoadNetworkServiceLicenseInfoAsyncEPNS0_37AsyncNetworkServiceLicenseInfoContextERKNS0_10UserHandleE",load_license_info_async},
+ {"_ZN2nn7account40ShowLicenseRequirementsForNetworkServiceERKNS0_10UserHandleE",show_license_requirements},
+ {"_ZN2nn7account41CreateNintendoAccountAuthorizationRequestEPNS0_42NintendoAccountAuthorizationRequestContextERKNS0_10UserHandleERKNS0_45NintendoAccountAuthorizationRequestParametersEPvm",create_auth_request},
+ {"_ZN2nn7account12AsyncContext14GetSystemEventEPNS_2os11SystemEventE",async_get_system_event},
+ {"_ZN2nn7account12AsyncContext6CancelEv",async_cancel},
+ {"_ZN2nn7account12AsyncContext7HasDoneEPb",async_has_done},
+ {"_ZN2nn7account12AsyncContext9GetResultEv",async_get_result},
+ {"_ZN2nn7account37AsyncNetworkServiceLicenseInfoContext28GetNetworkServiceLicenseKindEv",async_license_kind},
+ {"_ZN2nn7account42NintendoAccountAuthorizationRequestContext14GetSystemEventEPNS_2os11SystemEventE",auth_get_system_event},
+ {"_ZN2nn7account42NintendoAccountAuthorizationRequestContext6CancelEv",auth_cancel},
+ {"_ZN2nn7account42NintendoAccountAuthorizationRequestContext34GetResultWithInteractionIfRequiredEv",auth_get_result_with_interaction},
+ {"_ZN2nn7account42NintendoAccountAuthorizationRequestContext9GetResultEv",auth_get_result_with_interaction},
+ {"_ZN2nn7account42NintendoAccountAuthorizationRequestContext20GetAuthorizationCodeEPmPcm",auth_get_auth_code},
+ {"_ZN2nn7account42NintendoAccountAuthorizationRequestContext8GetStateEPmPcm",auth_get_state}};
  for(unsigned i=0;i<sizeof(entries)/sizeof(*entries);i++)if(!strcmp(name,entries[i].name))return entries[i].fn;return NULL;
 }
