@@ -44,6 +44,7 @@ static uint64_t g_gen_shown;            // interpolated frames handed to the scr
 #include "totk_lifelog.h"
 #include "totk_timeline.h"
 #include "nvn_pool_index.h"
+#include "nvn_copy_stride.h"   // FC 26: copy row / image strides (SetCopyRowStride / SetCopyImageStride)
 #include "../../host/dm.h"
 #import <CommonCrypto/CommonDigest.h>
 #include <stdarg.h>
@@ -5583,6 +5584,7 @@ static struct {
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; int depth_clamp; int render_disabled; int raster_discard;
     float blend_color[4]; int64_t copy_stride;
+    int64_t copy_img_stride;   // FC 26: SetCopyImageStride (0 = tightly packed)
 } S;
 // No render target set: no colour target and no depth / stencil (a pass of rasterization only, see rp_begin_ex)
 static int rt_none(void) {
@@ -7485,6 +7487,7 @@ static int lay_scan(const uint8_t *start, const p_set_rt *rt, int first, int nla
             case OP_DRAW: case OP_DRAW_IDX: case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_BIND_PROGRAM: case OP_BIND_STATE:
             case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_SAMP:
             case OP_BIND_IMG: case OP_STENCIL: case OP_POLY_OFFSET: case OP_BLEND_COLOR: case OP_COPY_STRIDE: case OP_DEPTH_CLAMP: case OP_RASTER_DISCARD:
+            case OP_COPY_IMG_STRIDE:
             case OP_BARRIER: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: continue;
             default: return hi;   // copies, dispatches, texture / depth-stencil clears, events
         }
@@ -7651,6 +7654,7 @@ static int state_op(uint32_t op, const void *a) {
         case OP_DEPTH_RANGE: { const p_depth_range *b = a; S.dr[0] = b->n; S.dr[1] = b->f; break; }
         case OP_BLEND_COLOR: memcpy(S.blend_color, ((const p_blend_color *)a)->rgba, 16); break;
         case OP_COPY_STRIDE: S.copy_stride = ((const p_copy_stride *)a)->stride; break;
+        case OP_COPY_IMG_STRIDE: S.copy_img_stride = ((const p_copy_stride *)a)->stride; break;
         case OP_DEPTH_CLAMP: S.depth_clamp = ((const p_flag *)a)->value; break;
         case OP_RENDER_ENABLE: S.render_disabled = !((const p_flag *)a)->value; break;
         case OP_RENDER_COND: S.render_disabled = !cond_eval(a, (const uint8_t *)a - 8); PD("E cond addr=%#llx mode=%d -> %s", (unsigned long long)((const p_render_cond *)a)->addr, ((const p_render_cond *)a)->mode, S.render_disabled ? "disabled" : "enabled"); break;
@@ -10460,19 +10464,19 @@ static void copy_t2b(const p_copy_b2t *c) {
     if (!t) return;
     int bw, bh, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh);
     unsigned level = c->has_view && c->view.set_levels ? c->view.base_level : 0, layer0 = c->has_view && c->view.set_layers ? c->view.min_layer : 0;
-    size_t row = S.copy_stride ? (size_t)S.copy_stride : (size_t)((c->r.width + bw - 1) / bw) * bpb;
-    size_t rows = (c->r.height + bh - 1) / bh, img = row * rows;
     int is3d = c->tex->d.target == 2, nz = c->r.depth ? c->r.depth : 1;
+    nvn_copy_layout L = nvn_copy_layout_of(c->r.width, c->r.height, nz, bw, bh, bpb, S.copy_stride, S.copy_img_stride);   // FC 26: + SetCopyImageStride
+    size_t row = L.row, img = L.img;
     void *mb; uint64_t mo;
-    upd_guard(c->src, c->src + img * nz);   // TOTK: renamed uniform updates before a GPU write to the range
-    if (!mtl_addr(c->src, img * nz, &mb, &mo)) { RED_ONCE(31, "贴图→缓冲拷贝的目标不在内存池里"); return; }
-    usnap_drop(c->src, img * nz);   // TOTK: a GPU write: no uniform copy of these bytes from here on
-    id<MTL4ComputeCommandEncoder> b = blit(); BOTW_T2B_NOTE(c, t, mb, mo, img * nz) BOTW_GPU_COPY_SUPERSEDES(mb, mo, img * nz)
-    if (is3d)
+    upd_guard(c->src, c->src + L.span);   // TOTK: renamed uniform updates before a GPU write to the range
+    if (!mtl_addr(c->src, L.span, &mb, &mo)) { RED_ONCE(31, "贴图→缓冲拷贝的目标不在内存池里"); return; }
+    usnap_drop(c->src, L.span);   // TOTK: a GPU write: no uniform copy of these bytes from here on
+    id<MTL4ComputeCommandEncoder> b = blit(); BOTW_T2B_NOTE(c, t, mb, mo, L.span) BOTW_GPU_COPY_SUPERSEDES(mb, mo, L.span)
+    if (is3d && img == L.tight)
         enc_b_copy_texture_buffer(b, t, 0, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, c->r.zoffset), MTLSizeMake(c->r.width, c->r.height, nz), (__bridge id<MTLBuffer>)mb, mo, row, img);
-    else
+    else   // FC 26: with the game's own image stride a 3D copy goes one slice at a time too (Metal's bytes per image covers one image)
         for (int z = 0; z < nz; z++)
-            enc_b_copy_texture_buffer(b, t, layer0 + c->r.zoffset + z, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, 0), MTLSizeMake(c->r.width, c->r.height, 1), (__bridge id<MTLBuffer>)mb, mo + z * img, row, img);
+            enc_b_copy_texture_buffer(b, t, is3d ? 0 : layer0 + c->r.zoffset + z, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, is3d ? c->r.zoffset + z : 0), MTLSizeMake(c->r.width, c->r.height, 1), (__bridge id<MTLBuffer>)mb, mo + z * img, row, L.tight);
 }
 // CPU 读贴图（ReadTexels）：预排布贴图以池内存为真值，解排布直读；其余从 MTLTexture blit 读回（调用方已按 NVN 规矩等过 GPU）
 // CPU texture read (ReadTexels): for packaged textures the pool memory is the ground truth, de-layout and read directly; the rest are read back from the MTLTexture by blit (the caller has already waited for the GPU per NVN rules)
@@ -10579,12 +10583,12 @@ static void copy_b2t(const p_copy_b2t *c) {
     if (!t) return;
     int bw, bh, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh);
     unsigned level = c->has_view && c->view.set_levels ? c->view.base_level : 0, layer0 = c->has_view && c->view.set_layers ? c->view.min_layer : 0;
-    size_t row = S.copy_stride ? (size_t)S.copy_stride : (size_t)((c->r.width + bw - 1) / bw) * bpb;
-    size_t rows = (c->r.height + bh - 1) / bh, img = row * rows;
     int is3d = c->tex->d.target == 2, nz = c->r.depth ? c->r.depth : 1;
+    nvn_copy_layout L = nvn_copy_layout_of(c->r.width, c->r.height, nz, bw, bh, bpb, S.copy_stride, S.copy_img_stride);   // FC 26: + SetCopyImageStride
+    size_t row = L.row, rows = L.rows, img = L.img;
     void *mb; uint64_t mo;
-    upd_guard(c->src, c->src + img * nz);   // TOTK: renamed uniform updates before a GPU read of the range
-    if (!mtl_addr(c->src, img * nz, &mb, &mo)) { RED_ONCE(23, "缓冲→贴图拷贝的源不在内存池里"); return; }
+    upd_guard(c->src, c->src + L.span);   // TOTK: renamed uniform updates before a GPU read of the range
+    if (!mtl_addr(c->src, L.span, &mb, &mo)) { RED_ONCE(23, "缓冲→贴图拷贝的源不在内存池里"); return; }
     uint32_t upf; int ubpp;
     if (pf_astc4(t.pixelFormat) && bc1_fmt(c->tex->d.format)) {   // TOTK: BC1 stored as ASTC 4x4: the source blocks are transcoded on the CPU
         const uint8_t *src = [(__bridge id<MTLBuffer>)mb contents];
@@ -10612,11 +10616,11 @@ static void copy_b2t(const p_copy_b2t *c) {
         return;
     }
     id<MTL4ComputeCommandEncoder> b = blit();
-    if (is3d)
+    if (is3d && img == L.tight)
         enc_b_copy_buffer_texture(b, (__bridge id<MTLBuffer>)mb, mo, row, img, MTLSizeMake(c->r.width, c->r.height, nz), t, 0, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, c->r.zoffset));
-    else
+    else   // FC 26: with the game's own image stride a 3D copy goes one slice at a time too (Metal's bytes per image covers one image)
         for (int z = 0; z < nz; z++)
-            enc_b_copy_buffer_texture(b, (__bridge id<MTLBuffer>)mb, mo + z * img, row, img, MTLSizeMake(c->r.width, c->r.height, 1), t, layer0 + c->r.zoffset + z, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, 0));
+            enc_b_copy_buffer_texture(b, (__bridge id<MTLBuffer>)mb, mo + z * img, row, L.tight, MTLSizeMake(c->r.width, c->r.height, 1), t, is3d ? 0 : layer0 + c->r.zoffset + z, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, is3d ? c->r.zoffset + z : 0));
 }
 
 // 无 BC + 老机型补充包：游戏把文件来的贴图（已是 ASTC 4x4）整块拷进自己建的 BC3 纹理数组（无 BC 时建成 RGBA8）。Switch 上两种格式块大小相同、
@@ -11064,6 +11068,7 @@ void mtl_exec(const uint8_t *p) {
             case OP_SCISSOR: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
             case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
             case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_BLEND_COLOR: case OP_COPY_STRIDE: case OP_DEPTH_CLAMP: case OP_RENDER_ENABLE: case OP_RASTER_DISCARD: case OP_RENDER_COND:
+            case OP_COPY_IMG_STRIDE:
                 state_op(h.op, a); break;
             case OP_COPY_B2T: copy_b2t(a); break;
             case OP_COPY_T2B: copy_t2b(a); break;

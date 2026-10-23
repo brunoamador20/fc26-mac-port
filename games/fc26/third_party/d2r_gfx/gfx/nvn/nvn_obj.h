@@ -57,7 +57,14 @@ typedef struct { uint32_t magic, nstage; NVNshaderData sd[6]; uint64_t serial; }
 
 typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;                            FITS(sync_t, NVNsync);
 typedef struct { const pool_t *pool; int64_t off; } ev_builder_t;                             FITS(ev_builder_t, NVNeventBuilder);
-typedef struct { uint32_t magic; volatile uint32_t *val; } ev_t;                              FITS(ev_t, NVNevent);
+// FC 26: pool / off keep the builder's storage for nvnEventGetMemoryOffset (fc26_nvn_ext.c); val = pool memory + off.
+typedef struct { uint32_t magic; volatile uint32_t *val; const pool_t *pool; int64_t off; } ev_t; FITS(ev_t, NVNevent);
+
+// Buffer objects reference their pool; they do not own the backing allocation. (FC 26: moved here from hle_nvn.c so
+// fc26_nvn_ext.c can answer nvnBufferBuilderGetMemoryOffset / GetSize; layout unchanged.)
+typedef struct{NVNdevice *dev;pool_t *pool;int64_t off;uint64_t size;} totk_buffer_builder;
+typedef struct{uint32_t magic;pool_t *pool;int64_t off;uint64_t size;} totk_buffer;
+FITS(totk_buffer_builder,NVNbufferBuilder);FITS(totk_buffer,NVNbuffer);
 
 typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval, active; NVNtexture *tex[4]; } win_builder_t;
 FITS(win_builder_t, NVNwindowBuilder);
@@ -114,7 +121,9 @@ enum {
     OP_BIND_PROGRAM, OP_BIND_STATE, OP_BIND_VATTR, OP_BIND_VSTREAM, OP_BIND_VBUF,
     OP_BIND_UBO, OP_BIND_SSBO, OP_BIND_TEX, OP_BIND_SAMP,
     OP_STENCIL, OP_POLY_OFFSET, OP_DRAW, OP_DRAW_IDX, OP_DISPATCH, OP_BARRIER,
-    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_DEPTH_CLAMP, OP_RENDER_ENABLE, OP_RASTER_DISCARD, OP_RENDER_COND, OP_COUNT_
+    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_DEPTH_CLAMP, OP_RENDER_ENABLE, OP_RASTER_DISCARD, OP_RENDER_COND,
+    OP_COPY_IMG_STRIDE,   // FC 26: nvnCommandBufferSetCopyImageStride (p_copy_stride); appended so earlier op numbers stay as they were
+    OP_COUNT_
 };
 // 载荷（紧跟 op_hdr）
 // Payload (immediately follows op_hdr)
@@ -249,7 +258,7 @@ typedef struct { const dpool_t *pool; } p_set_pool;
 typedef struct { uint64_t src; const tex_t *tex; view_t view; uint8_t has_view; NVNcopyRegion r; int32_t flags; } p_copy_b2t;
 typedef struct { const tex_t *src, *dst; view_t sv, dv; uint8_t has_sv, has_dv; NVNcopyRegion sr, dr; int32_t flags; } p_copy_t2t;   // T2B 复用：src 存目标缓冲地址 | Reused for T2B: src stores the destination buffer address
 typedef struct { const tex_t *tex; view_t view; uint8_t has_view, is_uint; NVNcopyRegion r; int32_t mask; union { float f[4]; uint32_t u[4]; } c; } p_clear_tex;
-typedef struct { int64_t stride; } p_copy_stride;
+typedef struct { int64_t stride; } p_copy_stride;   // OP_COPY_STRIDE (row stride) and OP_COPY_IMG_STRIDE (image stride); 0 = tightly packed
 typedef struct { float rgba[4]; } p_blend_color;
 
 // Metal 回放层入口（nvn_mtl.m）：把一组命令句柄回放进当前提交

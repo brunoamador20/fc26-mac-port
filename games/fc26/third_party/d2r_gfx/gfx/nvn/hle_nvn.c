@@ -266,10 +266,7 @@ NVN(nvnMemoryPoolMapVirtual, NVNboolean, NVNmemoryPool *p, int n, const NVNmappi
 }
 NVN(nvnMemoryPoolGetBufferAddress, NVNbufferAddress, const NVNmemoryPool *p) { return (NVNbufferAddress)((const pool_t *)p)->mem; }
 
-// Buffer objects reference their pool; they do not own the backing allocation.
-typedef struct{NVNdevice *dev;pool_t *pool;int64_t off;uint64_t size;} totk_buffer_builder;
-typedef struct{uint32_t magic;pool_t *pool;int64_t off;uint64_t size;} totk_buffer;
-FITS(totk_buffer_builder,NVNbufferBuilder);FITS(totk_buffer,NVNbuffer);
+// Buffer objects reference their pool; they do not own the backing allocation (totk_buffer_builder / totk_buffer: nvn_obj.h).
 NVN(nvnBufferBuilderSetDevice, void, NVNbufferBuilder *b,NVNdevice *d){((totk_buffer_builder *)b)->dev=d;}
 NVN(nvnBufferBuilderSetDefaults, void, NVNbufferBuilder *b){NVNdevice *d=((totk_buffer_builder *)b)->dev;memset(b,0,sizeof(totk_buffer_builder));((totk_buffer_builder *)b)->dev=d;}
 NVN(nvnBufferBuilderSetStorage, void, NVNbufferBuilder *b,NVNmemoryPool *p,ptrdiff_t off,size_t size){totk_buffer_builder *v=(void *)b;v->pool=(void *)p;v->off=off;v->size=size;}
@@ -688,7 +685,7 @@ NVN(nvnEventBuilderSetStorage, void, NVNeventBuilder *b, const NVNmemoryPool *p,
 NVN(nvnEventInitialize, NVNboolean, NVNevent *e, const NVNeventBuilder *b) {
     const ev_builder_t *s = (const ev_builder_t *)b;
     if (!s->pool || !s->pool->mem) { LOG("【红】EventInitialize 没有存储"); return 0; }
-    *(ev_t *)e = (ev_t){MAGIC('E', 'V', 'N', 'T'), (volatile uint32_t *)(s->pool->mem + s->off)}; return 1;
+    *(ev_t *)e = (ev_t){MAGIC('E', 'V', 'N', 'T'), (volatile uint32_t *)(s->pool->mem + s->off), s->pool, s->off}; return 1;
 }
 NVN(nvnEventFinalize, void, NVNevent *e) { ((ev_t *)e)->magic = 0; }
 NVN(nvnEventGetValue, uint32_t, const NVNevent *e) { return *((const ev_t *)e)->val; }
@@ -1268,6 +1265,7 @@ static void *rec(NVNcommandBuffer *c, uint32_t op, size_t payload) {
     return p + 8;
 }
 #define REC(c, OP, T) ((T *)rec((c), (OP), sizeof(T)))
+void *nvn_rec(NVNcommandBuffer *c, uint32_t op, size_t payload) { return rec(c, op, payload); }   // FC 26: records for fc26_nvn_ext.c
 // 带数组的绑定记录按实际个数分配：前缀字段 + n 个元素（回放端只读前 n 个）。原先按最大个数定长记（绑顶点缓冲 272 字节、绑贴图 / 采样器 280 字节，
 // 实际常只有 1–2 个），空尾占每帧命令字节的四到五成；88 级法师的高级属性页每帧录 12.5 MB，把游戏自己的命令内存池（约每帧 105 段 × 128 KB）用空
 // Binding records with arrays are allocated by the actual count: prefix fields + n elements (the replay side reads only the first n). Previously they were recorded at fixed length for the maximum count (bind vertex buffers 272 bytes, bind textures / samplers 280 bytes,
