@@ -119,7 +119,8 @@ def small(path, text_sz=0x40000, n_sites=200):
     nwords = text_sz // 4
     words = [NOP] * nwords
     info = seed(words, nwords, n_sites)
-    open(path, 'wb').write(build(words, [8, nwords // 4 * 4, nwords // 2 * 4]))
+    with open(path, 'wb') as f:
+        f.write(build(words, [8, nwords // 4 * 4, nwords // 2 * 4]))
     return info
 
 
@@ -139,5 +140,6 @@ def giant(path, mib=144, every=256):
                 yield struct.unpack_from('<I', words, i * 4)[0]
     view = _W()
     info = seed(view, nwords, nwords // every)
-    open(path, 'wb').write(build(view, [8]))             # one function => the giant-function LazyInsns path
+    with open(path, 'wb') as f:                          # one function => the giant-function LazyInsns path
+        f.write(build(view, [8]))
     return info

@@ -1,14 +1,19 @@
 """Pre-island rewriter tests on synthetic modules (games/fc26/docs/ILHAS_NUVEM.md), no game data.
 
  * golden / before-after: a module that fits uses no island and the whole rewrite output is byte-for-byte the
-   base-branch rewriter's (proves the golden rule and that the change is a no-op when no island is needed).
+   base rewriter's (proves the golden rule and that the change is a no-op when no island is needed). Never skipped:
+   always against the committed golden_small.sha256 (the base rewriter's output hashes), and also against a live run
+   of the base commit when it is in this clone; structck / equiv print the same report as the base's.
  * island: a small routing reach (DM_REACH_BITS) forces a pre-island on the same small module; every site head is a
-   B that lands in a patch area and the block returns to the right text address, both areas are used, and structck /
-   equiv (when llvm-objdump / unicorn are present) pass. structck is also run on the no-island output to prove nothing
-   loosened, and on a corrupted island to prove it still bites.
+   B that lands in a patch area and the block returns to the right text address, both areas are used, the linked-window
+   group's entries are intact, and structck / equiv (when llvm-objdump / unicorn are present) pass; structck still
+   bites on corrupted islands.
 
 The slow > 140 MiB proof is tests/synth_giant.py (run by hand / `make island-giant`), not part of `make test`.
+Regenerate golden_small.sha256 (only when synth_module.small() changes, from the BASE rewriter):
+    python3 tests/test_patch_island.py regen-golden
 """
+import hashlib
 import os
 import random
 import runpy
@@ -28,6 +33,21 @@ import synth_module  # noqa: E402
 
 REWRITE_ENV = {'DM_RULESET': 'native', 'DM_PRIVATE_GATES': '0'}
 PRODUCTS = ['patched.bin', 'fixups.tsv', 'gates.tsv', 'sites.tsv', 'cuts.tsv', 'params.tsv', 'obs.tsv']
+GOLDEN = Path(__file__).resolve().parent / 'golden_small.sha256'
+
+
+def sha256_of(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def read_golden():
+    """{file name: sha256} from golden_small.sha256 (sha256sum format, # comments)."""
+    out = {}
+    for line in GOLDEN.read_text().splitlines():
+        if line and not line.startswith('#'):
+            digest, name = line.split()
+            out[name] = digest
+    return out
 
 
 def run_rewriter(script_dir, nso, out, env_extra=None):
@@ -196,22 +216,26 @@ class GoldenRule(unittest.TestCase):
         self.assertEqual(reports[1], reports[0])
 
     def test_byte_identical_to_base_branch(self):
-        """The real before/after: run the base-branch rewriter (+ its helpers) and diff every product."""
-        old = os.path.join(self.tmp, 'old_d2r'); os.makedirs(old)
-        try:
-            for f in ('patch_nso.py', 'call_window.py', 'relr.py', 'nsoimg.py'):
-                src = subprocess.run(['git', 'show', f'estoria1/ilhas-base:games/fc26/third_party/d2r/{f}'],
-                                     capture_output=True, cwd=HERE, check=True).stdout
-                open(os.path.join(old, f), 'wb').write(src)
-        except subprocess.CalledProcessError:
-            self.skipTest('base branch estoria1/ilhas-base not available for the before/after comparison')
-        new_out, old_out = os.path.join(self.tmp, 'n'), os.path.join(self.tmp, 'o')
-        os.makedirs(new_out); os.makedirs(old_out)
+        """The real before/after, never skipped: every product of a module that fits equals, byte for byte, what the
+        base rewriter (one patch area) writes -- always against the committed hashes of the base's output, and also
+        against a live run of the base commit when this clone has it (CI's shallow checkout does not)."""
+        golden = read_golden()
+        self.assertEqual(set(golden), {'synth.nso'} | {f'synth.{p}' for p in PRODUCTS})
+        self.assertEqual(sha256_of(self.nso), golden['synth.nso'],
+                         'synth_module.small() changed: regenerate golden_small.sha256 from the base rewriter (see the module docstring)')
+        new_out = os.path.join(self.tmp, 'n'); os.makedirs(new_out)
         self.assertEqual(run_rewriter(D2R, self.nso, new_out, {'DM_REACH_BITS': '27'}).returncode, 0)
-        self.assertEqual(run_rewriter(old, self.nso, old_out).returncode, 0)
+        self.assertFalse(os.path.exists(f'{new_out}/synth.pre.bin'))
         for p in PRODUCTS:
-            self.assertEqual(open(f'{new_out}/synth.{p}', 'rb').read(), open(f'{old_out}/synth.{p}', 'rb').read(),
-                             f'{p} differs from the base-branch rewriter for a module with no island')
+            self.assertEqual(sha256_of(f'{new_out}/synth.{p}'), golden[f'synth.{p}'],
+                             f'{p} differs from the base rewriter for a module with no island')
+        old = os.path.join(self.tmp, 'old_d2r')
+        if base_d2r(old):
+            old_out = os.path.join(self.tmp, 'o'); os.makedirs(old_out)
+            self.assertEqual(run_rewriter(old, self.nso, old_out).returncode, 0)
+            for p in PRODUCTS:
+                self.assertEqual(Path(new_out, f'synth.{p}').read_bytes(), Path(old_out, f'synth.{p}').read_bytes(),
+                                 f'{p} differs from a live run of the base rewriter for a module with no island')
 
 
 class PreIsland(unittest.TestCase):
@@ -517,5 +541,29 @@ class EquivRules(unittest.TestCase):
         self.assertLess(peak, 600, f'equiv --jobs 1 peaked at {peak} MiB')
 
 
+def regen_golden():
+    """Write golden_small.sha256 from the BASE rewriter's output for synth_module.small() (never from the new one:
+    the file is what the new rewriter is compared against)."""
+    with tempfile.TemporaryDirectory() as td:
+        old, out, nso = os.path.join(td, 'd2r'), os.path.join(td, 'out'), os.path.join(td, 'synth.nso')
+        if not base_d2r(old):
+            sys.exit(f'base commit {BASE_COMMIT} is not in this clone (git fetch origin estoria1/ilhas-base)')
+        synth_module.small(nso); os.makedirs(out)
+        r = run_rewriter(old, nso, out)
+        if r.returncode:
+            sys.exit(r.stderr)
+        lines = ['# SHA-256 of what the BASE rewriter (commit ' + BASE_COMMIT[:12] + ', branch estoria1/ilhas-base: one patch',
+                 '# area) writes for tests/synth_module.small() at the default reach. The golden rule: the island-aware',
+                 '# rewriter must write these same bytes for a module that fits. Regenerate only when synth_module.small()',
+                 '# changes: python3 tests/test_patch_island.py regen-golden',
+                 f'{sha256_of(nso)}  synth.nso']
+        lines += [f'{sha256_of(os.path.join(out, "synth." + p))}  synth.{p}' for p in PRODUCTS]
+        GOLDEN.write_text('\n'.join(lines) + '\n')
+        print(f'wrote {GOLDEN}')
+
+
 if __name__ == '__main__':
-    unittest.main()
+    if sys.argv[1:] == ['regen-golden']:
+        regen_golden()
+    else:
+        unittest.main()

@@ -1,0 +1,12 @@
+# SHA-256 of what the BASE rewriter (commit cf81fa190393, branch estoria1/ilhas-base: one patch
+# area) writes for tests/synth_module.small() at the default reach. The golden rule: the island-aware
+# rewriter must write these same bytes for a module that fits. Regenerate only when synth_module.small()
+# changes: python3 tests/test_patch_island.py regen-golden
+6161aaf7f7c9b556c971bd917e0e169e6abedc02e61bd4e3af2440fe10b5547d  synth.nso
+d4ab7b81b440bd352899a680301b8d47a5965c0dd3de841659f32110d64dd0b3  synth.patched.bin
+0feeeca673ccf5acb079c8e23f0e2bffc456211cc0c6c637e6cc8735be7679c3  synth.fixups.tsv
+f26631cc496d0dee572601929534b3990ebb5bd437936e5df538f4e45e847a60  synth.gates.tsv
+eca484a3540f38ff7447d881c49434e2c0df07e7c6e34fe41cb7850f026d1bfa  synth.sites.tsv
+c228e225a31811645c2c6bd56cc8c9f4c8b37a5697c3036b44e730204a0fdf92  synth.cuts.tsv
+c228e225a31811645c2c6bd56cc8c9f4c8b37a5697c3036b44e730204a0fdf92  synth.params.tsv
+c228e225a31811645c2c6bd56cc8c9f4c8b37a5697c3036b44e730204a0fdf92  synth.obs.tsv
