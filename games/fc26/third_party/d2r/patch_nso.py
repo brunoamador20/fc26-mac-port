@@ -934,7 +934,7 @@ for wseg in windows:
 for prefix, (call, word) in sorted(calls.items()):
     place(prefix, call + 4)
     st = here()
-    block = prepare_call(word, prefix, call, st, KEY_PAGE_OFF, KEY_INDEX['K18'])
+    block = prepare_call(word, prefix, call, st, KEY_PAGE_OFF, KEY_INDEX['K18'], build_id=BUILD_ID)
     fix.append((len(cur[0]) + 12, 'K18'))
     cur[0].extend(block)
     put_branch(prefix, st)
