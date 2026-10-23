@@ -57,7 +57,14 @@ typedef struct { uint32_t magic, nstage; NVNshaderData sd[6]; uint64_t serial; }
 
 typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;                            FITS(sync_t, NVNsync);
 typedef struct { const pool_t *pool; int64_t off; } ev_builder_t;                             FITS(ev_builder_t, NVNeventBuilder);
-typedef struct { uint32_t magic; volatile uint32_t *val; } ev_t;                              FITS(ev_t, NVNevent);
+// FC 26: pool / off keep the builder's storage for nvnEventGetMemoryOffset (fc26_nvn_ext.c); val = pool memory + off.
+typedef struct { uint32_t magic; volatile uint32_t *val; const pool_t *pool; int64_t off; } ev_t; FITS(ev_t, NVNevent);
+
+// Buffer objects reference their pool; they do not own the backing allocation. (FC 26: moved here from hle_nvn.c so
+// fc26_nvn_ext.c can answer nvnBufferBuilderGetMemoryOffset / GetSize; layout unchanged.)
+typedef struct{NVNdevice *dev;pool_t *pool;int64_t off;uint64_t size;} totk_buffer_builder;
+typedef struct{uint32_t magic;pool_t *pool;int64_t off;uint64_t size;} totk_buffer;
+FITS(totk_buffer_builder,NVNbufferBuilder);FITS(totk_buffer,NVNbuffer);
 
 typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval, active; NVNtexture *tex[4]; } win_builder_t;
 FITS(win_builder_t, NVNwindowBuilder);
