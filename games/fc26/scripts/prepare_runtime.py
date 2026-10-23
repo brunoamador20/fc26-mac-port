@@ -6,8 +6,8 @@ extracted/<version>/romfs/runtime-index.bin (the RomFS index the runtime reads),
 The modules, their order and the version folder come from assets/game.json (scripts/game_config.py). Every input is
 checked against assets/expected-v<version>.json first.
 
-FC 26 1.0.0 has no update: the RomFS is scripts/extract_romfs.py's romfs.bin + index.json, used as they are (Bayonetta
-3's merge_romfs.py wrote the same two files from a sparse base and its update).
+FC 26 1.0.0 has no update: the RomFS is scripts/extract_romfs.py's romfs.bin + index.json, used as they are (the kit's
+earlier fork merged a sparse base and its update into the same two files).
 
 --record: on the first run on the Mac, measure every pin that is still null (ExeFS and rewrite SHA-256, main's build ID,
 the RomFS SHA-256), check it against what is already pinned (sizes, file count, hash prefix) and write it into the
@@ -164,7 +164,7 @@ def probe_plt(main, image):
     """The PLT stub through which main calls nn::os::GetSystemTick (the probe calls it on 4 threads).
 
     The PLT sits at the end of main's text: 16 bytes per JUMP_SLOT after a 32-byte header. The window searched is that
-    size plus slack (at least the 64 KiB the Bayonetta 3 build searched), so a main with many imports is covered."""
+    size plus slack (at least 64 KiB, the earlier fork's fixed window), so a main with many imports is covered."""
     target = '_ZN2nn2os13GetSystemTickEv'
     slots = [r['where'] for r in main['relocs'] if r['kind'] == R_JUMP_SLOT and main['symbols'][r['symbol']]['name'] == target]
     # TODO(mac): if FC 26's main does not import GetSystemTick through its PLT, pick another sdk function main calls.

@@ -1,6 +1,6 @@
 # EA SPORTS FC 26 native runtime (story 2: boot to nnMain). Self-contained: the Horizon host (runtime/), the rewriter
 # (third_party/d2r), the NVN-on-Metal layer (third_party/d2r_gfx), the shader translator (prebuilt/) and the scripts are
-# this folder's own copies, forked from games/by3 (which forked games/totk); nothing here reads another game's folder.
+# this folder's own copies, from the kit's earlier fork of games/totk (CHANGELOG.md); nothing here reads another game's folder.
 # The game's identity and module list are in assets/game.json (scripts/game_config.py). Everything generated goes to the
 # work folder. Inputs come from scripts/extract_exefs.py, scripts/extract_romfs.py and the rewrite (story 1), then:
 #   make prepare   # scripts/prepare_runtime.py: tables, RomFS index, fonts config (PREPARE_FLAGS=--record the first time)
