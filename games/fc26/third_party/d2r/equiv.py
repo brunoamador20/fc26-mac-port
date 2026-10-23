@@ -10,7 +10,7 @@
 # Coverage: a trial where both sides take a memory access fault only compares the fault address and does not count as "effective"; each site needs at least min-eff effective trials, extra draws are made if short (≤max-extra), and sites still short are listed by name.
 # Mutation self-check: draw mutate ordinary rewrite blocks; in half the replaced instruction is changed to nop, in half the target of the trampoline exit b gets +4; all must be judged divergent (a negative control showing the criterion can discriminate).
 # Host gate (svc / cntpct / cntvct) semantics are defined by the host and are not run here, structck.py does the structural check; registered cuts (cuts.tsv) are intentional semantic changes and likewise only have their bytes checked by structck.
-import sys, os, struct, random, argparse, multiprocessing as mp
+import sys, os, gc, struct, random, argparse, multiprocessing as mp
 from unicorn import *
 from unicorn.arm64_const import *
 from capstone import *
@@ -264,11 +264,22 @@ def work(job):
         out.append((a, n, eff, diffs))
     return out
 
+def work_freed(job):
+    """work() 之后立刻回收：每块的两台模拟器（各映射整份映像）在 unicorn 绑定里成环，只靠引用计数不会释放，
+    不收就一块块累积（合成模块上峰值 1.28 GB → 0.1 GB）。只回收内存，结果不变。
+    | work(), then collect at once: a job's two emulators (each mapping the whole image) form reference cycles inside
+    the unicorn binding that reference counting never frees, so they pile up job after job (peak on the synthetic
+    module 1.28 GB -> 0.1 GB). Only memory changes, not the result."""
+    out = work(job); gc.collect()
+    return out
+
 def runall(lst, mutated):
     k = 64                                   # 切块数固定，结果只随 seed 变、不随 jobs 变 | Chunk count is fixed, so the result varies only with seed, not with jobs
     jobs = [(i, lst[i::k], mutated) for i in range(k) if lst[i::k]]
+    if A.jobs == 1:   # 单进程直接跑，不建进程池（工作进程是又一个带整份映像的进程）| one process: run in place, no pool (a worker is one more process carrying the whole images)
+        return [r for job in jobs for r in work_freed(job)]
     with mp.get_context('fork').Pool(A.jobs) as p:
-        return [r for part in p.imap_unordered(work, jobs) for r in part]
+        return [r for part in p.imap_unordered(work_freed, jobs) for r in part]
 
 def ins_of(a): return next(md.disasm(orig[a:a + 4], a))
 if __name__ == '__main__':

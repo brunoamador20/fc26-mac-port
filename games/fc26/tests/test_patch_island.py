@@ -424,6 +424,24 @@ class EquivRules(unittest.TestCase):
         self.assertIn('EQUIV synth OK', reports[1][-1])
         self.assertEqual(reports[1], reports[0])
 
+    def test_jobs_1_runs_without_a_process_pool(self):
+        """--jobs 1 runs every job in this one process (a multiprocessing Pool is forbidden) and frees each job's
+        emulators before the next: the whole run on the island output stays far under the 1.28 GB it reached when
+        they piled up (2.69 GB on main, where every emulator maps the whole image)."""
+        code = ('import multiprocessing.pool, resource, runpy, sys\n'
+                'def no_pool(*a, **k): raise SystemExit("equiv --jobs 1 created a multiprocessing Pool")\n'
+                'multiprocessing.pool.Pool.__init__ = no_pool\n'
+                f'sys.argv = ["equiv.py", {self.isl!r}, "synth", {self.nso!r}, "--jobs", "1", "--mutate", "6"]\n'
+                'try:\n'
+                f'    runpy.run_path({str(D2R / "equiv.py")!r}, run_name="__main__")\n'
+                'finally:\n'
+                '    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss\n'
+                '    print("PEAK_MIB", peak // (1 << 20) if sys.platform == "darwin" else peak // 1024)\n')
+        r = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, cwd=str(D2R))
+        self.assertIn('EQUIV synth OK', r.stdout, r.stdout[-2000:] + r.stderr[-2000:])
+        peak = int(r.stdout.split('PEAK_MIB')[1].split()[0])
+        self.assertLess(peak, 600, f'equiv --jobs 1 peaked at {peak} MiB')
+
 
 if __name__ == '__main__':
     unittest.main()
