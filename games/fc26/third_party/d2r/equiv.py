@@ -36,6 +36,10 @@ KEY_SLOT = {k: 300 + i for i, k in enumerate(sorted(KEY_IDX, key=KEY_IDX.get))}
 SLOT18, SLOTTLS, SLOTTLR = (KEY_SLOT[k] for k in ('K18', 'KTLS', 'KTLR'))
 KEY_PAGE_OFF = hdr['KEY_PAGE_OFF']
 pat = bytearray(open(f'{DIR}/{MOD}.patched.bin', 'rb').read())
+# 前导岛（.pre.bin，仅在用到时存在）：映射在模块基址 IB 之前，偏移为负。补丁区读统一经 PWO / pslice / in_patch。
+# Pre-island (.pre.bin, present only when used): mapped before the module base IB, negative offsets. Patch reads go through PWO / pslice / in_patch.
+PRE_BASE = hdr.get('PRE_PATCH_OFF', 0); PRE_SIZE = hdr.get('PRE_PATCH_SIZE', 0)
+pre = bytearray(open(f'{DIR}/{MOD}.pre.bin', 'rb').read()) if PRE_SIZE else bytearray()
 orig = nsoimg.load(A.nso)
 ncut = sum(1 for l in open(f'{DIR}/{MOD}.cuts.tsv') if not l.startswith('#'))
 nobs = sum(1 for l in open(f'{DIR}/{MOD}.obs.tsv') if not l.startswith('#')) if os.path.exists(f'{DIR}/{MOD}.obs.tsv') else 0
@@ -60,7 +64,11 @@ def deexcl(b):
             nx = struct.unpack_from('<I', b, o + 4)[0]
             if nx & 0x7E000000 == 0x34000000 and nx & 31 == rs: struct.pack_into('<I', b, o + 4, 0xD503201F)
     return bytes(b), n
-orig, _ = deexcl(orig); pat, _ = deexcl(pat)
+orig, _ = deexcl(orig); pat, _ = deexcl(pat); pre, _ = deexcl(pre)   # 前导岛里也可能有被搬进块的独占指令 | the pre-island may hold exclusives copied into a block
+def _pbuf(off): return (pre, off - PRE_BASE) if off < 0 else (pat, off)   # 模块偏移 → (缓冲区, 下标)；偏移为负即前导岛 | module offset -> (buffer, index); negative = pre-island
+def PWO(off): b, i = _pbuf(off); return struct.unpack_from('<I', b, i)[0]
+def pslice(off, n): b, i = _pbuf(off); return bytes(b[i:i + n])
+def in_patch(off): return bool(PRE_SIZE) and PRE_BASE <= off < 0 or off >= PATCH_OFF
 
 md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
 md.detail = True
@@ -79,46 +87,50 @@ def btarget(b, o):
     if imm & 0x2000000: imm -= 0x4000000
     return o + 4 * imm
 def plain_block(a):
-    """普通改写块（stp; 键页间接读槽; 替换指令; 键页间接写槽; ...）→ 替换指令偏移。 | Ordinary rewrite block (stp; indirect slot read via key page; replaced instruction; indirect slot write via key page; ...) → offset of the replaced instruction."""
-    s = btarget(pat, a); w0 = struct.unpack_from('<I', pat, s)[0]
+    """普通改写块（stp; 键页间接读槽; 替换指令; 键页间接写槽; ...）→ 替换指令的模块偏移（可能在前导岛，为负）。 | Ordinary rewrite block (stp; indirect slot read via key page; replaced instruction; indirect slot write via key page; ...) → module offset of the replaced instruction (may be in the pre-island, i.e. negative)."""
+    s = btarget(pat, a); w0 = PWO(s)
     if w0 & 0xFFC003E0 != 0xA90003E0: return None          # stp xS, xT, [sp, #off]
-    ins = list(md.disasm(bytes(pat[s:s + 36]), s))
+    ins = list(md.disasm(pslice(s, 36), s & ((1 << 64) - 1)))   # 以无符号地址反汇编（前导岛偏移为负）| disassemble at the unsigned address (pre-island offsets are negative)
     if len(ins) < 8 or ins[1].mnemonic != 'mrs' or 'tpidrro_el0' not in ins[1].op_str:
         return None
-    if ins[2].mnemonic != 'adrp' or ins[2].operands[1].imm != KEY_PAGE_OFF: return None
+    if ins[2].mnemonic != 'adrp': return None              # 键页目标不在这里按位置核（structck 管），只认序列形态 | the key-page target is checked by structck, here only the sequence shape matters
     if ins[3].mnemonic != 'ldr' or ins[3].operands[1].mem.base != ins[2].operands[0].reg: return None
     T = ins[1].operands[0].reg
     if ins[4].mnemonic != 'add' or ins[4].operands[0].reg != T or ins[4].operands[1].reg != T: return None
     if ins[5].mnemonic != 'ldr' or ins[5].operands[1].mem.base != T: return None              # ldr xS,[xT]：读槽 | ldr xS,[xT]: read the slot
     if ins[7].mnemonic != 'str' or ins[7].operands[1].mem.base != T: return None              # str xS,[xT]：写回槽——只有普通块有，条件块没有（与旧版口径相同） | str xS,[xT]: write back to the slot - only ordinary blocks have it, conditional blocks do not (same convention as the old version)
-    return ins[6].address
+    return s + 24                                           # 替换指令（ins[6]）的模块偏移 | module offset of the replaced instruction (ins[6])
 mut_sites = []
 if A.mutate:
     cand = [a for a in sites if a not in winend and a not in brinfo and plain_block(a)]
     mut_sites = sorted(random.Random(A.seed).sample(cand, min(A.mutate, len(cand))))
-    pat_mut = bytearray(pat)
+    pat_mut = bytearray(pat); pre_mut = bytearray(pre)
+    def mut_w(off, word):   # 按模块偏移写变异字（偏移为负 → 前导岛）| write a mutated word by module offset (negative -> pre-island)
+        b, i = (pre_mut, off - PRE_BASE) if off < 0 else (pat_mut, off); struct.pack_into('<I', b, i, word)
     def exit_b(a):   # 改写块回 text 的那条 b（块内第一条目标落回 text 的无条件 b） | The b by which a rewrite block returns to text (the first unconditional b in the block whose target lands back in text)
-        w = struct.unpack_from('<I', pat, a)[0]; o = a + 4 * (((w & 0x3FFFFFF) ^ 0x2000000) - 0x2000000)
+        w = PWO(a); o = a + 4 * (((w & 0x3FFFFFF) ^ 0x2000000) - 0x2000000)
         for k in range(o, o + 4 * 24, 4):
-            w = struct.unpack_from('<I', pat, k)[0]
-            if w & 0xFC000000 == 0x14000000 and k + 4 * (((w & 0x3FFFFFF) ^ 0x2000000) - 0x2000000) < PATCH_OFF: return k, w
+            w = PWO(k)
+            if w & 0xFC000000 == 0x14000000 and not in_patch(k + 4 * (((w & 0x3FFFFFF) ^ 0x2000000) - 0x2000000)): return k, w
         return None
     # 两类变异各一半：偶数位 = 替换后的那条指令改 nop；奇数位 = 跳板出口 b 的目标 +4（参数门跳板回跳越界那一类：越过一条原指令）
     # Two kinds of mutation, half each: even index = the replaced instruction is changed to nop; odd index = target of the trampoline exit b +4 (the class where a parameter-gate trampoline jumps back out of bounds: skips one original instruction)
     mut_kind = {}
     for i, a in enumerate(mut_sites):
         eb = exit_b(a) if i % 2 else None
-        if eb: k, w = eb; struct.pack_into('<I', pat_mut, k, (w & 0xFC000000) | ((w + 1) & 0x3FFFFFF)); mut_kind[a] = 'exit+4'
-        else: struct.pack_into('<I', pat_mut, plain_block(a), 0xD503201F); mut_kind[a] = 'nop'
-    pat_mut = bytes(pat_mut)
+        if eb: k, w = eb; mut_w(k, (w & 0xFC000000) | ((w + 1) & 0x3FFFFFF)); mut_kind[a] = 'exit+4'
+        else: mut_w(plain_block(a), 0xD503201F); mut_kind[a] = 'nop'
+    pat_mut = bytes(pat_mut); pre_mut = bytes(pre_mut)
 
 GP = [getattr(sys.modules['unicorn.arm64_const'], f'UC_ARM64_REG_X{i}') for i in range(29)] + [UC_ARM64_REG_X29, UC_ARM64_REG_X30]
 VR = [getattr(sys.modules['unicorn.arm64_const'], f'UC_ARM64_REG_Q{i}') for i in range(32)]
 
-def mk(image, arena0):
+def mk(image, arena0, pre_img=b''):
     u = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
     sz = (len(image) + 0xFFFF) & ~0xFFFF
     u.mem_map(IB, sz, UC_PROT_ALL); u.mem_write(IB, bytes(image))
+    if pre_img:   # 前导岛映射在基址之前（IB+PRE_BASE，PRE_BASE 为负、页对齐）| the pre-island maps before the base (IB+PRE_BASE, PRE_BASE negative and page-aligned)
+        u.mem_map(IB + PRE_BASE, len(pre_img), UC_PROT_ALL); u.mem_write(IB + PRE_BASE, bytes(pre_img))
     u.mem_map(ARENA, ARENA_SZ); u.mem_write(ARENA, arena0)
     u.mem_map(TSD, 0x10000)
     u.reg_write(UC_ARM64_REG_TPIDRRO_EL0, TSD)
@@ -171,7 +183,7 @@ def run(u, st, start, patched, init):
     if patched:
         seen = {'patch': False}
         def hk(uc, addr, size, d):
-            if addr >= IB + PATCH_OFF: seen['patch'] = True
+            if addr >= IB + PATCH_OFF or addr < IB: seen['patch'] = True   # addr < IB = 落在前导岛（映射在基址之前）| addr < IB = landed in the pre-island (mapped before the base)
             elif seen['patch']:
                 if start - IB in callinfo and start <= addr < IB + winend[start - IB]:
                     return
@@ -223,7 +235,7 @@ def work(job):
     idx, chunk, mutated = job
     rng = random.Random(A.seed * 1000003 + idx * 2 + mutated)
     arena0 = rng.randbytes(ARENA_SZ)
-    UO, SO = mk(orig, arena0); UP, SP = mk(pat_mut if mutated else pat, arena0)
+    UO, SO = mk(orig, arena0); UP, SP = mk(pat_mut if mutated else pat, arena0, pre_mut if mutated else pre)
     out = []
     for a in chunk:
         n = eff = 0; diffs = []
