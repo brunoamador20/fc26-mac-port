@@ -117,9 +117,15 @@ boot: runtime
 boot-nnmain:
 	$(MAKE) boot BOOT_ENV="$(BOOT_ENV) TOTK_VERIFY_STARTUP=nnmain"
 
-# This folder's synthetic tests (no game data): config, RomFS index, unknown service / command messages.
+# This folder's synthetic tests (no game data): config, RomFS index, unknown service / command messages, pre-island.
 test:
 	"$(PY)" -m unittest discover -s tests -v
+
+# The slow pre-island proof (docs/ILHAS_NUVEM.md): build a > 140 MiB synthetic NSO, rewrite it at the real ±128 MiB
+# reach so a pre-island is forced, and prove every branch is in range and round-trips (+ structck). Not in `make test`.
+.PHONY: island-giant
+island-giant:
+	"$(PY)" tests/synth_giant.py --mib 144 --every 256 --structck
 
 # exefs patches (mods/<display version>/<name>/exefs/*.pchtxt) -> <work>/patches, applied when FC26_PATCHES names them.
 # FC 26 has none yet: the mechanism is kept, the table is empty.
