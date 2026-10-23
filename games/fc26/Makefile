@@ -119,7 +119,7 @@ boot: runtime
 boot-nnmain:
 	$(MAKE) boot BOOT_ENV="$(BOOT_ENV) TOTK_VERIFY_STARTUP=nnmain"
 
-# This folder's synthetic tests (no game data): config, RomFS index, unknown service / command messages.
+# This folder's synthetic tests (no game data): config, RomFS index, unknown service / command messages, shader cache.
 test:
 	"$(PY)" -m unittest discover -s tests -v
 
@@ -132,6 +132,20 @@ offline-config:
 	"$(PY)" scripts/make_offline_config.py --work "$(WORK)" --romfs "$(ROMFS_DIR)" --output "$(ROMFS_PATCHES_DIR)"
 
 romfs-patches: offline-config
+
+# The shader cache (docs/SHADERS_NUVEM.md): what each run compiled during play (RUNS: the runs' logs, first run first;
+# FRAMES: their DM_NVN_TSV tables, optional) and whether the shader keys repeat between starts (DUMPS: two or more
+# TOTK_CTL_DUMP files).
+RUNS ?=
+FRAMES ?=
+DUMPS ?=
+.PHONY: shader-report shader-keys
+shader-report:
+	@test -n "$(RUNS)" || { echo 'RUNS="<log of run 1> <log of run 2>" (docs/SHADERS_NUVEM.md)'; exit 2; }
+	"$(PY)" scripts/shader_cache_report.py $(RUNS) $(if $(FRAMES),--frames $(FRAMES))
+shader-keys:
+	@test -n "$(DUMPS)" || { echo 'DUMPS="<TOTK_CTL_DUMP of start 1> <of start 2>" (docs/SHADERS_NUVEM.md)'; exit 2; }
+	"$(PY)" scripts/shader_key_check.py $(DUMPS)
 
 # exefs patches (mods/<display version>/<name>/exefs/*.pchtxt) -> <work>/patches, applied when FC26_PATCHES names them.
 # FC 26 has none yet: the mechanism is kept, the table is empty.

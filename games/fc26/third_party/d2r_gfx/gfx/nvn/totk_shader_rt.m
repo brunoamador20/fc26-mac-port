@@ -24,6 +24,10 @@
 #include "totk_shader_contrib.h"
 extern void runtime_boot_status(const char *,const char *) __attribute__((weak_import));
 extern void runtime_boot_count(const char *,uint64_t,uint64_t) __attribute__((weak_import));
+// FC 26 (runtime/shader_cache_mac.m, docs/SHADERS_NUVEM.md): identity, journal and size limit around this cache.
+extern void fc26_shader_cache_open(NSString *dir, const char *chain) __attribute__((weak_import));
+extern void fc26_shader_cache_used(NSString *shader) __attribute__((weak_import));
+extern void fc26_shader_cache_saved(NSString *shader, int stage, const uint8_t *control, const uint8_t *code, NSDictionary *request) __attribute__((weak_import));
 static void seed_progress(int pass, NSUInteger done, NSUInteger total) {   // the bar under "Checking the shader cache"
     if (runtime_boot_count) runtime_boot_count(pass ? TOTK_UI("导入随 App 准备的着色器","Importing the app's shaders")
                                                     : TOTK_UI("校验随 App 准备的着色器","Verifying the app's shaders"), done, total);
@@ -59,6 +63,7 @@ NSString *totk_rt_dir(void) {
 #else
         g_dir = e ? @(e) : [root_dir() stringByAppendingFormat:@"/build/shader-cache/rt-%s", DMSH_CHAIN];
 #endif
+        if (fc26_shader_cache_open) fc26_shader_cache_open(g_dir, DMSH_CHAIN);   // FC 26: before anything reads the folder
         [NSFileManager.defaultManager createDirectoryAtPath:g_dir withIntermediateDirectories:YES attributes:nil error:nil];
         const char *seedMode = getenv("TOTK_SHADER_SEED");
         if (!(seedMode && !strcmp(seedMode, "off"))) {
@@ -195,6 +200,7 @@ NSString *totk_rt_variant(NSString *shader, int stage, const uint8_t *control, c
             break;
         }
         [g_msl_checked addObject:found];
+        if (fc26_shader_cache_used) fc26_shader_cache_used(shader);   // FC 26: last use, for the size limit
         pthread_mutex_unlock(&g_rt_lock);
         return found;
     }
@@ -249,6 +255,7 @@ NSString *totk_rt_variant(NSString *shader, int stage, const uint8_t *control, c
     [vs addObject:@{@"variant": variant, @"deps": refl[@"deps"] ?: @{}}];
     [g_msl_checked addObject:variant];
     [[json_string(vs) dataUsingEncoding:NSUTF8StringEncoding] writeToFile:index_path(shader) atomically:YES];
+    if (fc26_shader_cache_saved) fc26_shader_cache_saved(shader, stage, control, code, rq);   // FC 26: the journal keeps what the game handed NVN
     g_translated++;
     if (!existed) { atomic_fetch_add(&g_new_variants, 1); atomic_store(&g_new_variant_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW)); }   // discovered, translated, in the cache
     if (!existed) totk_contrib_add(shader, refl[@"deps"] ?: @{});   // the seed would have had it if the shared list named it

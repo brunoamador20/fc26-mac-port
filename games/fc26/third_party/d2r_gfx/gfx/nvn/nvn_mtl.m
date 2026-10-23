@@ -78,6 +78,10 @@ int mtl_warm_wait(int timeout_ms);
 extern void runtime_warm_progress(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t) __attribute__((weak_import));
 extern void runtime_warm_done(void) __attribute__((weak_import));
 extern void runtime_boot_status(const char *,const char *) __attribute__((weak_import));
+// FC 26 (runtime/shader_cache_mac.m, docs/SHADERS_NUVEM.md): translate the journaled shaders a new translator lacks, and
+// let the first shader use wait for the whole warm-up (warm_start).
+extern void fc26_shader_prefill(NSString *dir) __attribute__((weak_import));
+extern void fc26_shader_warm_gate(void) __attribute__((weak_import));
 
 static id<MTLDevice> g_dev;
 static NSMutableArray *g_l3_gpu_leaks;
@@ -6736,6 +6740,7 @@ static void warm_light(void) {
 }
 static void warm_start(void) {
     if (g_warm_started++) return;
+    if (fc26_shader_prefill) fc26_shader_prefill(totk_rt_dir());   // FC 26: before the plan below lists the cache
     warm_filled();
     const char *e = getenv("DM_PSO_MANIFEST");
     if (e && !strcmp(e, "off")) { warm_light(); return; }
@@ -6787,6 +6792,7 @@ static void warm_start(void) {
     // the menu, then mtl_warm_wait at save-load waits before entering play.
     uint64_t wait_start = bp_now();
     while (!atomic_load(&g_warm_priority_done)) usleep(2000);
+    if (fc26_shader_warm_gate) fc26_shader_warm_gate();   // FC 26: FC26_SHADER_WARM=all waits for the rest too
     int ms = (int)((bp_now() - wait_start) / 1000000ull) + 1;
     warm_claim();
     MLOG("启动关键管线已就绪：等待 %d ms，可用着色器 %lu / 渲染管线 %llu / 计算管线 %llu；其余后台继续预热",
