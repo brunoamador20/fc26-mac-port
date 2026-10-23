@@ -103,11 +103,13 @@ troca de tradutor:
 - `<chave>.shader`: cabeçalho `FC26SHD1` + estágio + a seção de controle (0x880 bytes) + o código, exatamente o que o
   kit lê. Ao ler, os bytes são conferidos contra a chave.
 - `<chave>.rows`: uma linha por variante traduzida: nome da variante, modo de profundidade e o estado ligado em JSON.
+  Regravado inteiro a cada variante nova (nome temporário + troca); uma última linha sem fim de linha (queda no meio da
+  escrita) é ignorada.
 
 É dado do jogo: fica na pasta de trabalho e nunca no git (`.gitignore` cobre `shader-cache/` e `fc26-journal/` se alguém
 apontar para dentro do repositório).
 
-Custo: na 1ª vez de cada shader, uma escrita a mais (`.shader`, sem `fsync`) e uma linha anexada (`.rows`), na thread de
+Custo: na 1ª vez de cada shader, uma escrita a mais (`.shader`, sem `fsync`) e a regravação do `.rows` (pequeno), na thread de
 envio, ao lado da tradução que já está acontecendo ali. O TOTK mediu escritas atômicas do kit nessa thread custando
 10–30 ms e as tirou de lá; aqui é para medir: se a 1ª rodada mostrar isso no relatório, a escrita do diário vai para uma
 fila em segundo plano.
@@ -133,7 +135,9 @@ Na 1ª vez que o kit abre a pasta (`totk_rt_dir`), a camada:
   novo, cache limpo pelo limite de outra máquina, diário copiado) são traduzidas pelo **próprio caminho do kit**
   (`totk_rt_variant`), com a barra "Translating the saved shaders". Antes de cada uma fica um marcador
   `<variante>.prefill`; se essa tradução derrubar o jogo, a próxima abertura pula a variante (ela só será traduzida, ou
-  derrubará o jogo, se o jogo usá-la), em vez de não abrir nunca mais.
+  derrubará o jogo, se o jogo usá-la), em vez de não abrir nunca mais. Se uma variante que já existe serve ao mesmo
+  estado ligado, a pedida ganha um link (ou cópia) dos `_b.metal`/`_b.json` da que serviu, para não voltar à fila a
+  cada abertura (custa uma compilação a mais no pré-aquecimento, que o cache do macOS resolve por ser a mesma fonte).
 - **Espera**: com `FC26_SHADER_WARM=all` (padrão), o 1º uso de shader espera o pré-aquecimento **inteiro** (todo shader
   do cache e toda pipeline das listas), no máximo `FC26_SHADER_WARM_TIMEOUT_S` (300 s). Motivo: ainda não se sabe como
   reconhecer o começo da partida no FC 26 (a heurística do kit é do TOTK); esperar antes do 1º desenho é o único ponto
@@ -174,7 +178,7 @@ Na 1ª vez que o kit abre a pasta (`totk_rt_dir`), a camada:
 | `third_party/d2r_gfx/gfx/nvn/nvn_mtl.m` | **2 ganchos** em `warm_start` (`:6741` prefill, `:6793` espera) + declarações (`:82-83`) |
 | `scripts/shader_cache_report.py` | **novo**: relatório por rodada e ganho 1ª → 2ª (`make shader-report`) |
 | `scripts/shader_key_check.py` | **novo**: a chave se repete entre aberturas? (`make shader-keys`) |
-| `tests/test_shader_cache.py` + `tests/shader_cache_check.c`, `tests/test_shader_tools.py` | **novos**: 22 + 8 testes sintéticos |
+| `tests/test_shader_cache.py` + `tests/shader_cache_check.c`, `tests/test_shader_tools.py` | **novos**: 25 + 8 testes sintéticos |
 | `Makefile`, `.gitignore`, `tests/test_runtime_syntax.py` | alvos `shader-report`/`shader-keys`; pastas de cache ignoradas; `shader_cache.c` na lista de fontes portáveis |
 
 Os ganchos são `weak_import`, o mesmo jeito que a camada gráfica já chama `runtime_boot_status`: sem o runtime do FC 26
@@ -186,8 +190,8 @@ ligado, a camada gráfica se comporta exatamente como antes.
 
 | Checagem | Resultado |
 |---|---|
-| `make test` (Linux, Python 3.13): 22 testes da lógica C + 8 das ferramentas + os 30 que a base já tinha | OK (60) |
-| Os 22 testes da lógica C com o arnês compilado com ASan + UBSan + LSan (gcc) | OK, sem erro de memória nem vazamento na biblioteca |
+| `make test` (Linux, Python 3.13): 25 testes da lógica C + 8 das ferramentas + os 31 que a base já tinha | OK (64) |
+| Os 25 testes da lógica C com o arnês compilado com ASan + UBSan + LSan (gcc) | OK, sem erro de memória nem vazamento na biblioteca |
 | `runtime/shader_cache.c` com clang 18 e gcc, `-std=c11 -Wall -Wextra -Werror` | OK |
 | `runtime/shader_cache_mac.m` contra cabeçalhos Foundation de mentira (só sintaxe e tipos) | OK |
 | **CI no macOS do GitHub** (run 39891061410, commit `5155e41`) | **OK**: o passo de testes (`make test`, que no macOS também roda os testes do cache e passa `xcrun clang -Werror` em todo `.c`/`.m` do runtime) passou; `make runtime` compilou e linkou o `fc26-native` com `shader_cache.c`, `shader_cache_mac.m` (`-Werror`) e os ganchos (conferido no log do job); o binário inicia |
