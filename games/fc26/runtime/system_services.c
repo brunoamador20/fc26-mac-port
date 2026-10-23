@@ -59,8 +59,13 @@ static void settings_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *r
 
 /* ---------- bsd:u: nn::socket, offline ---------- */
 /* The game is played offline, as a Switch without a connection: the client registers and its monitor starts, but every
-   socket it asks for fails with ENETDOWN. Commands return {s32 ret, u32 errno} (switchbrew "Sockets services"). */
-enum { BSD_ENETDOWN = 50 };
+   socket it asks for fails with ENETDOWN. No descriptor ever exists, so every command on one fails at once with EBADF:
+   a connect to an EA server or a recv never waits. Commands return {s32 ret, u32 errno}, those that also hand back a
+   length (RecvFrom, Accept, GetPeerName, GetSockName, GetSockOpt) a u32 0 after them (switchbrew "Sockets services" for
+   the numbers, libnx bsd.c for the layouts). In FC 26 they are reached only after nn::socket::Initialize, which DirtySDK
+   calls only when nifm says the network is available (main+0x1aa7054) or a local wireless session is active
+   (SocketControl 'conn', main+0x1aa6830); the sdk aborts on a socket call made before it. */
+enum { BSD_EBADF = 9, BSD_ENETDOWN = 50 };
 static void bsd_result(IpcResponse *rs, int32_t ret, uint32_t err) { IPC_OUT(rs, ret); IPC_OUT(rs, err); }
 static void bsd_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
     switch (rq->cmd) {
@@ -73,7 +78,18 @@ static void bsd_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
         bsd_result(rs, 0, 0); return;
     case 7:                                                                       /* Sysctl (offline: refused) */
         bsd_result(rs, -1, BSD_ENETDOWN); return;
-    case 24:                                                                      /* Close */
+    case 14:                                                                      /* Connect(fd, addr) */
+        fprintf(stderr, "[totk-net] connect(%d) refused: no socket exists offline\n", IPC_ARG(rq, int32_t, 0));
+        bsd_result(rs, -1, BSD_EBADF); return;
+    case 9: case 12: case 15: case 16: case 17: {                                 /* RecvFrom, Accept, GetPeerName, GetSockName,
+                                                                                     GetSockOpt: + length 0 */
+        uint32_t length = 0; bsd_result(rs, -1, BSD_EBADF); IPC_OUT(rs, length); return;
+    }
+    case 8: case 10: case 11: case 13: case 18: case 19: case 20: case 21: case 22: /* Recv, Send, SendTo, Bind, Listen, Ioctl,
+                                                                                     Fcntl, SetSockOpt, Shutdown */
+    case 24: case 25: case 26: case 27:                                           /* Write, Read, Close, DuplicateSocket */
+        bsd_result(rs, -1, BSD_EBADF); return;
+    case 23:                                                                      /* ShutdownAllSockets: there are none */
         bsd_result(rs, 0, 0); return;
     default: ipc_unimplemented(s, rq);
     }
@@ -209,6 +225,31 @@ static void nifm_request(void) { static int once; if (!once++) fprintf(stderr, "
 static uint32_t nifm_submit(void) { nifm_request(); return 0; }
 static uint8_t nifm_request_on_hold(void) { return 0; }
 static uint32_t nifm_primary_ip(void *out) { if (out) memset(out, 0, 4); return NIFM_UNAVAILABLE; }
+/* bool HandleNetworkRequestErrorResult(): SDK 19 returns a bool (sdk+0x3f0570 ends "and w0, w0, #1"): true when the
+   request's error was handled and the caller may submit again. Offline nothing can fix the connection: false, so
+   DirtySDK's network status stops at "-dsc" instead of submitting again (main+0x1aa7188). */
+static uint8_t nifm_no_retry(void) { return 0; }
+/* nn::socket::GetAddrInfo(node, service, hints, &res): no name resolves offline. EAI_AGAIN (2, the FreeBSD value
+   nn::socket uses), *res = NULL, at once; FreeAddrInfo then only ever sees NULL. */
+enum { EAI_AGAIN_NN = 2 };
+static int32_t socket_get_addr_info(const char *node, const char *service, const void *hints, void **res) {
+    (void)service; (void)hints;
+    static int once;
+    if (!once++) fprintf(stderr, "[totk-net] getaddrinfo(%s) refused: offline\n", node ? node : "(null)");
+    if (res) *res = NULL;
+    return EAI_AGAIN_NN;
+}
+static void socket_free_addr_info(void *list) { if (list) runtime_fail("nn::socket::FreeAddrInfo of a list the host never made"); }
+/* nn::friends offline: the friend:u service is not served; the functions FC 26 imports that would reach it answer by
+   name as a console without a network account: empty friend and blocked-user lists (the local cache of a user who never
+   went online), no notification, presence accepted and dropped, and every request that needs the server failing at
+   once (generic friends result, module 121) before any AsyncContext is started, so the game never waits on one.
+   Friend, Profile, AsyncContext, NotificationQueue and UserPresence constructors and destructors, and the accessors
+   (IsValid, GetNickname, ...), stay native: they only fill or read the game's own objects (sdk+0x3a3b78, 0x3a3e10,
+   0x3a3f40: zeroing, a mutex; the destructors act only on a session they hold, which offline is never made). */
+#define FRIENDS_UNAVAILABLE RESULT(121, 300)
+static uint32_t friends_empty_list(int32_t *count) { if (!count) runtime_fail("nn::friends list count pointer"); *count = 0; return 0; }
+static uint32_t friends_unavailable(void) { return FRIENDS_UNAVAILABLE; }
 static int64_t network_clock_now(void) { return (int64_t)time(NULL); }   /* time_point: seconds since the epoch */
 static void environment_identifier(char *out) { if (!out) runtime_fail("nsd environment output"); memset(out, 0, 8); memcpy(out, "lp1", 3); }
 static void execute_program(int index, const void *param, uint64_t size) {
@@ -233,9 +274,9 @@ void *runtime_game_override(const char *name) {
         {"_ZN2nn4nifm20SubmitNetworkRequestEv", nifm_submit},
         {"_ZN2nn4nifm22IsNetworkRequestOnHoldEv", nifm_request_on_hold},
         {"_ZN2nn4nifm27SubmitNetworkRequestAndWaitEv", nifm_request}, {"_ZN2nn4nifm20CancelNetworkRequestEv", nop},
-        {"_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", nifm_unavailable},
+        {"_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", nifm_no_retry},
         {"_ZN2nn4nifm22GetCurrentProxySettingEPNS0_12ProxySettingE", nifm_unavailable},
-        {"_ZN2nn4nifm26GetCurrentPrimaryIpAddressEPNS_6socket6InAddrE", nifm_unavailable},
+        {"_ZN2nn4nifm26GetCurrentPrimaryIpAddressEPNS_6socket6InAddrE", nifm_primary_ip},
         {"_ZN2nn4nifm26GetCurrentPrimaryIpAddressEP7in_addr", nifm_primary_ip},
         {"_ZN2nn3ssl10InitializeEv", ok}, {"_ZN2nn3ssl8FinalizeEv", ok},
         {"_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS0_26BuiltInCertificateInfoBaseEPhjPNS0_15CaCertificateIdEj", ssl_unavailable},
@@ -245,6 +286,23 @@ void *runtime_game_override(const char *name) {
         {"_ZN2nn7account37LoadNetworkServiceAccountIdTokenCacheEPmPcmRKNS0_10UserHandleE", nsa_unavailable},
         {"_ZN2nn7account44EnsureNetworkServiceAccountIdTokenCacheAsyncEPNS0_12AsyncContextERKNS0_10UserHandleE", nsa_unavailable},
         {"_ZN2nn7friends12UserPresence10InitializeERKNS_7account3UidE", ok},
+        {"_ZN2nn7friends12UserPresence10InitializeEv", ok}, {"_ZN2nn7friends12UserPresence14SetDescriptionEPKc", ok},
+        {"_ZN2nn7friends12UserPresence6CommitEv", ok},
+        {"_ZN2nn7friends10InitializeEv", nop},
+        {"_ZN2nn7friends13GetFriendListEPiPNS0_6FriendERKNS_7account3UidEiiRKNS0_12FriendFilterE", friends_empty_list},
+        {"_ZN2nn7friends13GetFriendListEPiPNS_7account23NetworkServiceAccountIdERKNS2_3UidEiiRKNS0_12FriendFilterE", friends_empty_list},
+        {"_ZN2nn7friends18GetBlockedUserListEPiPNS_7account23NetworkServiceAccountIdERKNS2_3UidEii", friends_empty_list},
+        {"_ZN2nn7friends25EnsureFriendListAvailableEPNS0_12AsyncContextERKNS_7account3UidE", friends_unavailable},
+        {"_ZN2nn7friends30EnsureBlockedUserListAvailableEPNS0_12AsyncContextERKNS_7account3UidE", friends_unavailable},
+        {"_ZN2nn7friends14GetProfileListEPNS0_12AsyncContextEPNS0_7ProfileERKNS_7account3UidEPKNS5_23NetworkServiceAccountIdEi", friends_unavailable},
+        /* Friend objects the game builds right before (Friend::Friend zeroes them) stay invalid: nobody is in the cache. */
+        {"_ZN2nn7friends16UpdateFriendInfoEPNS0_6FriendERKNS_7account3UidEPKNS3_23NetworkServiceAccountIdEi", ok},
+        {"_ZN2nn7friends17NotificationQueue10InitializeERKNS_7account3UidE", ok},
+        {"_ZN2nn7friends17NotificationQueue3PopEPNS0_16NotificationInfoE", friends_unavailable},
+        {"_ZN2nn7friends17NotificationQueue8FinalizeEv", nop},
+        {"_ZN2nn7friends28DeclareOpenOnlinePlaySessionEv", ok}, {"_ZN2nn7friends29DeclareCloseOnlinePlaySessionEv", ok},
+        {"_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_", socket_get_addr_info},
+        {"_ZN2nn6socket12FreeAddrInfoEPNS0_8AddrInfoE", socket_free_addr_info},
         {"_ZN2nn4time26StandardNetworkSystemClock3nowEv", network_clock_now},
         {"_ZN2nn3err21ReportMultimediaErrorENS_6ResultERKN5movie25MultimediaTelemetryReportE", nop},
         {"_ZN2nn3nsd24GetEnvironmentIdentifierEPNS0_21EnvironmentIdentifierE", environment_identifier},

@@ -315,10 +315,17 @@ NVN(nvnTexturePoolRegisterTexture, void, const NVNtexturePool *tp, int id, const
 // Images and textures share one registration here (an image handle is the texture pool index, nvnDeviceGetImageHandle),
 // so registering an image is registering the texture. TOTK never calls it; Bayonetta 3 does.
 NVN(nvnTexturePoolRegisterImage, void, const NVNtexturePool *tp, int id, const NVNtexture *t, const NVNtextureView *v) {
+    tex_t mod_t;
+    if (t) {
+        mod_t = *(const tex_t *)t;
+        mod_t.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
+        t = (const NVNtexture *)&mod_t;
+    }
     h_nvnTexturePoolRegisterTexture(tp, id, t, v);
+    mtl_mark_tex_image_use(id);
 }
 NVN(nvnSamplerPoolInitialize, NVNboolean, NVNsamplerPool *sp, const NVNmemoryPool *p, ptrdiff_t off, int n) {
-    *(dpool_t *)sp = (dpool_t){(const pool_t *)p, off, n}; OLOG("SamplerPool n=%d", n); return 1;
+    *(dpool_t *)sp = (dpool_t){(const pool_t *)p, off, n}; OLOG("SamplerPool n=%d", n); mtl_set_samp_pool_n(n); return 1;
 }
 NVN(nvnSamplerPoolFinalize, void, NVNsamplerPool *sp) { (void)sp; }
 NVN(nvnSamplerPoolRegisterSampler, void, const NVNsamplerPool *sp, int id, const NVNsampler *s) { (void)sp; mtl_reg_samp(id, &((const samp_t *)s)->p); }
@@ -1888,6 +1895,7 @@ static void resolve_deferred(const uint8_t *p, int depth) {   // read the handle
 // Image (writable texture): handle = texture pool index (GetImageHandle returns it as-is; the game does not call RegisterImage, images and textures share registration)
 NVN(nvnCommandBufferBindImages, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, const NVNimageHandle *h) {
     bind_handles(c, OP_BIND_IMG, st, first, n, (const uint64_t *)h); if (n >= 0 && n <= 32) hw_fix(CB(c), 16 + 8 * (size_t)n);
+    for (int k = 0; k < n; k++) if (h && h[k]) mtl_mark_tex_image_use((int)(h[k] & 0xfffff));
 }
 NVN(nvnCommandBufferBindSeparateTextures, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, const NVNseparateTextureHandle *h) {
     bind_handles(c, OP_BIND_TEX, st, first, n, (const uint64_t *)h); if (n >= 0 && n <= 32) hw_fix(CB(c), 16 + 8 * (size_t)n);
@@ -1901,7 +1909,10 @@ NVN(nvnCommandBufferBindSeparateSampler, void, NVNcommandBuffer *c, NVNshaderSta
 // TOTK: combined texture handles share the texture slots with separate textures (sampler id in bits 20+).
 NVN(nvnCommandBufferBindTexture, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNtextureHandle h) { uint64_t v = h; bind_handles(c, OP_BIND_TEX, st, i, 1, &v); }
 NVN(nvnCommandBufferBindTextures, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, const NVNtextureHandle *h) { bind_handles(c, OP_BIND_TEX, st, first, n, (const uint64_t *)h); }
-NVN(nvnCommandBufferBindImage, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNimageHandle h) { uint64_t v = h; bind_handles(c, OP_BIND_IMG, st, i, 1, &v); hw_fix(CB(c), 24); }
+NVN(nvnCommandBufferBindImage, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNimageHandle h) {
+    uint64_t v = h; bind_handles(c, OP_BIND_IMG, st, i, 1, &v); hw_fix(CB(c), 24);
+    if (h) mtl_mark_tex_image_use((int)(h & 0xfffff));
+}
 NVN(nvnCommandBufferBindSeparateTexture, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNseparateTextureHandle h) { bind_handles(c, OP_BIND_TEX, st, i, 1, &h.value); hw_fix(CB(c), 24); }
 NVN(nvnCommandBufferBindVertexBuffer, void, NVNcommandBuffer *c, int i, NVNbufferAddress a, size_t n) { NVNbufferRange r = {a, n}; h_nvnCommandBufferBindVertexBuffers(c, i, 1, &r); }
 /* CPU-only regression: deferred binds take the handles the game's array holds at submit, also through CallCommands;

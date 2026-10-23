@@ -57,10 +57,40 @@ static int parse_tcb_image_handle(NSString *name, int is_sampler, int *out_slot)
     return 0;
 }
 
+/* FC26 2026-10-23: texture arrays the translator made from a bindless access (vendor/ryujinx BindlessToArray.RunPass: the
+   shader loads a texture handle from c2 at a dynamic offset and samples with it; the array index is that byte offset / 8,
+   clamped to the length). Element n is the texture whose handle sits at c2 byte 4 * o0 + 8 * n, o0 = low 14 bits of the
+   handle in the name (<p>_t2d_cb<slots>_<hex>, TextureHandle.PackOffsets); every element of the sampler array is the second
+   handle word's separate sampler (the json reg). The replay's c2 holds S.tex[r] at both 0x20 + 8 r (combined) and
+   0x168 + 8 r (separate), so a byte offset names a texture slot; anything else reads 0 (empty slot, reg 0xffff).
+   First seen in fragment shader b9764ae7 (Encontro Clássico, entering the match). */
+static int msl_array_len(NSString *t, NSString **elem) {
+    if (![t isKindOfClass:[NSString class]] || ![t hasPrefix:@"array<"]) return 0;
+    NSRange c = [t rangeOfString:@", " options:NSBackwardsSearch];
+    if (c.location == NSNotFound || ![t hasSuffix:@">"]) return 0;
+    int n = [[t substringWithRange:NSMakeRange(c.location + 2, t.length - c.location - 3)] intValue];
+    if (elem) *elem = [t substringWithRange:NSMakeRange(6, c.location - 6)];
+    return n;
+}
+static unsigned c2_tex_slot(unsigned byte) {
+    if (byte >= 0x20 && byte < 0x120 && (byte - 0x20) % 8 == 0) return (byte - 0x20) / 8;
+    if (byte >= 0x168 && byte < 0x568 && (byte - 0x168) % 8 == 0) return (byte - 0x168) / 8;
+    return 0xffff;
+}
+unsigned tex_array_elem_reg(const char *name, int n) {
+    const char *p = name ? strstr(name, "_cb") : NULL;
+    if (!p) return 0xffff;
+    char *end = NULL; unsigned long slots = strtoul(p + 3, &end, 10);
+    if (end == p + 3 || *end != '_' || (slots & 0xffff) != 2) return 0xffff;
+    const char *h = end + 1; unsigned long handle = strtoul(h, &end, 16);
+    if (end == h) return 0xffff;
+    return c2_tex_slot((unsigned)(4 * (handle & 0x3fff) + 8 * (unsigned)n));
+}
+
 int drv_fillable(int stage, int bank, unsigned off) {
     if (bank == 2) return (off >= 0x20 && off < 0x120) || (off >= 0x168 && off < 0x968);
     switch (stage) {
-    case 0: return (off >= 0x110 && off < 0x210) || off == 0x610;
+    case 0: return (off >= 0x110 && off < 0x210) || off == 0x610 || (off >= 0x640 && off < 0x64c);   // FC26: + draw parameters
     case 1: return off >= 0x510 && off < 0x610;
     case 5: return off >= 0x200 && off < 0x410;
     default: return 0;
@@ -145,9 +175,23 @@ int nvn_refl_from_json_msl(NSDictionary *j, NSString *msl, nvn_refl *o, char *er
         if (![bs isKindOfClass:[NSArray class]]) FAIL("缺 bindings");
         if (bs.count > NVN_REFL_MAXB) FAIL("绑定 %lu 个，超上限 %d", (unsigned long)bs.count, NVN_REFL_MAXB);
         o->route_b = 1; o->abi = 0;   // spirv-cross 第 0 组 → [[buffer(0)]] | spirv-cross set 0 → [[buffer(0)]]
+        int arr_at[NVN_REFL_MAXB], arr_len[NVN_REFL_MAXB], narr = 0, ntexarr = 0;
         for (NSDictionary *b in bs) {
             NSString *k = b[@"kind"]; nvn_rbind *r = &o->b[o->nb];
             id rg = b[@"reg"]; int reg = [rg isKindOfClass:[NSNumber class]] ? [rg intValue] : -1, aid = [b[@"arg_id"] intValue];
+            NSString *elem = nil; int alen = msl_array_len(b[@"msl_type"], &elem);
+            if (alen > 1 && [k isEqualToString:@"tex"]) {   // FC26: bindless texture array, element 0 here, the rest appended below
+                r->aid = (uint16_t)aid; r->kind = NVN_RB_TEX; r->reg = (uint16_t)tex_array_elem_reg([b[@"msl_name"] UTF8String], 0);
+                dummy_kind(elem, &r->dtt, &r->dpf);
+                arr_at[narr] = o->nb; arr_len[narr++] = alen; ntexarr++; o->nb++;
+                { static int warned; if (!warned++) fprintf(stderr, "[dm] [nvn-mtl] 【红】texture array from a bindless access (%s): the prebuilt totk_xlate clamps the index to the array length, so elements past the first may sample the wrong texture until it is rebuilt (needs .NET)\n", [b[@"msl_name"] UTF8String]); }
+                continue;
+            }
+            if (alen > 1 && [k isEqualToString:@"samp"] && reg >= 0) {   // FC26: its sampler array, one separate sampler for every element
+                r->aid = (uint16_t)aid; r->kind = NVN_RB_SAMP; r->reg = (uint16_t)reg;
+                arr_at[narr] = o->nb; arr_len[narr++] = alen; o->nb++; continue;
+            }
+            if (alen > 1) FAIL("B 绑定 %s 是数组（%s），种类 %s 未实现", [b[@"msl_name"] UTF8String], [b[@"msl_type"] UTF8String], k.UTF8String);
             r->aid = (uint16_t)aid; r->reg = reg < 0 ? 0 : (uint16_t)reg;
             if ([k isEqualToString:@"cbuf"]) r->kind = NVN_RB_CBUF;
             else if ([k isEqualToString:@"samp"]) r->kind = NVN_RB_SAMP;
@@ -187,6 +231,16 @@ int nvn_refl_from_json_msl(NSDictionary *j, NSString *msl, nvn_refl *o, char *er
                 FAIL("B 绑定 %s 没解出槽号", [b[@"msl_name"] UTF8String]);
             o->nb++;
         }
+        o->nj = o->nb;   // json order 1:1 up to here; array elements 1.. follow
+        for (int a = 0; a < narr; a++) {
+            const nvn_rbind e0 = o->b[arr_at[a]];
+            const char *name = [bs[(NSUInteger)arr_at[a]][@"msl_name"] UTF8String];
+            for (int n = 1; n < arr_len[a]; n++) {
+                if (o->nb >= NVN_REFL_MAXB) FAIL("绑定（含数组元素）超上限 %d", NVN_REFL_MAXB);
+                nvn_rbind *r = &o->b[o->nb++]; *r = e0; r->aid = (uint16_t)(e0.aid + n);
+                if (e0.kind == NVN_RB_TEX) r->reg = (uint16_t)tex_array_elem_reg(name, n);
+            }
+        }
         NSDictionary *dr = j[@"drv_reads"];
         if ([dr isKindOfClass:[NSDictionary class]]) { o->drv_read[0] = dr[@"0"] != nil; o->drv_read[2] = dr[@"2"] != nil; }
         NSArray *uf = j[@"drv_unfillable"];
@@ -200,6 +254,7 @@ int nvn_refl_from_json_msl(NSDictionary *j, NSString *msl, nvn_refl *o, char *er
             NSMutableArray *unaccepted = [NSMutableArray array];
             for (id item in uf) {
                 NSString *entry = [item description];
+                if (ntexarr && [entry isEqualToString:@"c2 dynamic index"]) continue;   // FC26: the array's own handle load from c2 (see msl_array_len)
                 if (!msl || stage < 0 || !msl_drv_unfillable_check(msl.UTF8String, stage, entry.UTF8String)) {
                     [unaccepted addObject:entry];
                 }

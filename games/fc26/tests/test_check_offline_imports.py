@@ -19,6 +19,7 @@ LDN = '_ZN2nn3ldn10InitializeEv'
 PCTL = '_ZN2nn4pctl28IsFreeCommunicationAvailableEv'
 PCTL_INIT = '_ZN2nn4pctl10InitializeEv'
 OPUS = '_ZN2nn5codec21DecodeOpusInterleavedEPNS0_15OpusDecoderTypeEPmPiPsmPKvm'
+LATE = '_ZN2nn3ldn12FromALateNroEv'   # in scope, exported only by an NRO that nn::ro loads later
 ABSENT = '_ZN2nn2ec11NotInTheSdkEv'
 
 
@@ -27,14 +28,16 @@ def symbol(name, defined, binding=1):
 
 
 class CheckOfflineImports(unittest.TestCase):
-    def run_script(self, main_imports, sdk_strings=b''):
+    def run_script(self, main_imports, sdk_strings=b'', late=(), bare_list=False):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         work = Path(folder.name)
         (work / 'analysis').mkdir()
         modules = [dict(name='main', symbols=[symbol('', False)] + [symbol(n, False, b) for n, b in main_imports]),
                    dict(name='sdk', symbols=[symbol(n, True) for n in (LDN, PCTL, PCTL_INIT, OPUS, COUNT, WEB)])]
-        (work / 'analysis/runtime-layout.json').write_text(json.dumps(modules))
+        # prepare_runtime.py writes {modules, late_symbols}; layouts made before late binding were the bare module list
+        layout = modules if bare_list else dict(modules=modules, late_symbols=[dict(name=n, nro='PlatformNvn') for n in late])
+        (work / 'analysis/runtime-layout.json').write_text(json.dumps(layout))
         rewritten = work / f'rewritten/{game_config.VERSION}'
         rewritten.mkdir(parents=True)
         (rewritten / 'sdk.patched.bin').write_bytes(b'\0junk\0' + sdk_strings)
@@ -66,6 +69,19 @@ class CheckOfflineImports(unittest.TestCase):
         self.assertIn('MISSING', self.line_of(run.stdout, ABSENT))
         self.assertIn('weak, stays 0', self.line_of(run.stdout, '_ZN2nn2ec8WeakOneEv'))
         self.assertIn('1 MISSING', run.stdout)
+
+    def test_late_nro_symbol_is_not_missing(self):
+        run = self.run_script([(LDN, 1), (LATE, 1)], late=[LATE])
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn('nro (late)', self.line_of(run.stdout, LATE))
+        self.assertIn('exported by PlatformNvn', self.line_of(run.stdout, LATE))
+        self.assertIn('nothing MISSING', run.stdout)
+
+    def test_bare_module_list_layout_still_read(self):
+        run = self.run_script([(LDN, 1), (ABSENT, 1)], bare_list=True)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn('sdk (native)', self.line_of(run.stdout, LDN))
+        self.assertIn('MISSING', self.line_of(run.stdout, ABSENT))
 
     def test_service_strings_and_registration(self):
         run = self.run_script([(LDN, 1)], sdk_strings=b'ldn:u\0nim:eca\0xhwopus\0')

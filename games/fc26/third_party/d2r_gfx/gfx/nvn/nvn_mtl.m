@@ -2747,6 +2747,61 @@ static id<MTLTexture> stor_recreate(const stor_key *k, MTLTextureUsage usage) {
     if (n <= 8) MLOG("storage-shared texture recreated with usage %#lx (%lux%lu format %lu, %llu so far)", (unsigned long)usage, (unsigned long)base.width, (unsigned long)base.height, (unsigned long)base.pixelFormat, (unsigned long long)n);
     return nt;
 }
+static id<MTLTexture> tex_upgrade_shader_write(const tex_t *t, id<MTLTexture> base) {
+    if (!base || (base.usage & MTLTextureUsageShaderWrite)) return base;
+    if (fmt_compressed(t->d.format) || fmt_depth(t->d.format)) return base;
+    if (g_tex_preparing && rp_active()) { g_tex_prepare_split = 1; return base; }
+    {
+        stor_key k;
+        if (stor_key_lookup(base, &k)) {
+            if (!stor_recreate(&k, base.usage | MTLTextureUsageShaderWrite)) return base;
+            id<MTLTexture> nb = tex_mtl(t);
+            return nb ? nb : base;
+        }
+    }
+    MTLTextureDescriptor *d = [MTLTextureDescriptor new];
+    d.textureType = base.textureType;
+    d.pixelFormat = base.pixelFormat;
+    d.width = base.width;
+    d.height = base.height;
+    d.depth = base.depth;
+    d.swizzle = base.swizzle;
+    d.arrayLength = base.arrayLength;
+    d.mipmapLevelCount = base.mipmapLevelCount;
+    d.sampleCount = base.sampleCount;
+    d.storageMode = base.storageMode;
+    d.cpuCacheMode = base.cpuCacheMode;
+    d.hazardTrackingMode = base.hazardTrackingMode;
+    d.resourceOptions = base.resourceOptions;
+    d.usage = base.usage | MTLTextureUsageShaderWrite;
+    id<MTLTexture> upgraded = [g_dev newTextureWithDescriptor:d];
+    if (!upgraded) {
+        RED_ONCE(46, "图像可写贴图升级失败 ser=%llu 格式 %lu", t->serial, (unsigned long)base.pixelFormat);
+        return base;
+    }
+    res_add(upgraded);
+    id<MTL4ComputeCommandEncoder> b = blit();
+    NSUInteger slices = base.textureType == MTLTextureType3D ? 1 : base.arrayLength * (base.textureType == MTLTextureTypeCube || base.textureType == MTLTextureTypeCubeArray ? 6 : 1);
+    for (NSUInteger l = 0; l < base.mipmapLevelCount; l++) {
+        NSUInteger w = MAX(base.width >> l, 1u), h = MAX(base.height >> l, 1u), z = base.textureType == MTLTextureType3D ? MAX(base.depth >> l, 1u) : 1;
+        if (base.textureType == MTLTextureType3D)
+            enc_b_copy_texture(b, base, 0, l, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, z), upgraded, 0, l, MTLOriginMake(0, 0, 0));
+        else for (NSUInteger s = 0; s < slices; s++)
+            enc_b_copy_texture(b, base, s, l, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), upgraded, s, l, MTLOriginMake(0, 0, 0));
+    }
+    id holder = serial_get(t->serial);
+    if ([holder isKindOfClass:[NvPkg class]]) {
+        id<MTLTexture> old = ((NvPkg *)holder)->tex;
+        ((NvPkg *)holder)->tex = upgraded;
+        memset(&((NvPkg *)holder)->key, 0, sizeof(reup_key));
+        defer_obj_release(old);
+        ser_bump(t->serial);
+    } else {
+        serial_put(t->serial, upgraded);
+    }
+    MLOG("贴图升级为图像可写用途 ser=%llu 格式 %lu（usage %#lx → %#lx）", (unsigned long long)t->serial, (unsigned long)base.pixelFormat, (unsigned long)base.usage, (unsigned long)upgraded.usage);
+    return upgraded;
+}
 /* NVN compression: a compressible texture in a compressible pool keeps its contents in compressed form, and a clear only
    sets the compression state - the bytes under it stay as they were. A descriptor that reads the same storage in another
    format therefore does not see such writes on hardware. 2026-10-15, the frame-wide flashes: when the game moved the
@@ -4922,7 +4977,7 @@ static id<MTLLibrary> totk_msl_library(NSString *src, NSError **err) {
    vanished), vertex shaders a point-size limit of 0, and both 0 for the base addresses they add offsets to. Words the replay
    fills (encode_args): c0 storage-buffer table at 0x110 (vertex) / 0x310 (compute) / 0x510 (fragment), 16 bytes per slot
    {address, size}; compute thread-group counts {x, y, z} at 0x200 and uniform-buffer table at 0x210; vertex point-size
-   limit at 0x610; c2 texture / sampler handle tables. Anything else reads 0 and is reported. */
+   limit at 0x610 and draw parameters {base vertex, base instance, draw index} at 0x640 (FC26); c2 texture / sampler handle tables. Anything else reads 0 and is reported. */
 /* drv_fillable, drv_access_components_fillable, msl_drv_unfillable_check estão definidos em nvn_refl.m / nvn_refl.h */
 /* TOTK 2026-10-16: does the function store through storage binding `name` (spirv-cross names: `(*spvDescriptorSet0.fp_s0)._m0[...] = ...`
    for stores, `&(*spvDescriptorSet0.fp_s1)` for atomics)? The reflection's rw was never set (shader_service.py tested the wrong
@@ -4968,7 +5023,7 @@ static int msl_tex_uses_beyond_size(NSString *src, NSString *name) {
     return 0;
 }
 static void refl_mark_stores(NvShader *o, NSArray *bs, NSString *src) {
-    if (![bs isKindOfClass:[NSArray class]] || (int)bs.count != o->rf.nb) return;   // nvn_refl_from_json keeps the json order 1:1
+    if (![bs isKindOfClass:[NSArray class]] || (int)bs.count != o->rf.nj) return;   // nvn_refl_from_json keeps the json order 1:1 (array elements after nj)
     for (int i = 0; i < o->rf.nb; i++) {
         nvn_rbind *b = &o->rf.b[i]; if (b->rw || (b->kind != NVN_RB_SBUFP && b->kind != NVN_RB_SBUFU)) continue;
         NSDictionary *d = bs[(NSUInteger)i]; if (![d isKindOfClass:[NSDictionary class]]) continue;
@@ -5058,8 +5113,8 @@ static NvShader *shader_load(NSString *pc, int stage) {
     o->writes_depth = full && [full rangeOfString:@"[[depth("].location != NSNotFound;
     if (full) {
         NSArray *bs = j[@"bindings"];
-        if ([bs isKindOfClass:[NSArray class]] && (int)bs.count == o->rf.nb) {
-            for (int i = 0; i < o->rf.nb; i++) {
+        if ([bs isKindOfClass:[NSArray class]] && (int)bs.count == o->rf.nj) {
+            for (int i = 0; i < o->rf.nj; i++) {
                 if (o->rf.b[i].kind == NVN_RB_TEXIMG) {
                     NSDictionary *d = bs[(NSUInteger)i];
                     if ([d isKindOfClass:[NSDictionary class]] && msl_tex_uses_beyond_size(full, d[@"msl_name"])) {
@@ -5435,6 +5490,25 @@ static MTLTextureType ttype(int target, int fallback) {
 // texture pool capacity 15256) and never registers that ID. Read 0 per D3D / empty-slot semantics (the same all-zero dummy textures as unbound), no failure; unregistered IDs inside the pool are still reported a failure
 static int g_tpool_n; static uint64_t g_stat_tex_oob;
 void mtl_set_tex_pool_n(int n) { g_tpool_n = n; }
+static int g_spool_n; static uint64_t g_stat_samp_oob;
+void mtl_set_samp_pool_n(int n) { g_spool_n = n; }
+void mtl_mark_tex_image_use(int tid) {
+    if (tid <= 0) return;
+    registry_lock();
+    if (tid < g_ntreg && g_treg[tid].ok) {
+        if (!(g_treg[tid].t.d.flags & NVN_TEXTURE_FLAGS_IMAGE)) {
+            g_treg[tid].t.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
+            if (g_treg[tid].view) {
+                id<MTLTexture> v = (__bridge id<MTLTexture>)g_treg[tid].view;
+                if (!(v.usage & MTLTextureUsageShaderWrite)) {
+                    treg_clear_view_locked(tid);
+                    g_reg_gen++;
+                }
+            }
+        }
+    }
+    registry_unlock();
+}
 /* DM_NVN_LIFELOG (see totk_lifelog.h): the texture the replay resolves for a followed texture-pool id, once per frame and id. */
 static void life_use(int tid, const tex_t *t, const char *how) {
     static uint64_t frame = ~0ull; static int seen[64]; static int nseen;
@@ -5558,6 +5632,10 @@ static MTLSamplerAddressMode wrapm(int w) {
     return MTLSamplerAddressModeRepeat;
 }
 static id<MTLSamplerState> samp_by_id(int sid) {   // 调用方持 g_rmu | Caller holds g_rmu
+    if ((g_spool_n && sid >= g_spool_n) || sid >= 4096) {
+        if (!g_stat_samp_oob++) MLOG("池外采样器号 %d（池容量 %d）按空槽处理：哑采样器", sid, g_spool_n);
+        return nil;
+    }
     if (sid < 0 || sid >= g_nsreg || !g_sreg_ok[sid]) { RED_ONCE(12, "采样器号 %d 未登记", sid); return nil; }
     if (g_sview[sid]) return (__bridge id<MTLSamplerState>)g_sview[sid];
     samp_par p = g_sreg[sid];
@@ -7016,6 +7094,10 @@ static uint64_t ui_mat_patch(const p_bind_buf *u, void *mb, uint64_t mo) {
 }
 /* TOTK_NAN_TRACE: g_nt_watch is the texture the traced shader read in its watched slot (see nt_watch_after_pass). */
 static uint32_t g_dispatch_grid[3];   // TOTK: thread-group counts of the dispatch being encoded (driver segment c0 + 0x200)
+/* FC26 2026-10-23: draw parameters of the draw being encoded {base vertex, base instance, draw index}, which the NVN driver keeps
+   at c0 + 0x640 / 0x644 / 0x648 (vendor/ryujinx Constants.cs NvnBaseVertexByteOffset...). Vertex shader 3d1d0a08 (Encontro Clássico)
+   computes its instance as instance_id - base_instance + c0[0x644]; the segment had no such words and the load aborted. */
+static int32_t g_draw_params[3];
 /* Driver banks contain binding metadata, not the pointed-to bytes. Reuse their immutable arena
    allocation while those bindings match; the submission epoch prevents arena reuse from returning
    a previous frame's address. No texture residency or guest-memory freshness checks are skipped. */
@@ -7026,6 +7108,7 @@ typedef struct {
     p_bind_buf storage[16], uniform[16];
     uint64_t textures[128], samplers[128];
     uint32_t grid[3];
+    int32_t draw[3];
 } driver_bank_cache;
 static driver_bank_cache g_driver_bank[6][2];
 static uint64_t g_driver_hit, g_driver_miss, g_driver_check;
@@ -7049,6 +7132,7 @@ static void driver_bank_fill(uint8_t *d, int bank, int stage) {
             for (int r = 0; r < 16; r++) { uint64_t a = S.ubo[5][r].addr; uint32_t n = (uint32_t)S.ubo[5][r].size; memcpy(d + 0x210 + 16 * r, &a, 8); memcpy(d + 0x210 + 16 * r + 8, &n, 4); }
         } else if (stage == 0) {   // TOTK: point-size limit the vertex shaders clamp gl_PointSize to (the driver's hardware limit 0x44fffe00 = 2047.9375)
             const float ps_max = 2047.9375f; memcpy(d + 0x610, &ps_max, sizeof ps_max);
+            memcpy(d + 0x640, g_draw_params, sizeof g_draw_params);
         }
     } else {
         for (int r = 0; r < 128; r++) { uint32_t th = (uint32_t)S.tex[stage][r], sh_ = (uint32_t)S.samp[stage][r]; memcpy(d + 0x168 + 8 * r, &th, 4); memcpy(d + 0x568 + 8 * r, &sh_, 4); }
@@ -7067,7 +7151,8 @@ static uint64_t driver_bank_gpu(int bank, int stage, id<MTLBuffer> *out) {
     int same = c->epoch == g_arena_epoch && c->gpu;
     if (same && !g_driver_probe_stale) {
         if (bank == 0) same = !memcmp(c->storage, S.ssbo[stage], sizeof c->storage) &&
-            (stage != 5 || (!memcmp(c->uniform, S.ubo[5], sizeof c->uniform) && !memcmp(c->grid, g_dispatch_grid, sizeof c->grid)));
+            (stage != 5 || (!memcmp(c->uniform, S.ubo[5], sizeof c->uniform) && !memcmp(c->grid, g_dispatch_grid, sizeof c->grid))) &&
+            (stage != 0 || !memcmp(c->draw, g_draw_params, sizeof c->draw));
         else same = !memcmp(c->textures, S.tex[stage], sizeof c->textures) && !memcmp(c->samplers, S.samp[stage], sizeof c->samplers);
     }
     int check = atomic_load(&g_driver_cache_check);
@@ -7084,6 +7169,7 @@ static uint64_t driver_bank_gpu(int bank, int stage, id<MTLBuffer> *out) {
     c->epoch = g_arena_epoch; c->gpu = g_cur_arena->gpu + offset; c->buffer = buffer; c->offset = offset;
     if (bank == 0) { memcpy(c->storage, S.ssbo[stage], sizeof c->storage);
         if (stage == 5) { memcpy(c->uniform, S.ubo[5], sizeof c->uniform); memcpy(c->grid, g_dispatch_grid, sizeof c->grid); }
+        if (stage == 0) memcpy(c->draw, g_draw_params, sizeof c->draw);
     } else { memcpy(c->textures, S.tex[stage], sizeof c->textures); memcpy(c->samplers, S.samp[stage], sizeof c->samplers); }
     g_driver_miss++; *out = buffer; return c->gpu;
 }
@@ -7174,7 +7260,7 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
     for (int i = 0; i < sh->rf.nb; i++) {
         const nvn_rbind *b = &sh->rf.b[i];
         int reg = b->reg, aid = b->aid;
-        if (slot_mode && tex_slot_binding(b)) {
+        if (slot_mode && aid < 64 && tex_slot_binding(b)) {   // FC26: slot_mask has 64 bits; array elements go past aid 63
             // A preceding miss may create/replace a resource, or a guest write
             // may arrive since the initial key. Then finish this block normally.
             if (slot_context && (slot_key.serial != g_ser_gen || slot_key.dirty != nvn_dirty_now() ||
@@ -7274,7 +7360,25 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
             int tid = reg < 32 ? (int)(S.img[nvn_stage][reg] & 0xfffff) : 0;
             void *tv = NULL; uint64_t trid = tid ? tex_fast_rid(tid, &tv) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
             if (passdump()) PD("W %llu st%d reg%d tid=%d %s ser=%llu", g_stat_pass, nvn_stage, reg, tid, t ? "实" : "哑", t && tid < g_ntreg ? g_treg[tid].t.serial : 0ull);
-            if (t && !(t.usage & MTLTextureUsageShaderWrite)) { RED_ONCE(32, "图像槽绑的贴图没有可写用途（贴图号 %d）", tid); t = nil; }
+            if (t && !(t.usage & MTLTextureUsageShaderWrite)) {
+                if (tid > 0 && tid < g_ntreg && g_treg[tid].ok) {
+                    id<MTLTexture> up = tex_upgrade_shader_write(&g_treg[tid].t, t);
+                    if (up && (up.usage & MTLTextureUsageShaderWrite)) {
+                        t = up;
+                        trid = up.gpuResourceID._impl;
+                        g_treg[tid].view = (__bridge void *)up;
+                        g_treg[tid].view_rid = trid;
+                        g_treg[tid].view_ser = g_ser_gen;
+                        g_treg[tid].t.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
+                    } else {
+                        RED_ONCE(32, "图像槽绑的贴图没有可写用途（贴图号 %d）", tid);
+                        t = nil;
+                    }
+                } else {
+                    RED_ONCE(32, "图像槽绑的贴图没有可写用途（贴图号 %d）", tid);
+                    t = nil;
+                }
+            }
             if (!t) { t = dummy_img(b->dtt, b->dpf); trid = g_dummy_img_rid[b->dtt & 7][b->dpf & 3]; }   // 未绑：D3D 语义写入丢弃——写进专用哑贴图，不污染读出 0 的那套 | Unbound: D3D semantics discard the write - write into a dedicated dummy texture so the set that reads 0 is not polluted
             slots[aid] = trid;
             USE(t, MTLResourceUsageRead | MTLResourceUsageWrite);
@@ -7359,7 +7463,7 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
         for (int i = 0; i < sh->rf.nb; i++) {
             const nvn_rbind *b = &sh->rf.b[i]; int aid = b->aid;
             if (!tex_slot_binding(b)) continue;
-            if (slot_check && (slot_mask & (UINT64_C(1) << aid)) && slots[aid] != sh->tex_slots.slots[aid])
+            if (slot_check && aid < 64 && (slot_mask & (UINT64_C(1) << aid)) && slots[aid] != sh->tex_slots.slots[aid])
                 MDIE("texture slot mismatch: shader %s stage %d binding %d kind %d", sh->key, nvn_stage, aid, b->kind);
             sh->tex_slots.handles[aid] = handles[aid]; sh->tex_slots.slots[aid] = slots[aid];
         }
@@ -7711,7 +7815,7 @@ static int state_op(uint32_t op, const void *a) {
         case OP_BIND_SSBO: { const p_bind_buf *b = a; if (b->stage < 6 && b->index < 16 && memcmp(&S.ssbo[b->stage][b->index], b, sizeof *b)) { S.ssbo[b->stage][b->index] = *b; args_dirty_stage(b->stage); } break; }
         case OP_BIND_TEX: { const p_bind_handles *b = a; if (b->stage < 6 && b->first + b->n <= 128 && memcmp(&S.tex[b->stage][b->first], b->h, 8 * b->n)) { memcpy(&S.tex[b->stage][b->first], b->h, 8 * b->n); args_dirty_stage(b->stage); if (b->first + b->n > g_tex_hi[b->stage]) g_tex_hi[b->stage] = b->first + b->n; } break; }
         case OP_BIND_SAMP: { const p_bind_handles *b = a; if (b->stage < 6 && b->first + b->n <= 128 && memcmp(&S.samp[b->stage][b->first], b->h, 8 * b->n)) { memcpy(&S.samp[b->stage][b->first], b->h, 8 * b->n); args_dirty_stage(b->stage); } break; }
-        case OP_BIND_IMG: { const p_bind_handles *b = a; if (b->stage < 6 && b->first >= 0 && b->first + b->n <= 32) { if (memcmp(&S.img[b->stage][b->first], b->h, 8 * b->n)) { memcpy(&S.img[b->stage][b->first], b->h, 8 * b->n); args_dirty_stage(b->stage); } } else RED_ONCE(31, "图像槽越界 阶段 %d 起 %d 数 %d", b->stage, b->first, b->n); break; }
+        case OP_BIND_IMG: { const p_bind_handles *b = a; if (b->stage < 6 && b->first >= 0 && b->first + b->n <= 32) { if (memcmp(&S.img[b->stage][b->first], b->h, 8 * b->n)) { memcpy(&S.img[b->stage][b->first], b->h, 8 * b->n); args_dirty_stage(b->stage); } for (int k = 0; k < b->n; k++) if (b->h[k]) mtl_mark_tex_image_use((int)(b->h[k] & 0xfffff)); } else RED_ONCE(31, "图像槽越界 阶段 %d 起 %d 数 %d", b->stage, b->first, b->n); break; }
         case OP_STENCIL: {
             const p_stencil *b = a;
             if (b->which != 2) g_dss_dirty = 1;
@@ -10187,6 +10291,7 @@ frz_plain:;
     enc_r_blend_color(en, S.blend_color[0], S.blend_color[1], S.blend_color[2], S.blend_color[3]);
     bind_vertex_streams((id<MTL4RenderCommandEncoder>)en,pr->sh[0]);
     if (g_lay.active) enc_r_vbuf(en, LAY_BUF_INDEX, lay_gpu(g_lay_probe_neg == 1 ? 0 : g_lay.cur - g_lay.base));   // TOTK: this draw's layer within the layered pass
+    g_draw_params[0] = di ? di->base_vertex : dw->first; g_draw_params[1] = di ? di->base_instance : dw->base_instance; g_draw_params[2] = 0;
     if (pr->sh[0]) encode_args(en, pr->sh[0], 0, 1);
     if (pr->sh[1]) encode_args(en, pr->sh[1], 1, 0);
     // 参数绑定在登记表锁内捕获实际资源；资格判断到绑定期间有版本变化，则在任何GPU draw前切开重试。
@@ -10723,6 +10828,91 @@ static int copy_t2t_astc(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
     defer_obj_unref(sv); defer_obj_unref(dv); defer_obj_release(pb);   // 本次提交跑完再放（视图不单独驻留，参数块撤驻留） | Release after this submit has finished running (views are not made resident separately; the parameter block is removed from residency)
     return 1;
 }
+static const char k_depth_copy_msl[] =
+"#include <metal_stdlib>\nusing namespace metal;\n"
+"struct DepthV2F { float4 pos [[position]]; };\n"
+"vertex DepthV2F depth_copy_vs(uint vid [[vertex_id]]) {\n"
+"  float2 uv = float2((vid << 1) & 2, vid & 2);\n"
+"  DepthV2F o; o.pos = float4(uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f); return o;\n"
+"}\n"
+"struct DepthFragOut { float depth [[depth(any)]]; };\n"
+"fragment DepthFragOut depth_copy_fs(DepthV2F in [[stage_in]], texture2d<float> src [[texture(0)]], constant uint4 *p [[buffer(0)]]) {\n"
+"  uint2 dpos = uint2(in.pos.xy); uint2 spos = uint2(dpos.x - p[0].z + p[0].x, dpos.y - p[0].w + p[0].y);\n"
+"  DepthFragOut o; o.depth = src.read(spos).r; return o;\n"
+"}\n";
+static int copy_t2t_depth(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, int sx, int sy, int dx, int dy, int w, int h) {
+    static int failed;
+    static id<MTLRenderPipelineState> ps_d32, ps_d32s8, ps_d16;
+    static id<MTLDepthStencilState> dss;
+    static id<MTL4ArgumentTable> at;
+    static id<MTLBuffer> pbuf[4];
+    static int pbuf_idx;
+    if (failed) return 0;
+    if (!dss) {
+        NSError *e = nil;
+        id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k_depth_copy_msl) options:nil error:&e];
+        id<MTLFunction> vf = lib ? [lib newFunctionWithName:@"depth_copy_vs"] : nil;
+        id<MTLFunction> ff = lib ? [lib newFunctionWithName:@"depth_copy_fs"] : nil;
+        if (!vf || !ff) { failed = 1; MLOG("【红】深度拷贝着色器创建失败 %s", e.localizedDescription.UTF8String); return 0; }
+        MTLDepthStencilDescriptor *dsd = [MTLDepthStencilDescriptor new];
+        dsd.depthCompareFunction = MTLCompareFunctionAlways;
+        dsd.depthWriteEnabled = YES;
+        dss = [g_dev newDepthStencilStateWithDescriptor:dsd];
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = vf; pd.fragmentFunction = ff;
+        pd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        ps_d32 = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+        pd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+        ps_d32s8 = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+        pd.depthAttachmentPixelFormat = MTLPixelFormatDepth16Unorm;
+        ps_d16 = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+        MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new];
+        ad.maxTextureBindCount = 1; ad.maxBufferBindCount = 1;
+        at = [g_dev newArgumentTableWithDescriptor:ad error:&e];
+        for (int i = 0; i < 4; i++) {
+            pbuf[i] = [g_dev newBufferWithLength:32 options:MTLResourceStorageModeShared];
+            res_add(pbuf[i]);
+        }
+        if (!dss || !ps_d32 || !at || !pbuf[0]) { failed = 1; MLOG("【红】深度拷贝管线建不出 %s", e.localizedDescription.UTF8String); return 0; }
+    }
+    id<MTLRenderPipelineState> ps = (d.pixelFormat == MTLPixelFormatDepth32Float) ? ps_d32 :
+                                   (d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) ? ps_d32s8 :
+                                   (d.pixelFormat == MTLPixelFormatDepth16Unorm) ? ps_d16 : nil;
+    if (!ps) { RED_ONCE(48, "深度拷贝目标格式不支持：%lu", (unsigned long)d.pixelFormat); return 0; }
+    MTLTextureType tt = MTLTextureType2D;
+    id<MTLTexture> sv = (s.textureType == tt && sl == 0 && ss == 0) ? s : [s newTextureViewWithPixelFormat:s.pixelFormat textureType:tt levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss, 1)];
+    id<MTLTexture> dv = (d.textureType == tt && dl == 0 && ds == 0) ? d : [d newTextureViewWithPixelFormat:d.pixelFormat textureType:tt levels:NSMakeRange(dl, 1) slices:NSMakeRange(ds, 1)];
+    if (!sv || !dv) { RED_ONCE(49, "深度拷贝建不出视图"); return 0; }
+    id<MTLBuffer> pb = pbuf[pbuf_idx];
+    pbuf_idx = (pbuf_idx + 1) % 4;
+    uint32_t *p = (uint32_t *)pb.contents;
+    p[0] = (uint32_t)sx; p[1] = (uint32_t)sy; p[2] = (uint32_t)dx; p[3] = (uint32_t)dy;
+    p[4] = (uint32_t)w; p[5] = (uint32_t)h; p[6] = 0; p[7] = 0;
+    rp_end();
+    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
+    rp.depthAttachment.texture = dv;
+    rp.depthAttachment.loadAction = (sx == 0 && sy == 0 && dx == 0 && dy == 0 && (NSUInteger)w == dv.width && (NSUInteger)h == dv.height) ? MTLLoadActionDontCare : MTLLoadActionLoad;
+    rp.depthAttachment.storeAction = MTLStoreActionStore;
+    blit_close(); rs_sync(); pt_mark(g_cb, 'R', rp);
+    id<MTL4RenderCommandEncoder> en = [g_cb renderCommandEncoderWithDescriptor:rp];
+    es_reset();
+    if (!en) { if (sv != s) defer_obj_unref(sv); if (dv != d) defer_obj_unref(dv); return 0; }
+    [en barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
+    [en setArgumentTable:at atStages:MTLRenderStageFragment];
+    [at setTexture:sv.gpuResourceID atIndex:0];
+    [at setAddress:pb.gpuAddress atIndex:0];
+    [en setViewport:(MTLViewport){0, 0, (double)dv.width, (double)dv.height, 0, 1}];
+    [en setScissorRect:(MTLScissorRect){(NSUInteger)dx, (NSUInteger)dy, (NSUInteger)w, (NSUInteger)h}];
+    [en setRenderPipelineState:ps];
+    [en setDepthStencilState:dss];
+    [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    m4_end(en);
+    args_dirty_all(); g_pso_dirty = g_dss_dirty = 1;
+    if (sv != s) defer_obj_unref(sv);
+    if (dv != d) defer_obj_unref(dv);
+    return 1;
+}
 // GPU：贴图 → 贴图（原先误列为空操作，选角页每帧 3 次）。等尺寸、不镜像、同格式 → 逐层 blit；其余语义（缩放带过滤、镜像、换格式）blit 表达不了，报红待实现
 // GPU: texture -> texture (previously mislisted as a no-op, 3 times per frame on the character select page). Same size, not mirrored, same format -> blit layer by layer; the other semantics (scaling with filtering, mirroring, format change) cannot be expressed by blit: report a failure, to be implemented
 static void copy_t2t(const p_copy_t2t *c) {
@@ -10747,6 +10937,14 @@ static void copy_t2t(const p_copy_t2t *c) {
         && !s3 && !d3 && c->sr.width == c->dr.width && c->sr.height == c->dr.height && (d.usage & MTLTextureUsageShaderWrite)) {   // 无 BC：ASTC 源 → 解压格式目标（见 copy_t2t_astc） | No BC: ASTC source -> decompressed-format destination (see copy_t2t_astc)
         int ok = 1;
         for (int z = 0; z < nz && ok; z++) ok = copy_t2t_astc(s, d, sl, sz0 + c->sr.zoffset + z, dl, dz0 + c->dr.zoffset + z, c->sr.xoffset, c->sr.yoffset, c->dr.xoffset, c->dr.yoffset, c->sr.width, c->sr.height);
+        if (ok) return;
+    }
+    BOOL s_is_depth = (s.pixelFormat == MTLPixelFormatDepth32Float || s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || s.pixelFormat == MTLPixelFormatDepth16Unorm);
+    BOOL d_is_depth = (d.pixelFormat == MTLPixelFormatDepth32Float || d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || d.pixelFormat == MTLPixelFormatDepth16Unorm);
+    if (s_is_depth && d_is_depth && s.pixelFormat != d.pixelFormat && !s3 && !d3 && c->sr.width == c->dr.width && c->sr.height == c->dr.height) {
+        int ok = 1;
+        for (int z = 0; z < nz && ok; z++)
+            ok = copy_t2t_depth(s, d, sl, sz0 + c->sr.zoffset + z, dl, dz0 + c->dr.zoffset + z, c->sr.xoffset, c->sr.yoffset, c->dr.xoffset, c->dr.yoffset, c->sr.width, c->sr.height);
         if (ok) return;
     }
     if (c->sr.width != c->dr.width || c->sr.height != c->dr.height || (c->sr.depth ? c->sr.depth : 1) != (c->dr.depth ? c->dr.depth : 1) || (c->flags & ~NVN_COPY_FLAGS_ENGINE_2D_BIT & ~NVN_COPY_FLAGS_LINEAR_FILTER_BIT)

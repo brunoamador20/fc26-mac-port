@@ -6,6 +6,9 @@
      output resolution (TOTK_DRAWABLE_SCALE relative to the monitor's pixels) and the scaler (MetalFX spatial upscaling of
      the game's picture to the output, TOTK_MFX_UPSCALE / TOTK_MFX_OUTPUT, or plain linear scaling).
    - Info: the FPS / resolution HUD (DM_HUD_RENDER).
+   The rest is what tools/boot_gpu.sh gives the test boots (the GPU settings), but with the sound on, the profile and saves
+   in ~/Library/Application Support/MacNativeGames/FC26/profile and the log in ~/Library/Logs/MacNativeGames/fc26.log
+   (launch_plan). `"FC 26.app/Contents/MacOS/FC 26" --dry-run` prints all of it and starts nothing.
    The game runs at a Switch 60 Hz present base (runtime/system_services.c). It has no game patch and no mod yet: the
    launcher sets none (runtime/game_patches.c, FC26_PATCHES). Not needed for story 2 (boot to nnMain): `make boot` runs
    the runtime without it. FC26_BINARY and FC26_VERSION_DIR come from the Makefile (assets/game.json). */
@@ -110,7 +113,7 @@ static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
     [self.monitor selectItemAtIndex:(NSInteger)mi];
     self.display.selectedSegment = [d boolForKey:@"fullscreen"];
     NSInteger s = [d objectForKey:@"size"] ? [d integerForKey:@"size"] : 2; [self.size selectItemAtIndex:s >= 0 && s < 4 ? s : 2];
-    self.scaler.selectedSegment = [d objectForKey:@"metalfx"] && ![d boolForKey:@"metalfx"] ? 1 : 0;
+    self.scaler.selectedSegment = [d boolForKey:@"metalfx"] ? 0 : 1;   // plain unless MetalFX was chosen (launch_plan)
     [self fillOutputs:(int)[d integerForKey:@"output"]];
     self.hud.state = [d objectForKey:@"hud"] ? [d boolForKey:@"hud"] : YES;
 }
@@ -145,65 +148,98 @@ static void fail(NSString *s) {
 }
 static BOOL make_dir(NSString *p) { return [NSFileManager.defaultManager createDirectoryAtPath:p withIntermediateDirectories:YES attributes:nil error:nil]; }
 
+/* What the game starts with, from the saved settings: the variables set and cleared, the folder, the command and the log.
+   The start and the dry run (--dry-run or FC26_LAUNCHER_DRYRUN=1: print it, start nothing) share it. */
+@interface LaunchPlan : NSObject
+@property NSString *work, *data, *profile, *slot, *logs, *log, *previousLog, *input;
+@property NSArray<NSString *> *args, *unset;
+@property NSMutableDictionary<NSString *, NSString *> *set;
+@end
+@implementation LaunchPlan
+@end
+
+static LaunchPlan *launch_plan(NSUserDefaults *d, NSString *work, NSString *home, NSArray<NSScreen *> *all, NSScreen *main_screen) {
+    LaunchPlan *p = [LaunchPlan new]; NSMutableDictionary<NSString *, NSString *> *e = [NSMutableDictionary dictionary];
+    p.work = work; p.set = e;
+    p.data = [home stringByAppendingPathComponent:@"Library/Application Support/MacNativeGames/FC26"];
+    p.logs = [home stringByAppendingPathComponent:@"Library/Logs/MacNativeGames"];
+    p.log = [p.logs stringByAppendingPathComponent:@"fc26.log"]; p.previousLog = [p.logs stringByAppendingPathComponent:@"fc26.previous.log"];
+    /* The game slot is the work folder's (<work>/analysis/game-slot), the one `make boot` uses by default: one queue, so
+       an agent's test and the player's game never run together and the player's goes first (runtime/game_slot.c). */
+    p.profile = [p.data stringByAppendingPathComponent:@"profile"]; p.slot = [work stringByAppendingPathComponent:@"analysis/game-slot"];
+    p.input = [p.data stringByAppendingPathComponent:@"input.txt"];   // echo "shot ~/Desktop/shot.png" >> it
+    p.args = @[[work stringByAppendingPathComponent:@"build/" FC26_BINARY], @"rewritten/" FC26_VERSION_DIR, @"boot"];
+    /* Only the automatic boots are silent and headless (Makefile BOOT_ENV, tools/boot_gpu.sh): the player's game has its
+       sound (audio renderer and AudioOut) and its window even when started from a terminal that has those set. FC 26 has
+       no game patch yet. The RomFS verification record stays the one next to the image (the boots' own), so the app's
+       first start does not hash the 13 GB image again. */
+    p.unset = @[@"FC26_AUDIO", @"FC26_PATCHES", @"TOTK_AUDIO_OFF", @"TOTK_HEADLESS", @"TOTK_ROMFS_PROOF_DIR"];
+
+    e[@"DM_PRESENT_HZ"] = @"60";
+    NSUInteger mi = [all indexOfObject:main_screen]; if (mi == NSNotFound) mi = 0;
+    for (NSUInteger i = 0; i < all.count; i++) if ([screen_name(all[i]) isEqualToString:[d stringForKey:@"monitor"]]) mi = i;
+    e[@"FC26_DISPLAY"] = [NSString stringWithFormat:@"%lu", (unsigned long)mi];
+    if ([d boolForKey:@"fullscreen"]) {
+        e[@"FC26_FULLSCREEN"] = @"1";
+        int h = (int)[d integerForKey:@"output"]; NSSize px = mi < all.count ? screen_pixels(all[mi]) : NSZeroSize;
+        if (h > 0 && h < px.height) e[@"TOTK_DRAWABLE_SCALE"] = [NSString stringWithFormat:@"%.4f", h / px.height];
+    }
+    NSInteger s = [d objectForKey:@"size"] ? [d integerForKey:@"size"] : 2; if (s < 0 || s > 3) s = 2;
+    e[@"TOTK_WINDOW_SIZE"] = [NSString stringWithFormat:@"%dx%d", sizes[s][0], sizes[s][1]];
+    /* MetalFX only when chosen: the boots that reached the game's screens ran without it (TODO(mac): try it on FC 26). */
+    if ([d boolForKey:@"metalfx"]) { e[@"TOTK_MFX_UPSCALE"] = @"1"; e[@"TOTK_MFX_OUTPUT"] = @"1"; }
+    if ([d objectForKey:@"hud"] && ![d boolForKey:@"hud"]) e[@"TOTK_FPS_OVERLAY"] = @"0"; else e[@"DM_HUD_RENDER"] = @"1";
+    e[@"TOTK_ROMFS_MODS"] = @"0";   // no mod
+
+    e[@"TOTK_PROFILE_DIR"] = p.profile; e[@"TOTK_GAME_SLOT_DIR"] = p.slot;
+    NSString *preferred = NSLocale.preferredLanguages.firstObject; if (preferred) e[@"TOTK_LOCALE"] = preferred;
+    /* The graphics settings of tools/boot_gpu.sh, the boots that reach the game's first screens at 30 frames/s. */
+    e[@"TOTK_GPU_ALLOW_SUBMIT"] = @"1"; e[@"TOTK_GPU_WIDEN"] = @"1"; e[@"TOTK_GPU_BLOCKRT"] = @"1";
+    e[@"TOTK_GPU_MIDCLEAR"] = @"1"; e[@"TOTK_GPU_BUDGET_MB"] = @"5000";
+    e[@"DM_PRESENT_LINK_FALLBACK"] = @"1";   // keep presenting when macOS pauses the display link for a window it thinks covered
+    e[@"TOTK_SLOT_OWNER"] = @"user"; e[@"TOTK_SLOT_PURPOSE"] = @"player";
+    e[@"TOTK_INPUT_FILE"] = p.input;
+    return p;
+}
+
+static NSString *quoted(NSString *s) { return [NSString stringWithFormat:@"'%@'", [s stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]]; }
+/* The dry run: the plan as shell lines on stdout; 3 when the game is not in the work folder. */
+static int dry_run(LaunchPlan *p) {
+    printf("# FC 26 launcher, dry run: nothing is started\ncd %s\nunset %s\n", quoted(p.work).UTF8String,
+           [[p.unset sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@" "].UTF8String);
+    for (NSString *k in [p.set.allKeys sortedArrayUsingSelector:@selector(compare:)]) printf("export %s=%s\n", k.UTF8String, quoted(p.set[k]).UTF8String);
+    printf("exec %s %s %s 2> %s\n", quoted(p.args[0]).UTF8String, p.args[1].UTF8String, p.args[2].UTF8String, quoted(p.log).UTF8String);
+    if (![NSFileManager.defaultManager isExecutableFileAtPath:p.args[0]]) { fprintf(stderr, "the game is not built: %s\n", p.args[0].UTF8String); return 3; }
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    (void)argc; (void)argv;
     @autoreleasepool {
+        const char *dry = getenv("FC26_LAUNCHER_DRYRUN");
+        if ((argc > 1 && !strcmp(argv[1], "--dry-run")) || (dry && !strcmp(dry, "1"))) {
+            NSString *work = work_folder(); if (!work) { fprintf(stderr, "no work folder (Info.plist FC26WorkFolder or FC26_WORK)\n"); return 2; }
+            return dry_run(launch_plan(NSUserDefaults.standardUserDefaults, work, NSHomeDirectory(), NSScreen.screens, NSScreen.mainScreen));
+        }
         [NSApplication sharedApplication]; NSApp.activationPolicy = NSApplicationActivationPolicyRegular;
         Launcher *l = [Launcher new]; NSApp.delegate = l;
         [NSApp run];
         if (!l.launch) return 0;
-        NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
-        NSString *work = work_folder(), *home = NSHomeDirectory();
-        NSString *data = [home stringByAppendingPathComponent:@"Library/Application Support/MacNativeGames/FC26"];
-        NSString *logs = [home stringByAppendingPathComponent:@"Library/Logs/MacNativeGames"];
-        /* The game slot is the work folder's (<work>/analysis/game-slot), the one `make boot` uses by default: one queue, so
-           an agent's test and the player's game never run together and the player's goes first (runtime/game_slot.c). */
-        NSString *profile = [data stringByAppendingPathComponent:@"profile"], *slot = [work stringByAppendingPathComponent:@"analysis/game-slot"];
-        if (!make_dir(profile) || !make_dir(slot) || !make_dir(logs)) { fail([NSString stringWithFormat:@"%@", data]); return 1; }
-        if (chdir(work.fileSystemRepresentation)) { fail(work); return 1; }   // the runtime reads extracted/ and rewritten/ relative to it
+        LaunchPlan *p = launch_plan(NSUserDefaults.standardUserDefaults, work_folder(), NSHomeDirectory(), NSScreen.screens, NSScreen.mainScreen);
+        if (!make_dir(p.profile) || !make_dir(p.slot) || !make_dir(p.logs)) { fail([NSString stringWithFormat:@"%@", p.data]); return 1; }
+        if (chdir(p.work.fileSystemRepresentation)) { fail(p.work); return 1; }   // the runtime reads extracted/ and rewritten/ relative to it
+        for (NSString *k in p.unset) unsetenv(k.UTF8String);
+        for (NSString *k in p.set) setenv(k.UTF8String, p.set[k].UTF8String, 1);
+        { FILE *cf = fopen(p.input.fileSystemRepresentation, "w"); if (cf) fclose(cf); }
 
-        unsetenv("FC26_PATCHES");   // FC 26 has no game patch yet
-        setenv("DM_PRESENT_HZ", "60", 1);
-        NSArray<NSScreen *> *all = NSScreen.screens; NSUInteger mi = [all indexOfObject:NSScreen.mainScreen];
-        if (mi == NSNotFound) mi = 0;
-        for (NSUInteger i = 0; i < all.count; i++) if ([screen_name(all[i]) isEqualToString:[d stringForKey:@"monitor"]]) mi = i;
-        setenv("FC26_DISPLAY", [NSString stringWithFormat:@"%lu", (unsigned long)mi].UTF8String, 1);
-        BOOL full = [d boolForKey:@"fullscreen"];
-        if (full) {
-            setenv("FC26_FULLSCREEN", "1", 1);
-            int h = (int)[d integerForKey:@"output"]; NSSize px = screen_pixels(all.count ? all[mi] : NSScreen.mainScreen);
-            if (h > 0 && h < px.height) setenv("TOTK_DRAWABLE_SCALE", [NSString stringWithFormat:@"%.4f", h / px.height].UTF8String, 1);
-        }
-        NSInteger s = [d integerForKey:@"size"]; if (s < 0 || s > 3) s = 2;
-        setenv("TOTK_WINDOW_SIZE", [NSString stringWithFormat:@"%dx%d", sizes[s][0], sizes[s][1]].UTF8String, 1);
-        if (![d objectForKey:@"metalfx"] || [d boolForKey:@"metalfx"]) { setenv("TOTK_MFX_UPSCALE", "1", 1); setenv("TOTK_MFX_OUTPUT", "1", 1); }
-        if ([d objectForKey:@"hud"] && ![d boolForKey:@"hud"]) setenv("TOTK_FPS_OVERLAY", "0", 1); else setenv("DM_HUD_RENDER", "1", 1);
-        setenv("TOTK_ROMFS_MODS", "0", 1);   // no mod
-
-        setenv("TOTK_PROFILE_DIR", profile.fileSystemRepresentation, 1);
-        setenv("TOTK_GAME_SLOT_DIR", slot.fileSystemRepresentation, 1);
-        setenv("TOTK_ROMFS_PROOF_DIR", data.fileSystemRepresentation, 1);
-        NSString *preferred = NSLocale.preferredLanguages.firstObject; if (preferred) setenv("TOTK_LOCALE", preferred.UTF8String, 1);
-        /* The graphics settings the kit's earlier launchers use. TODO(mac): confirm each for FC 26 at the first frame (story 4). */
-        setenv("TOTK_GPU_ALLOW_SUBMIT", "1", 1); setenv("TOTK_GPU_WIDEN", "1", 1); setenv("TOTK_GPU_BLOCKRT", "1", 1);
-        setenv("TOTK_GPU_MIDCLEAR", "1", 1); setenv("TOTK_GPU_BUDGET_MB", "5000", 1);
-        setenv("DM_PRESENT_LINK_FALLBACK", "1", 1);   // keep presenting when macOS pauses the display link for a window it thinks covered
-        setenv("TOTK_SLOT_OWNER", "user", 1); setenv("TOTK_SLOT_PURPOSE", "player", 1);
-        unsetenv("TOTK_HEADLESS");
-        { NSString *cmds = [data stringByAppendingPathComponent:@"input.txt"]; FILE *cf = fopen(cmds.fileSystemRepresentation, "w"); if (cf) fclose(cf);
-          setenv("TOTK_INPUT_FILE", cmds.fileSystemRepresentation, 1); }   // echo "shot ~/Desktop/shot.png" >> it
-
-        NSString *log = [logs stringByAppendingPathComponent:@"fc26.log"], *prev = [logs stringByAppendingPathComponent:@"fc26.previous.log"];
-        [NSFileManager.defaultManager removeItemAtPath:prev error:nil]; [NSFileManager.defaultManager moveItemAtPath:log toPath:prev error:nil];
-        FILE *lf = fopen(log.fileSystemRepresentation, "w"); if (lf) { dup2(fileno(lf), STDOUT_FILENO); dup2(fileno(lf), STDERR_FILENO); fclose(lf); }
-        fprintf(stderr, "[launcher] work %s, present %s Hz, display %s, fullscreen %s, window %s, drawable scale %s, MetalFX %s\n",
-                work.UTF8String, getenv("DM_PRESENT_HZ"), getenv("FC26_DISPLAY"), full ? "yes" : "no", getenv("TOTK_WINDOW_SIZE"),
+        [NSFileManager.defaultManager removeItemAtPath:p.previousLog error:nil]; [NSFileManager.defaultManager moveItemAtPath:p.log toPath:p.previousLog error:nil];
+        FILE *lf = fopen(p.log.fileSystemRepresentation, "w"); if (lf) { dup2(fileno(lf), STDOUT_FILENO); dup2(fileno(lf), STDERR_FILENO); fclose(lf); }
+        fprintf(stderr, "[launcher] work %s, present %s Hz, display %s, fullscreen %s, window %s, drawable scale %s, MetalFX %s, sound on\n",
+                p.work.UTF8String, getenv("DM_PRESENT_HZ"), getenv("FC26_DISPLAY"), getenv("FC26_FULLSCREEN") ? "yes" : "no", getenv("TOTK_WINDOW_SIZE"),
                 getenv("TOTK_DRAWABLE_SCALE") ?: "1", getenv("TOTK_MFX_OUTPUT") ? "on" : "off");
-        NSString *binary = binary_path();
-        char *const args[] = {(char *)binary.fileSystemRepresentation, "rewritten/" FC26_VERSION_DIR, "boot", NULL};
+        char *const args[] = {(char *)p.args[0].fileSystemRepresentation, (char *)p.args[1].UTF8String, (char *)p.args[2].UTF8String, NULL};
         execv(args[0], args);
         fprintf(stderr, "[launcher] execv failed: %s\n", strerror(errno));
-        fail([NSString stringWithFormat:T("Não foi possível iniciar o jogo. Veja %@.", "Starting the game failed. See %@."), log]);
+        fail([NSString stringWithFormat:T("Não foi possível iniciar o jogo. Veja %@.", "Starting the game failed. See %@."), p.log]);
         return 1;
     }
 }

@@ -4,6 +4,8 @@
      nn::web::RequestExitWebPage   no page is open: nothing to close
      nn::ec::ShowShop*             the Nintendo eShop applet (product list, details, add-on content list, consumable item,
                                    enter-code scene): Result 0, nothing bought
+     nn::friends::ShowFriendList,  the friends applets (friend list, a user's profile): Result 0, closed; offline there is
+       ShowUserDetailInfo          no friend to show
    On the Switch these start a library applet that takes the screen until the player leaves it; offline neither the
    eShop nor a web page can load, and the host has no applet system (the kit answers swkbd and err by name the same way).
    A name is matched by its qualified name only, the mangled prefix "_ZN2nn<n><namespace><n><function>E" before the
@@ -51,6 +53,11 @@ static uint32_t show_shop(void) {
     return 0;
 }
 
+static uint32_t show_friends(void) {
+    fprintf(stderr, "[totk-net] nn::friends applet: closed at once (offline)\n");
+    return 0;
+}
+
 static const struct { const char *space, *function, *params; void *fn; } applets[] = {
     {"web", "ShowWebPage", "PNS0_18WebPageReturnValueE", show_web_page},   /* params: first parameter WebPageReturnValue* */
     {"web", "ShowWebPage", "", show_web_page_other},
@@ -60,6 +67,8 @@ static const struct { const char *space, *function, *params; void *fn; } applets
     {"ec", "ShowShopAddOnContentList", "", show_shop},
     {"ec", "ShowShopConsumableItemDetail", "", show_shop},
     {"ec", "ShowShopEnterCodeScene", "", show_shop},
+    {"friends", "ShowFriendList", "", show_friends},
+    {"friends", "ShowUserDetailInfo", "", show_friends},
 };
 
 /* "_ZN2nn" <len><space> <len><function> "E" <params>: the mangled prefix of nn::<space>::<function>(<params>...). */
