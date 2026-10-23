@@ -11,6 +11,8 @@ Horizon, NVN sobre Metal). Esta pasta é um runtime próprio, derivado do fork d
   [docs/ESTORIA2_NUVEM.md](docs/ESTORIA2_NUVEM.md).
 - Cache de shaders salvo em disco (estórias 4 a 6): como o kit faz, o desenho para o FC 26, o que testar no Mac e como
   medir a 1ª x 2ª vez: [docs/SHADERS_NUVEM.md](docs/SHADERS_NUVEM.md).
+- Estória 4, parte dos serviços offline (loja, rede local, DLC, controle parental, Opus), preparada na nuvem:
+  [docs/SERVICOS_NUVEM.md](docs/SERVICOS_NUVEM.md).
 
 É preciso ter o jogo: o NSP e o `prod.keys` do próprio Switch. Nada do jogo entra no git (NSP/NCA/RomFS,
 `main`/`sdk`/`rtld`/`.nro`, saídas do reescritor, chaves, saves); a pasta de trabalho (`FC26_build/` ou a indicada em

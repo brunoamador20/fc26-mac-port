@@ -127,6 +127,8 @@ void runtime_input_clear(void);
 int runtime_handheld_mode(void);   /* TOTK_OPERATION_MODE=handheld (runtime/services.c) */
 void *runtime_input_override(const char *name);
 void *runtime_game_override(const char *name);   /* runtime/system_services.c: offline network and system functions */
+void *runtime_offline_applet_override(const char *name);   /* runtime/offline_applets.c: web page and eShop applets, closed at once */
+int runtime_offline_applet_prefix(char *out, size_t cap, unsigned index);   /* its mangled-name prefixes (tests, scripts) */
 typedef struct { uint64_t buttons; int32_t lx,ly,rx,ry; int connected; } RuntimeGamepadState;
 void runtime_gamepad_start(void);
 void runtime_gamepad_read(RuntimeGamepadState *out);
