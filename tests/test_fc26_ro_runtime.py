@@ -47,7 +47,28 @@ def write_fixture(directory, nro=None, name='m'):
                   g_tls_local=synth.G_TLS_LOCAL, g_tls_sym=synth.G_TLS_SYM, tls_value=0x8,
                   patched_size=len(patched), gate0_ret=int(gates[0].split()[0], 0), gate0_arg=int(gates[0].split()[2]))
     (directory / 'expect.txt').write_text(''.join(f'{k} {v:#x}\n' for k, v in values.items()))
+    # A module without TLS for the host link (caminho B), and one the NRR allows but that has no rewritten image.
+    notls = synth.make_nro(module_id=bytes(range(0x40, 0x54)) + bytes(12), tlsdesc=False)
+    (directory / 'notls.nro').write_bytes(notls)
+    synth.fake_rewrite(notls, directory, 'notls')
+    tool.register(directory / 'notls.nro', directory, 'notls')
+    (directory / 'notls.nrr').write_bytes(synth.make_nrr([hashlib.sha256(notls).digest()]))
+    stranger = synth.make_nro(module_id=bytes(range(0x60, 0x74)) + bytes(12))
+    (directory / 'stranger.nro').write_bytes(stranger)
+    (directory / 'stranger.nrr').write_bytes(synth.make_nrr([hashlib.sha256(stranger).digest(), digest]))
     return nro, patched
+
+
+def runtime_tree(directory):
+    """runtime/ro next to the runtime.h and ipc.h it includes: FC 26's own once story 2 has made them, else the kit's
+    (games/by3, which FC 26's runtime is a copy of), and a game_version.h with FC 26's program id."""
+    tree = directory / 'rt/runtime'
+    shutil.copytree(RO, tree / 'ro')
+    for header in ('runtime.h', 'ipc.h'):
+        own = ROOT / 'games/fc26/runtime' / header
+        shutil.copy(own if own.exists() else ROOT / 'games/by3/runtime' / header, tree / header)
+    (tree / 'game_version.h').write_text(f'#pragma once\n#define GAME_TITLE_ID {synth.FC26_PROGRAM_ID:#x}ULL\n')
+    return tree
 
 
 def build(compiler, sources, output, include):
@@ -74,6 +95,51 @@ class Core(unittest.TestCase):
             run = subprocess.run([str(exe), str(directory)], capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             self.assertIn('ro core ok', run.stdout)
+
+
+class Service(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.compiler = shutil.which('cc')
+        if not cls.compiler: raise unittest.SkipTest('A C compiler is required')
+        cls.temp = tempfile.TemporaryDirectory()
+        cls.dir = Path(cls.temp.name)
+        write_fixture(cls.dir)
+        tree = runtime_tree(cls.dir)
+        cls.exe = cls.dir / 'service'
+        sources = [ROOT / 'tests/fc26_ro_service_test.c'] + [tree / 'ro' / f for f in ('ro_core.c', 'ro_sha256.c', 'ro_module.c', 'ro_service.c')]
+        made = build(cls.compiler, sources, cls.exe, [tree])
+        if made.returncode: raise AssertionError(made.stdout + made.stderr)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temp.cleanup()
+
+    def run_mode(self, mode, directory, **env):
+        import os
+        return subprocess.run([str(self.exe), mode, str(directory)], capture_output=True, text=True, env=dict(os.environ, **env))
+
+    def test_flow(self):
+        run = self.run_mode('flow', self.dir)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn('ro service ok', run.stdout)
+        self.assertIn('[fc26-ro] mapped m at', run.stderr)
+        self.assertIn('linked by the host: relative=5 symbolic=6 cross=4 weak_zero=1', run.stderr)
+
+    def test_authorized_module_without_image_stops(self):
+        run = self.run_mode('missing', self.dir)
+        self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
+        self.assertIn('has no rewritten image', run.stderr)
+        self.assertIn(hashlib.sha256((self.dir / 'stranger.nro').read_bytes()).hexdigest(), run.stderr)
+
+    def test_image_that_does_not_match_the_manifest_stops(self):
+        tampered = self.dir / 'tampered'
+        shutil.copytree(self.dir, tampered, ignore=shutil.ignore_patterns('rt', 'service*', 'tampered'))
+        image = bytearray((tampered / 'm.patched.bin').read_bytes()); image[0x4010] ^= 1
+        (tampered / 'm.patched.bin').write_bytes(image)
+        run = self.run_mode('tampered', tampered, FC26_RO_DIR=str(tampered))
+        self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
+        self.assertIn('SHA-256 differs', run.stderr)
 
 
 if __name__ == '__main__':
