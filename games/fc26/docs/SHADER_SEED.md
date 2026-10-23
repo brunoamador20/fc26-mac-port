@@ -20,8 +20,10 @@ pedido do runtime, no cache `rt-<cadeia>`, com a mesma chave e o mesmo nome de a
 
 ## Chave e nomes (os do runtime)
 
-- Chave: SHA-256(`controle[:ctl_key_len]` + `código[:u32@controle+0x704]`) (`nvn_mtl.m` `prog_get`; teste contra
-  `runtime/shader_cache.c` `fc26_sc_shader_key`).
+- Chave: SHA-256(`controle[:ctl_key_len]` **sem `+0x7d0..+0x7e7`** + `código[:u32@controle+0x704]`) (`nvn_mtl.m`
+  `prog_get`/`ctl_key_update`; `runtime/shader_cache.c` `fc26_sc_shader_key`; `tests/test_nvn_shader_key.py` compila os
+  três e compara). Os 24 bytes são um identificador do registro compilado (8 bytes únicos por registro, 16 que seguem o
+  código), que a tradução não lê; ver "Controle trocado pelo jogo" abaixo.
 - Variante: `<chave>-<12 hex do SHA-256 do JSON das respostas>`, JSON do `NSJSONSerialization` com
   `NSJSONWritingSortedKeys` (ordem numérica do NSString: "9" antes de "10"; teste contra o Foundation).
 - Pedido ao `totk_xlate --service`: os campos do `totk_rt_variant` (`variant`, `stage`, `code`, `c1`, respostas,
@@ -40,7 +42,12 @@ make shader-seed PY=$PY WORK=$WORK                 # ~2 min: $WORK/build/shader-
 make shader-seed-translate PY=$PY WORK=$WORK CACHE=$WORK/build/shader-cache/rt-totk-native-v4-unverified
 # prova com um shader que o runtime já traduziu (só lê o cache e o diário):
 $PY scripts/shader_seed.py prove --out $WORK/build/shader-seed-fc26 --key <chave> --scratch /tmp/prova
+# quantos shaders do diário (os que o jogo ligou) a extração dá, pela chave dos bytes:
+$PY scripts/shader_seed.py coverage --out $WORK/build/shader-seed-fc26
 ```
+
+`translate`, `prove` e `coverage` chaveiam os arquivos extraídos pelos bytes, então uma extração feita com a regra
+antiga (nomes antigos, 10.844 arquivos) serve sem `scan` de novo: vira 9.358 shaders.
 
 `translate --journal-answers $WORK/build/shader-cache/fc26-journal` traduz também os estados ligados que o diário viu.
 
@@ -54,12 +61,12 @@ $PY scripts/shader_seed.py prove --out $WORK/build/shader-seed-fc26 --key <chave
 
 ## Limites conhecidos
 
-- **Controle trocado pelo jogo:** de 371 shaders do diário, 194 saem do disco com a mesma chave; os outros 177 têm o
-  mesmo código e um controle que existe no disco, mas de **outro registro**, igual a menos dos 24 bytes em
-  `+0x7d0..+0x7e7`. O jogo junta registros com controles iguais fora desse campo e entrega um deles; qual é depende da
-  ordem de carga (não é sempre o primeiro do disco). Com a chave atual esses 177 só acertam se o par for adivinhado.
-  Proposta (fora desta tarefa, muda a chave do runtime): tirar `+0x7d0..+0x7e7` do hash em `nvn_mtl.m`
-  `ctl_key_len`/`prog_get` **e** `shader_cache.c` (como o kit faz com bytes do BotW); aí os 371 acertam.
+- **Controle trocado pelo jogo (resolvido):** com a chave antiga, 195 de 375 shaders do diário saíam do disco com a
+  mesma chave; os outros têm o mesmo código e o controle, inteiro, de **outro registro** do disco, diferente do seu só
+  nos 24 bytes `+0x7d0..+0x7e7`. Esses bytes não entram na tradução (o pedido leva o código, `c1` por
+  `+0x700/+0x704`, o estágio `+0x714` e o grupo `+0x748`; o tradutor nem recebe o controle) e 180 variantes traduzidas
+  com o registro do disco saíram byte a byte iguais às do cache. A chave agora os deixa de fora: 375/375. O runtime
+  move o diário antigo para a nova chave na abertura (`fc26_sc_journal_rekey`) e o prefill retraduz as variantes.
 - Estado padrão: 115 das 196 linhas do diário com shader extraído usam a variante padrão; o resto precisa do estado
   certo (`--journal-answers`) ou é traduzido no jogo.
 - O pré-aquecimento compila **todo** `_b.metal` do cache na abertura e `FC26_SHADER_WARM=all` espera tudo (até 300 s):

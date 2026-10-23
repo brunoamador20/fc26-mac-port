@@ -5201,6 +5201,18 @@ static NSArray *rt_local(const uint8_t *control, int st);
    allocation, so the bytes after it are not the shader's and differ from the archive's), never more than 0x880.
    scripts/prepare_shader_seed.py control_key_len computes the same offline. */
 static inline uint32_t ctl_key_len(const uint8_t *control) { uint32_t n; memcpy(&n, control + 0x20, 4); return n >= 0x7cc && n < 0x880 ? n : 0x880; }
+/* FC 26: the 24 bytes at +0x7d0..+0x7e7 stay out of the key. They are an identifier of the compiled record (8 bytes unique
+   to each of the game's 10,844 records, 16 that follow its code), not read by the translation (it takes the code, c1 at
+   +0x700/+0x704, the stage at +0x714 and the thread group at +0x748); the game binds the control section of another
+   record with the same bytes outside them (179 of 373 journaled shaders), so with them the key changed with load order.
+   runtime/shader_cache.c fc26_sc_shader_key and scripts/shader_seed.py shader_key hash the same (docs/SHADER_SEED.md). */
+#define CTL_KEY_SKIP_LO 0x7d0
+#define CTL_KEY_SKIP_HI 0x7e8
+static void ctl_key_update(CC_SHA256_CTX *ctx, const uint8_t *control) {
+    uint32_t n = ctl_key_len(control);
+    CC_SHA256_Update(ctx, control, n < CTL_KEY_SKIP_LO ? n : CTL_KEY_SKIP_LO);
+    if (n > CTL_KEY_SKIP_HI) CC_SHA256_Update(ctx, control + CTL_KEY_SKIP_HI, n - CTL_KEY_SKIP_HI);
+}
 static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // 只在提交线程调用 | Called only on the submit thread
     prog_t *p = (prog_t *)cp;
     static const prog_t *lp; static uint64_t lser, lgen; static NvProg *lpr;   // 上次结果：同一对象、同一序号且序号表未变即直接用 | Last result: same object, same serial and unchanged serial table means it is used directly
@@ -5216,7 +5228,7 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // 只在提�
         memcpy(&length,control+0x704,4);memcpy(&nvn_stage,control+0x714,4);
         if (!length || length>16*1024*1024) MDIE("invalid TOTK shader code length %u",length);
         // Host NVN GPU addresses are CPU addresses (MemoryPoolGetBufferAddress).
-        uint8_t md[32];CC_SHA256_CTX ctx;CC_SHA256_Init(&ctx);CC_SHA256_Update(&ctx,control,ctl_key_len(control));
+        uint8_t md[32];CC_SHA256_CTX ctx;CC_SHA256_Init(&ctx);ctl_key_update(&ctx,control);
         CC_SHA256_Update(&ctx,(const void *)(uintptr_t)p->sd[i].data,length);CC_SHA256_Final(md,&ctx);
         char key[65];for(unsigned j=0;j<32;j++)snprintf(key+2*j,3,"%02x",md[j]);
         // TOTK: stage from control+0x714 (0 vertex, 1 fragment, 5 compute); translation answered from the bound state.

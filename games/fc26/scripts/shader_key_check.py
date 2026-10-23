@@ -2,7 +2,7 @@
 """Are FC 26's shader keys the same from one start to the next? (docs/SHADERS_NUVEM.md, question 1)
 
 The translation cache finds a shader by SHA-256 of the control section NVN receives (its first ctl_key_len bytes) and of
-the code (nvn_mtl.m prog_get). Breath of the Wild showed that a game can hand NVN control sections with bytes that are
+the code (nvn_mtl.m prog_get; +0x7d0..+0x7e7 left out). Breath of the Wild showed that a game can hand NVN control sections with bytes that are
 not the shader's (botw: its own allocation after the section); bytes that change from one start to the next would give
 a new key every start, and then the cache never hits. FC 26's shaders come from Frostbite's shader depot at run time, so
 this is measured, not assumed.
@@ -22,10 +22,18 @@ from pathlib import Path
 CONTROL_LEN = 0x880
 
 
+KEY_SKIP = (0x7d0, 0x7e8)   # nvn_mtl.m CTL_KEY_SKIP_LO/HI: left out of the key
+
+
 def key_len(control):
     """nvn_mtl.m ctl_key_len."""
     n = struct.unpack_from('<I', control, 0x20)[0]
     return n if 0x7cc <= n < 0x880 else 0x880
+
+
+def hashed(offset, n):
+    """Does the control byte at offset enter the key (nvn_mtl.m ctl_key_update) of a section hashed up to n?"""
+    return offset < n and not KEY_SKIP[0] <= offset < KEY_SKIP[1]
 
 
 def read_dump(path):
@@ -72,9 +80,9 @@ def compare(first, other):
         ca, cb = next(iter(a.values())), next(iter(b.values()))
         n = min(key_len(ca), key_len(cb))
         diff = [i for i in range(CONTROL_LEN) if ca[i] != cb[i]]
-        inside.update(i for i in diff if i < n)
-        outside.update(i for i in diff if i >= n)
-        if not any(i < n for i in diff):
+        inside.update(i for i in diff if hashed(i, n))
+        outside.update(i for i in diff if not hashed(i, n))
+        if not any(hashed(i, n) for i in diff):
             header_only += 1   # same hashed control bytes: the code's 0x30-byte header (not in the dump) differs
     return dict(common_codes=len(common), stable=stable, unstable=unstable,
                 only_first=len(set(first) - set(other)), only_other=len(set(other) - set(first)),

@@ -28,10 +28,15 @@ def make_shader(seed, stage=1, code_len=0x200, c1=0x100, key_len_word=0):
 
 
 def expected_key(control, code):
-    """nvn_mtl.m prog_get: SHA-256(control[:ctl_key_len] + code[:u32 at control+0x704])."""
+    """nvn_mtl.m prog_get: SHA-256(control[:ctl_key_len] without +0x7d0..+0x7e7 + code[:u32 at control+0x704])."""
     n = struct.unpack_from('<I', control, 0x20)[0]
     n = n if 0x7cc <= n < 0x880 else 0x880
-    return hashlib.sha256(control[:n] + code[:struct.unpack_from('<I', control, 0x704)[0]]).hexdigest()
+    return hashlib.sha256(control[:min(n, 0x7d0)] + control[0x7e8:n] + code[:struct.unpack_from('<I', control, 0x704)[0]]).hexdigest()
+
+
+def old_key(control, code):
+    """The key before +0x7d0..+0x7e7 was left out (journals written then are named by it)."""
+    return hashlib.sha256(control + code[:struct.unpack_from('<I', control, 0x704)[0]]).hexdigest()
 
 
 class ShaderCache(unittest.TestCase):
@@ -97,6 +102,21 @@ class ShaderCache(unittest.TestCase):
         a = self.run_check('key', self.write('c', control), self.write('k1', code))
         b = self.run_check('key', self.write('c', control), self.write('k2', code[:0x200] + bytes(64)))
         self.assertEqual(a, b)
+
+    def test_record_identifier_does_not_change_the_key(self):
+        """control+0x7d0..+0x7e7: the game binds the section of another record that differs only there."""
+        for word in (0, 0x7d1):
+            control, code = make_shader(4, key_len_word=word)
+            key = self.run_check('key', self.write('c', control), self.write('k', code))
+            for at in range(0x7d0, 0x7e8):
+                other = bytearray(control); other[at] ^= 0x5a
+                with self.subTest(word=word, at=hex(at)):
+                    self.assertEqual(self.run_check('key', self.write('c2', bytes(other)), self.write('k', code)), key)
+            for at in (0x7cf, 0x7e8):   # the neighbours still count (within the hashed length)
+                other = bytearray(control); other[at] ^= 0x5a
+                with self.subTest(word=word, at=hex(at)):
+                    same = self.run_check('key', self.write('c2', bytes(other)), self.write('k', code)) == key
+                    self.assertEqual(same, word == 0x7d1 and at == 0x7e8)
 
     def test_implausible_code_length_has_no_key(self):
         for length in [0, (16 << 20) + 1]:
@@ -249,6 +269,33 @@ class ShaderCache(unittest.TestCase):
         wrong = 'e' * 64   # a key the bytes do not hash to: the key rule differs from nvn_mtl.m's
         self.assertEqual(self.run_check('put', journal, wrong, 1, self.write('c', control), self.write('k', code)).strip(), '-2')
         self.assertFalse((journal / f'{wrong}.shader').exists())
+
+    def test_rekey_moves_old_journal_entries_and_merges_twins(self):
+        journal, cache = self.dir / 'journal', self.dir / 'rt'
+        control, code = make_shader(8, stage=0, code_len=0x340, c1=0x300)
+        twin = bytearray(control); twin[0x7d0:0x7e8] = bytes(range(24))   # the same shader from another record
+        shader = lambda c: b'FC26SHD1' + struct.pack('<4I', 1, 0, CONTROL_LEN, 0x340) + c + code[:0x340]
+        new = expected_key(control, code)
+        olds = [old_key(control, code), old_key(bytes(twin), code)]
+        for old, c, sfx, js in [(olds[0], control, '0123456789ab', '{"tex":{}}'), (olds[1], bytes(twin), 'ba9876543210', '{"tex":{"0":"2d"}}')]:
+            self.write(f'journal/{old}.shader', shader(c))
+            self.write(f'journal/{old}.rows', f'V\t{old}-0123456789ab\t0\t{{"tex":{{}}}}\nV\t{old}-{sfx}\t0\t{js}\n'.encode())
+            self.cache_files('rt', old)
+        current, _, _, _ = self.put(journal, 9)   # already under the current rule: left alone
+        self.cache_files('rt', current)
+        self.write('rt/pso_collected.tsv', b'S\tx\t0\n')
+        self.assertEqual(self.run_check('get', journal, olds[0]).strip(), 'fail bytes do not hash to the key')
+        self.assertEqual(self.run_check('rekey', journal, cache).strip(), '2')
+        self.assertEqual(sorted(p.name for p in journal.iterdir()), sorted([f'{new}.shader', f'{new}.rows', f'{current}.shader']))
+        self.assertEqual(self.run_check('get', journal, new).strip(), 'ok 0 832 768')
+        self.assertEqual(self.run_check('rows', journal, new).splitlines(),
+                         [f'{new}-0123456789ab 0 {{"tex":{{}}}}', f'{new}-ba9876543210 0 {{"tex":{{"0":"2d"}}}}', 'rows 2'])
+        self.assertEqual(sorted(p.name for p in cache.iterdir()), sorted(self.cache_files('rt', current) + ['pso_collected.tsv']))
+        self.assertEqual(self.run_check('rekey', journal, cache).strip(), '0')   # nothing left to move
+        self.write(f'journal/{olds[0]}.shader', shader(control)); self.cache_files('rt', olds[0])
+        self.assertEqual(self.run_check('rekey', journal, '-').strip(), '1')     # nothing to re-translate: cache kept
+        self.assertTrue((cache / f'{olds[0]}.variants').exists())
+        self.assertEqual(self.run_check('rekey', self.dir / 'none', '-').strip(), '0')
 
     def test_journal_rows_once_per_variant(self):
         journal = self.dir / 'journal'

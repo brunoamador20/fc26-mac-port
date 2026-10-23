@@ -28,8 +28,12 @@ void fc26_sha256_final(fc26_sha256 *s, uint8_t out[32]);
 void fc26_hex(const uint8_t *p, size_t n, char *out);          /* out holds 2n + 1 */
 int fc26_sha256_file(const char *path, char hex[65]);           /* 0, or -1 when it cannot be read */
 
-/* The shader key, as nvn_mtl.m prog_get computes it: SHA-256 of the control section's first control_key_len bytes and
-   of the code's first <u32 at control+0x704> bytes. control_key_len is nvn_mtl.m ctl_key_len (keep the two equal). */
+/* The shader key, as nvn_mtl.m prog_get computes it: SHA-256 of the control section's first control_key_len bytes
+   without [FC26_SC_KEY_SKIP_LO, FC26_SC_KEY_SKIP_HI) and of the code's first <u32 at control+0x704> bytes.
+   control_key_len is nvn_mtl.m ctl_key_len, the skipped range its CTL_KEY_SKIP_LO/HI (keep them equal): an identifier of
+   the compiled record that the translation never reads, and that differs between records the game binds alike. */
+#define FC26_SC_KEY_SKIP_LO 0x7d0u
+#define FC26_SC_KEY_SKIP_HI 0x7e8u
 uint32_t fc26_sc_control_key_len(const uint8_t *control);
 int fc26_sc_shader_key(const uint8_t *control, const uint8_t *code, char key[65]);   /* 0, -1 implausible code length */
 int fc26_sc_is_key(const char *s);                                                  /* 64 lowercase hex digits */
@@ -74,6 +78,13 @@ typedef int (*fc26_sc_row_fn)(void *ctx, const char *variant, int depth_minus_w,
 int fc26_sc_journal_rows(const char *journal, const char *key, fc26_sc_row_fn fn, void *ctx);          /* rows, -1 */
 /* The journaled shaders (keys with a .shader file), sorted; free(*keys). Returns the count, -1. */
 long fc26_sc_journal_keys(const char *journal, char (**keys)[65]);
+
+/* Journal entries named by an older key rule (FC26_SC_KEY_SKIP_LO/HI came later): each moves to the key its bytes hash
+   to now, its rows renamed (<key>-<same suffix>, merged when two old entries meet); the old key's files go from the
+   journal and, when cache_dir is given, from the cache (its translations are under names never looked up again), so
+   the prefill translates the rows before play. Pass no cache_dir when nothing can translate them again. Returns the
+   entries moved, -1 when the journal cannot be read. */
+long fc26_sc_journal_rekey(const char *journal, const char *cache_dir);
 
 /* Size limit, least recently used first. A shader's last use is the newest modification time of its files in either
    folder; fc26_sc_touch marks a use (the journal's rows, else the cache's index). */

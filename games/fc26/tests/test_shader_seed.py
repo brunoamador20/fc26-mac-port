@@ -317,6 +317,28 @@ class Translate(unittest.TestCase):
         self.assertEqual({p.name: p.stat().st_mtime_ns for p in self.cache.iterdir() if p.name in before and not p.name.startswith(self.keys[0])},
                          {k: v for k, v in before.items() if not k.startswith(self.keys[0])})
 
+    def test_extraction_under_an_older_key_rule_is_keyed_by_its_bytes(self):
+        """Files named by the key before +0x7d0..+0x7e7 was left out, and two records of one shader: one shader, new key."""
+        shaders = self.out / 'shaders'
+        for f in shaders.iterdir():
+            f.unlink()
+        control, code = make_shader(40, stage=1)
+        twin = bytearray(control); twin[0x7d0:0x7e8] = bytes(0x18)
+        for c in (control, bytes(twin)):
+            old = hashlib.sha256(c + code[:shader_seed.code_length(c)]).hexdigest()
+            (shaders / f'{old}.shader').write_bytes(shader_seed.journal_bytes(1, c, code))
+        key = shader_seed.shader_key(control, code)
+        self.assertEqual(list(shader_seed.extracted(shaders)), [key])
+        self.stamp()
+        self.assertEqual(self.run_translate(), 0)
+        self.assertEqual(sorted(p.name for p in self.cache.glob('*.variants')), [f'{key}.variants'])
+        journal = self.d / 'journal'; journal.mkdir()
+        (journal / f'{"0" * 64}.shader').write_bytes(shader_seed.journal_bytes(1, bytes(twin), code))   # bound as the other record
+        self.assertEqual(shader_seed.main(['coverage', '--out', str(self.out), '--journal', str(journal)]), 0)
+        c2, k2 = make_shader(41, stage=1)
+        (journal / f'{"1" * 64}.shader').write_bytes(shader_seed.journal_bytes(1, c2, k2))                 # not extracted
+        self.assertEqual(shader_seed.main(['coverage', '--out', str(self.out), '--journal', str(journal)]), 1)
+
     def test_refuses_a_cache_the_runtime_would_empty(self):
         with self.assertRaises(SystemExit):
             self.run_translate()                                               # no identity

@@ -103,7 +103,9 @@ int fc26_sc_shader_key(const uint8_t *control, const uint8_t *code, char key[65]
     uint32_t len = u32_at(control, 0x704);
     if (!len || len > FC26_SC_CODE_MAX) return -1;
     fc26_sha256 s; fc26_sha256_init(&s);
-    fc26_sha256_update(&s, control, fc26_sc_control_key_len(control));
+    uint32_t n = fc26_sc_control_key_len(control);   /* nvn_mtl.m ctl_key_update: without +0x7d0..+0x7e7 */
+    fc26_sha256_update(&s, control, n < FC26_SC_KEY_SKIP_LO ? n : FC26_SC_KEY_SKIP_LO);
+    if (n > FC26_SC_KEY_SKIP_HI) fc26_sha256_update(&s, control + FC26_SC_KEY_SKIP_HI, n - FC26_SC_KEY_SKIP_HI);
     fc26_sha256_update(&s, code, len);
     uint8_t md[32]; fc26_sha256_final(&s, md); fc26_hex(md, 32, key);
     return 0;
@@ -275,7 +277,8 @@ int fc26_sc_journal_put_shader(const char *journal, const char *key, int stage, 
     return write_atomic(path, head, sizeof head, control, FC26_SC_CONTROL_LEN, code, code_len) ? -1 : 1;
 }
 static int fail_why(char *why, size_t n, const char *text) { if (why && n) snprintf(why, n, "%s", text); return -1; }
-int fc26_sc_journal_get_shader(const char *journal, const char *key, fc26_sc_shader *out, char *why, size_t why_len) {
+/* check_key 0: the bytes may hash to another key (fc26_sc_journal_rekey reads entries named by an older key rule). */
+static int load_shader(const char *journal, const char *key, int check_key, fc26_sc_shader *out, char *why, size_t why_len) {
     char name[80], path[PATH_MAX], check[65]; size_t len;
     memset(out, 0, sizeof *out);
     if (!fc26_sc_is_key(key)) return fail_why(why, why_len, "not a shader key");
@@ -290,10 +293,13 @@ int fc26_sc_journal_get_shader(const char *journal, const char *key, fc26_sc_sha
     if (w[0] != SHADER_FORMAT || w[2] != FC26_SC_CONTROL_LEN) { free(data); return fail_why(why, why_len, "unknown format"); }
     if (w[3] != u32_at(control, 0x704) || len != SHADER_HEADER + FC26_SC_CONTROL_LEN + (size_t)w[3] ||
         check_shader((int)w[1], w[3], u32_at(control, 0x700))) { free(data); return fail_why(why, why_len, "inconsistent lengths or stage"); }
-    if (fc26_sc_shader_key(control, code, check) || strcmp(check, key)) { free(data); return fail_why(why, why_len, "bytes do not hash to the key"); }
+    if (fc26_sc_shader_key(control, code, check) || (check_key && strcmp(check, key))) { free(data); return fail_why(why, why_len, "bytes do not hash to the key"); }
     out->stage = (int)w[1]; out->code_len = w[3]; out->c1_off = u32_at(control, 0x700);
     out->data = data; out->control = control; out->code = code;
     return 0;
+}
+int fc26_sc_journal_get_shader(const char *journal, const char *key, fc26_sc_shader *out, char *why, size_t why_len) {
+    return load_shader(journal, key, 1, out, why, why_len);
 }
 void fc26_sc_shader_free(fc26_sc_shader *s) { free(s->data); memset(s, 0, sizeof *s); }
 
@@ -461,6 +467,30 @@ int fc26_sc_evict(const char *cache_dir, const char *journal, const char *key) {
     if (!fc26_sc_is_key(key)) return 0;
     memcpy(one[0], key, 65);
     return unlink_keys(cache_dir, one, 1) + (journal ? unlink_keys(journal, one, 1) : 0);
+}
+struct rekey_rows { const char *journal, *key; int failed; };
+static int move_row(void *ctx, const char *variant, int depth_minus_w, const char *json) {
+    struct rekey_rows *m = ctx; char renamed[80];
+    snprintf(renamed, sizeof renamed, "%s%s", m->key, variant + 64);   /* "<key>-<12 hex>": the suffix names the bind state */
+    if (fc26_sc_journal_add_row(m->journal, m->key, renamed, depth_minus_w, json) < 0) m->failed = 1;
+    return 0;
+}
+long fc26_sc_journal_rekey(const char *journal, const char *cache_dir) {
+    char (*keys)[65]; long n = fc26_sc_journal_keys(journal, &keys), moved = 0;
+    if (n < 0) return -1;
+    for (long i = 0; i < n; i++) {
+        fc26_sc_shader s; char key[65], why[64];
+        if (load_shader(journal, keys[i], 0, &s, why, sizeof why)) continue;   /* damaged: the prefill reports it */
+        if (fc26_sc_shader_key(s.control, s.code, key) || !strcmp(key, keys[i])) { fc26_sc_shader_free(&s); continue; }
+        struct rekey_rows m = {journal, key, 0};
+        int put = fc26_sc_journal_put_shader(journal, key, s.stage, s.control, s.code);   /* 0: another old entry made it */
+        fc26_sc_shader_free(&s);
+        if (put < 0 || fc26_sc_journal_rows(journal, keys[i], move_row, &m) < 0 || m.failed) continue;   /* kept: tried again next start */
+        memmove(keys[moved++], keys[i], 65);   /* keys stay sorted: unlink_keys looks them up */
+    }
+    if (moved) { unlink_keys(journal, keys, (size_t)moved); if (cache_dir) unlink_keys(cache_dir, keys, (size_t)moved); }
+    free(keys);
+    return moved;
 }
 int fc26_sc_trim(const char *cache_dir, const char *journal, uint64_t limit, fc26_sc_trim_report *r) {
     fc26_sc_group *g; size_t n; uint64_t total, fixed;

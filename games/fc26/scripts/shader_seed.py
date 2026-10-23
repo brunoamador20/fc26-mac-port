@@ -5,13 +5,16 @@ The runtime translates a shader the first time the game binds it (nvn_mtl.m prog
 totk_rt_variant), which is a stall in play. Frostbite keeps the shaders in its .cas packages, in blocks compressed with
 Oodle; each one is stored as the NVN code (0x30-byte header 0x12345678 / compute 0x12345679, instructions, c1 constants)
 followed by its 0x880-byte control section (GLSLC magic 0x98761234) -- the same bytes the game hands nvnProgramSetShaders,
-so the shader key computed here is the runtime's: SHA-256(control[:ctl_key_len] + code[:u32 at control+0x704]).
+so the shader key computed here is the runtime's: SHA-256(control[:ctl_key_len] without +0x7d0..+0x7e7 + code[:u32 at
+control+0x704]).
 
   scan       every .cas of the RomFS -> <out>/shaders/<key>.shader (the journal's FC26SHD1 format) + inventory.tsv
   translate  extracted shaders -> the translation cache (<key>-<suffix>.code/_b.metal/_b.json, <key>.variants), with the
              translator the runtime starts (totk_xlate --service), for the default bind state (or the journal's)
   prove      one shader the runtime already translated: same key, same bytes as the journal, same variant name and the
              same translation as in the cache (the cache is only read; the translation goes to a scratch folder)
+  coverage   how many of the journal's shaders (the ones the game bound) the extracted shaders give, by the key their
+             bytes hash to now (journal and extraction are only read)
 
 Decompression is the game's own OodleLZ_Decompress, run by fc26-native's "oodle" mode (runtime/oodle_tool.c) on the
 loaded main module, without starting the game. Everything written is game data: work folder only, never the repo."""
@@ -55,9 +58,13 @@ def code_length(control):
     return struct.unpack_from('<I', control, 0x704)[0]
 
 
+KEY_SKIP = (0x7d0, 0x7e8)   # nvn_mtl.m CTL_KEY_SKIP_LO/HI: an identifier of the compiled record, not read by the translation
+
+
 def shader_key(control, code):
-    """nvn_mtl.m prog_get (and runtime/shader_cache.c fc26_sc_shader_key)."""
-    return hashlib.sha256(control[:control_key_len(control)] + code[:code_length(control)]).hexdigest()
+    """nvn_mtl.m prog_get ctl_key_update (and runtime/shader_cache.c fc26_sc_shader_key)."""
+    n, (lo, hi) = control_key_len(control), KEY_SKIP
+    return hashlib.sha256(control[:min(n, lo)] + control[hi:n] + code[:code_length(control)]).hexdigest()
 
 
 def _natural(key):
@@ -436,18 +443,29 @@ def journal_answers(journal, key):
     return out
 
 
+def extracted(shaders):
+    """key -> (stage, control, code) of every extracted shader, keyed by its bytes (an extraction made under an older key
+    rule keeps its old file names; records that differ only in the bytes the key leaves out are one shader)."""
+    out = {}
+    for p in sorted(Path(shaders).glob('*.shader')):
+        stage, control, code = read_journal_shader(p)
+        out.setdefault(shader_key(control, code), (stage, control, code))
+    return out
+
+
 def cmd_translate(args):
     cache, shaders = Path(args.cache), Path(args.out) / 'shaders'
     if not cache.is_dir():
         raise SystemExit(f'{cache}: not a folder')
     depth = check_identity(cache, args.translator, args.spirv_cross, args.chain)
     lock = lock_cache(cache)
-    keys = sorted(p.name[:64] for p in shaders.glob('*.shader'))
+    found = extracted(shaders)
+    keys = sorted(found)
     if args.keys:
         keys = [k for k in keys if k in set(args.keys)]
     jobs = []
     for key in keys:
-        stage, control, code = read_journal_shader(shaders / f'{key}.shader')
+        stage, control, code = found[key]
         if stage not in STAGES:
             continue
         have = read_variants(cache, key)
@@ -503,7 +521,11 @@ def cmd_translate(args):
 def cmd_prove(args):
     """The extracted shader <key> against what the runtime made of it: journal bytes, variant name, translation."""
     key, shaders = args.key, Path(args.out) / 'shaders'
-    stage, control, code = read_journal_shader(shaders / f'{key}.shader')
+    named = shaders / f'{key}.shader'
+    found = {key: read_journal_shader(named)} if named.is_file() else extracted(shaders)
+    if key not in found:
+        raise SystemExit(f'{key}: no extracted shader hashes to it')
+    stage, control, code = found[key]
     result = dict(key=key, stage=stage, key_recomputed=shader_key(control, code))
     jstage, jcontrol, jcode = read_journal_shader(Path(args.journal) / f'{key}.shader')
     result['journal_bytes_equal'] = (jstage, jcontrol, jcode) == (stage, control, code)
@@ -529,6 +551,24 @@ def cmd_prove(args):
                     and all(v['name_equal'] and v['in_cache_index'] and all(v['files_equal'].values()) for v in result['variants']))
     print(json.dumps(result, indent=1))
     return 0 if result['ok'] else 1
+
+
+def cmd_coverage(args):
+    """The journal's shaders (what the game bound) that the extraction gives, both keyed by their bytes."""
+    seed = extracted(Path(args.out) / 'shaders')
+    journal = {}
+    for p in sorted(Path(args.journal).glob('*.shader')):
+        stage, control, code = read_journal_shader(p)
+        journal.setdefault(shader_key(control, code), []).append(p.name[:64])
+    hit = [k for k in journal if k in seed]
+    files = sum(len(v) for v in journal.values())
+    result = dict(journal_files=files, journal_shaders=len(journal), extracted_shaders=len(seed), found=len(hit),
+                  missing=sorted(set(journal) - set(seed)),
+                  journal_files_under_another_key=sum(n != k for k, v in journal.items() for n in v))
+    print(json.dumps(result, indent=1) if args.json else
+          f'diário: {files} arquivos, {len(journal)} shaders pela chave atual; extraídos: {len(seed)}; '
+          f'achados {len(hit)}/{len(journal)}; arquivos do diário com o nome de outra regra: {result["journal_files_under_another_key"]}')
+    return 0 if len(hit) == len(journal) else 1
 
 
 def main(argv=None):
@@ -558,8 +598,11 @@ def main(argv=None):
     p.add_argument('--cache', default=work / 'build/shader-cache/rt-totk-native-v4-unverified', help='read only')
     p.add_argument('--journal', default=work / 'build/shader-cache/fc26-journal', help='read only')
     p.add_argument('--scratch', required=True)
+    c = sub.add_parser('coverage', parents=[common])
+    c.add_argument('--journal', default=work / 'build/shader-cache/fc26-journal', help='read only')
+    c.add_argument('--json', action='store_true')
     args = ap.parse_args(argv)
-    return dict(scan=cmd_scan, translate=cmd_translate, prove=cmd_prove)[args.cmd](args)
+    return dict(scan=cmd_scan, translate=cmd_translate, prove=cmd_prove, coverage=cmd_coverage)[args.cmd](args)
 
 
 if __name__ == '__main__':

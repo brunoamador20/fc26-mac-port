@@ -114,6 +114,7 @@ int main(int argc, char **argv) {
         printf("%d\n", fc26_sc_journal_add_row(argv[2], argv[3], argv[4], atoi(argv[5]), argv[6]));
         return 0;
     }
+    if (!strcmp(c, "rekey") && argc == 4) { printf("%ld\n", fc26_sc_journal_rekey(argv[2], opt(argv[3]))); return 0; }   /* rekey <journal> <cache|-> */
     if (!strcmp(c, "rows") && argc == 4) { int n = fc26_sc_journal_rows(argv[2], argv[3], print_row, NULL); printf("rows %d\n", n); return 0; }
     if (!strcmp(c, "keys") && argc == 3) {
         char (*keys)[65]; long n = fc26_sc_journal_keys(argv[2], &keys);
