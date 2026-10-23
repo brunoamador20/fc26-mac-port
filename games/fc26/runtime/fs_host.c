@@ -11,6 +11,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -555,8 +557,516 @@ void runtime_save_probe(void) {
     printf("{\"status\":\"pass\",\"probe\":\"probe-save\",\"checks\":%u,\"scope\":\"save-in-progress state (runtime_fs_save_busy) through open / write / close / create / rename / delete / commit on a save mount; reads and temporary storage do not count; stale uncommitted changes do not hold a close\"}\n", checks);
 }
 
+/* ---------- libc file operations overrides ---------- */
+struct guest_stat {
+    uint64_t st_dev;
+    uint64_t st_ino;
+    uint32_t st_mode;
+    uint32_t st_nlink;
+    uint32_t st_uid;
+    uint32_t st_gid;
+    uint64_t st_rdev;
+    uint64_t __pad;
+    int64_t  st_size;
+    int32_t  st_blksize;
+    int32_t  __pad2;
+    int64_t  st_blocks;
+    int64_t  st_atime_sec;
+    int64_t  st_atime_nsec;
+    int64_t  st_mtime_sec;
+    int64_t  st_mtime_nsec;
+    int64_t  st_ctime_sec;
+    int64_t  st_ctime_nsec;
+    uint32_t unused[2];
+};
+_Static_assert(sizeof(struct guest_stat) == 128, "guest_stat size");
+_Static_assert(offsetof(struct guest_stat, st_mode) == 16, "guest_stat st_mode offset");
+_Static_assert(offsetof(struct guest_stat, st_size) == 48, "guest_stat st_size offset");
+
+#define GUEST_FD_BASE 0x10000
+#define GUEST_MAX_FD  256
+
+typedef struct {
+    int in_use;
+    int is_rom;
+    uint64_t rom_handle;
+    int64_t rom_offset;
+    int64_t rom_size;
+    int host_fd;
+    int is_save;
+} GuestFdEntry;
+
+static GuestFdEntry s_guest_fds[GUEST_MAX_FD];
+static pthread_mutex_t s_guest_fd_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* The game's errno: the sdk's __errno_location (sdk+0x556a40 -> sdk+0x59d1c0) is `mrs x8, tpidrro_el0; add x0, x8, #0x1d8`,
+   and the rewriter turns the guest's tpidrro_el0 into thread slot KTLR (runtime_keys[2], the ThreadLocalRegion that
+   loader.c gives each guest thread). The host's own tpidrro_el0 is Darwin's TSD and must not be written. */
+static void guest_set_errno(int err) {
+    errno = err;
+    uint8_t *tlr = pthread_getspecific(runtime_keys[2]);
+    if (tlr) memcpy(tlr + 0x1d8, &err, sizeof err);
+}
+
+/* Descriptors below GUEST_FD_BASE are not ours. 0/1/2 are the host's stdio (read/write/fstat/lseek go there; close
+   leaves the runtime's stdio open); any other one belongs to the sdk's own libc and goes to its original function,
+   or fails with EBADF when the sdk does not export it. Never the host's: a guest close(N) must not close a runtime fd. */
+static void *sdk_libc(const char *name) {
+    void *fn = runtime_symbol(name);
+    if (!fn) guest_set_errno(EBADF);
+    return fn;
+}
+
+static int alloc_guest_fd(int is_rom, uint64_t rom_handle, int64_t rom_size, int host_fd, int is_save) {
+    pthread_mutex_lock(&s_guest_fd_lock);
+    for (int i = 0; i < GUEST_MAX_FD; i++) {
+        if (!s_guest_fds[i].in_use) {
+            s_guest_fds[i].in_use = 1;
+            s_guest_fds[i].is_rom = is_rom;
+            s_guest_fds[i].rom_handle = rom_handle;
+            s_guest_fds[i].rom_offset = 0;
+            s_guest_fds[i].rom_size = rom_size;
+            s_guest_fds[i].host_fd = host_fd;
+            s_guest_fds[i].is_save = is_save;
+            pthread_mutex_unlock(&s_guest_fd_lock);
+            return GUEST_FD_BASE + i;
+        }
+    }
+    pthread_mutex_unlock(&s_guest_fd_lock);
+    guest_set_errno(EMFILE);
+    return -1;
+}
+
+static GuestFdEntry *get_guest_fd(int fd) {
+    if (fd < GUEST_FD_BASE || fd >= GUEST_FD_BASE + GUEST_MAX_FD) return NULL;
+    GuestFdEntry *e = &s_guest_fds[fd - GUEST_FD_BASE];
+    return e->in_use ? e : NULL;
+}
+
+#define GUEST_O_RDONLY    00
+#define GUEST_O_WRONLY    01
+#define GUEST_O_RDWR      02
+#define GUEST_O_CREAT   0100
+#define GUEST_O_EXCL    0200
+#define GUEST_O_TRUNC  01000
+#define GUEST_O_APPEND 02000
+
+static int convert_guest_open_flags_to_host(int guest_flags) {
+    int host_flags = 0;
+    int acc = guest_flags & 3;
+    if (acc == GUEST_O_RDONLY) host_flags |= O_RDONLY;
+    else if (acc == GUEST_O_WRONLY) host_flags |= O_WRONLY;
+    else if (acc == GUEST_O_RDWR) host_flags |= O_RDWR;
+
+    if (guest_flags & GUEST_O_CREAT) host_flags |= O_CREAT;
+    if (guest_flags & GUEST_O_EXCL) host_flags |= O_EXCL;
+    if (guest_flags & GUEST_O_TRUNC) host_flags |= O_TRUNC;
+    if (guest_flags & GUEST_O_APPEND) host_flags |= O_APPEND;
+    host_flags |= O_CLOEXEC;
+    return host_flags;
+}
+
+static void fill_guest_stat_from_host(struct guest_stat *st, const struct stat *hst) {
+    memset(st, 0, sizeof(*st));
+    st->st_dev = (uint64_t)hst->st_dev;
+    st->st_ino = (uint64_t)hst->st_ino;
+    st->st_mode = (uint32_t)hst->st_mode;
+    st->st_nlink = (uint32_t)hst->st_nlink;
+    st->st_uid = (uint32_t)hst->st_uid;
+    st->st_gid = (uint32_t)hst->st_gid;
+    st->st_rdev = (uint64_t)hst->st_rdev;
+    st->st_size = (int64_t)hst->st_size;
+    st->st_blksize = (int32_t)hst->st_blksize;
+    st->st_blocks = (int64_t)hst->st_blocks;
+    st->st_atime_sec = (int64_t)hst->st_atimespec.tv_sec;
+    st->st_atime_nsec = (int64_t)hst->st_atimespec.tv_nsec;
+    st->st_mtime_sec = (int64_t)hst->st_mtimespec.tv_sec;
+    st->st_mtime_nsec = (int64_t)hst->st_mtimespec.tv_nsec;
+    st->st_ctime_sec = (int64_t)hst->st_ctimespec.tv_sec;
+    st->st_ctime_nsec = (int64_t)hst->st_ctimespec.tv_nsec;
+}
+
+static int host_libc_open(const char *path, int flags, ...) {
+    if (!path) { guest_set_errno(EINVAL); return -1; }
+    ready();
+
+    if (runtime_romfs_owns(path)) {
+        int acc = flags & 3;
+        if (acc != GUEST_O_RDONLY || (flags & (GUEST_O_WRONLY | GUEST_O_RDWR | GUEST_O_CREAT | GUEST_O_TRUNC | GUEST_O_APPEND))) {
+            guest_set_errno(EROFS);
+            return -1;
+        }
+        uint64_t h = 0;
+        unsigned r = runtime_romfs_open(&h, path, 1);
+        if (r != 0) {
+            guest_set_errno(ENOENT);
+            return -1;
+        }
+        int64_t size = 0;
+        runtime_romfs_size(&size, h);
+        return alloc_guest_fd(1, h, size, -1, 0);
+    }
+
+    char host_p[1100];
+    int kind = M_FREE;
+    if (host_path_kind(path, host_p, sizeof host_p, &kind) == 0) {
+        runtime_fs_log((flags & 3) != GUEST_O_RDONLY ? "libc-write" : "libc-read", path);
+        mode_t mode = 0;
+        if (flags & GUEST_O_CREAT) {
+            va_list ap;
+            va_start(ap, flags);
+            mode = (mode_t)va_arg(ap, int);
+            va_end(ap);
+        }
+        int hflags = convert_guest_open_flags_to_host(flags);
+        int fd = open(host_p, hflags, mode);
+        if (fd < 0) {
+            guest_set_errno(errno);
+            return -1;
+        }
+        int is_save = (kind == M_SAVE);
+        if (is_save && ((flags & 3) != GUEST_O_RDONLY)) save_touched();
+        return alloc_guest_fd(0, 0, 0, fd, is_save);
+    }
+
+    guest_set_errno(ENOENT);
+    return -1;
+}
+
+static ssize_t host_libc_read(int fd, void *buf, size_t count) {
+    if (fd < GUEST_FD_BASE) {
+        if (fd > 2) { ssize_t (*fn)(int, void *, size_t) = sdk_libc("read"); return fn ? fn(fd, buf, count) : -1; }
+        if (fd < 0) { guest_set_errno(EBADF); return -1; }
+        dm_guest_write_prepare(buf, count);
+        ssize_t ret = read(fd, buf, count);
+        if (ret < 0) guest_set_errno(errno);
+        return ret;
+    }
+    pthread_mutex_lock(&s_guest_fd_lock);
+    GuestFdEntry *e = get_guest_fd(fd);
+    if (!e) {
+        pthread_mutex_unlock(&s_guest_fd_lock);
+        guest_set_errno(EBADF);
+        return -1;
+    }
+    if (e->is_rom) {
+        if (!buf && count > 0) {
+            pthread_mutex_unlock(&s_guest_fd_lock);
+            guest_set_errno(EINVAL);
+            return -1;
+        }
+        if (count == 0 || e->rom_offset >= e->rom_size) {
+            pthread_mutex_unlock(&s_guest_fd_lock);
+            return 0;
+        }
+        uint64_t to_read = count;
+        if (e->rom_offset + (int64_t)to_read > e->rom_size)
+            to_read = (uint64_t)(e->rom_size - e->rom_offset);
+        uint64_t n_done = 0;
+        uint64_t cur_off = (uint64_t)e->rom_offset;
+        uint64_t h = e->rom_handle;
+        pthread_mutex_unlock(&s_guest_fd_lock);
+
+        dm_guest_write_prepare(buf, to_read);
+        unsigned r = runtime_romfs_read(&n_done, h, (int64_t)cur_off, buf, to_read);
+        if (r != 0) {
+            guest_set_errno(EIO);
+            return -1;
+        }
+
+        pthread_mutex_lock(&s_guest_fd_lock);
+        e = get_guest_fd(fd);
+        if (e && e->is_rom && e->rom_handle == h) {
+            e->rom_offset += (int64_t)n_done;
+        }
+        pthread_mutex_unlock(&s_guest_fd_lock);
+        return (ssize_t)n_done;
+    } else {
+        int hfd = e->host_fd;
+        pthread_mutex_unlock(&s_guest_fd_lock);
+        dm_guest_write_prepare(buf, count);
+        ssize_t ret = read(hfd, buf, count);
+        if (ret < 0) guest_set_errno(errno);
+        return ret;
+    }
+}
+
+static ssize_t host_libc_write(int fd, const void *buf, size_t count) {
+    if (fd < GUEST_FD_BASE) {
+        if (fd > 2) { ssize_t (*fn)(int, const void *, size_t) = sdk_libc("write"); return fn ? fn(fd, buf, count) : -1; }
+        if (fd < 0) { guest_set_errno(EBADF); return -1; }
+        ssize_t ret = write(fd, buf, count);
+        if (ret < 0) guest_set_errno(errno);
+        return ret;
+    }
+    pthread_mutex_lock(&s_guest_fd_lock);
+    GuestFdEntry *e = get_guest_fd(fd);
+    if (!e) {
+        pthread_mutex_unlock(&s_guest_fd_lock);
+        guest_set_errno(EBADF);
+        return -1;
+    }
+    if (e->is_rom) {
+        pthread_mutex_unlock(&s_guest_fd_lock);
+        guest_set_errno(EROFS);
+        return -1;
+    }
+    int hfd = e->host_fd;
+    int is_save = e->is_save;
+    pthread_mutex_unlock(&s_guest_fd_lock);
+
+    ssize_t ret = write(hfd, buf, count);
+    if (ret < 0) {
+        guest_set_errno(errno);
+        return -1;
+    }
+    if (is_save) save_touched();
+    return ret;
+}
+
+static off_t host_libc_lseek(int fd, off_t offset, int whence) {
+    if (fd < GUEST_FD_BASE) {
+        if (fd > 2) { off_t (*fn)(int, off_t, int) = sdk_libc("lseek"); return fn ? fn(fd, offset, whence) : (off_t)-1; }
+        if (fd < 0) { guest_set_errno(EBADF); return (off_t)-1; }
+        off_t ret = lseek(fd, offset, whence);
+        if (ret == (off_t)-1) guest_set_errno(errno);
+        return ret;
+    }
+    pthread_mutex_lock(&s_guest_fd_lock);
+    GuestFdEntry *e = get_guest_fd(fd);
+    if (!e) {
+        pthread_mutex_unlock(&s_guest_fd_lock);
+        guest_set_errno(EBADF);
+        return (off_t)-1;
+    }
+    if (e->is_rom) {
+        int64_t base = 0;
+        switch (whence) {
+        case SEEK_SET: base = 0; break;
+        case SEEK_CUR: base = e->rom_offset; break;
+        case SEEK_END: base = e->rom_size; break;
+        default:
+            pthread_mutex_unlock(&s_guest_fd_lock);
+            guest_set_errno(EINVAL);
+            return (off_t)-1;
+        }
+        int64_t new_off = base + offset;
+        if (new_off < 0) {
+            pthread_mutex_unlock(&s_guest_fd_lock);
+            guest_set_errno(EINVAL);
+            return (off_t)-1;
+        }
+        e->rom_offset = new_off;
+        pthread_mutex_unlock(&s_guest_fd_lock);
+        return (off_t)new_off;
+    } else {
+        int hfd = e->host_fd;
+        pthread_mutex_unlock(&s_guest_fd_lock);
+        off_t ret = lseek(hfd, offset, whence);
+        if (ret == (off_t)-1) guest_set_errno(errno);
+        return ret;
+    }
+}
+
+static int host_libc_close(int fd) {
+    if (fd < GUEST_FD_BASE) {
+        if (fd > 2) { int (*fn)(int) = sdk_libc("close"); return fn ? fn(fd) : -1; }
+        if (fd < 0) { guest_set_errno(EBADF); return -1; }
+        fprintf(stderr, "[totk-fs] guest close(%d): the runtime's stdio stays open\n", fd);
+        return 0;
+    }
+    pthread_mutex_lock(&s_guest_fd_lock);
+    GuestFdEntry *e = get_guest_fd(fd);
+    if (!e) {
+        pthread_mutex_unlock(&s_guest_fd_lock);
+        guest_set_errno(EBADF);
+        return -1;
+    }
+    int is_rom = e->is_rom;
+    uint64_t h = e->rom_handle;
+    int hfd = e->host_fd;
+    int is_save = e->is_save;
+    e->in_use = 0;
+    pthread_mutex_unlock(&s_guest_fd_lock);
+
+    if (is_rom) {
+        runtime_romfs_close(h);
+        return 0;
+    } else {
+        int ret = close(hfd);
+        if (ret < 0) guest_set_errno(errno);
+        if (is_save) save_touched();
+        return ret;
+    }
+}
+
+static int host_libc_fstat(int fd, struct guest_stat *st) {
+    if (!st) { guest_set_errno(EFAULT); return -1; }
+    if (fd < GUEST_FD_BASE && fd > 2) { int (*fn)(int, struct guest_stat *) = sdk_libc("fstat"); return fn ? fn(fd, st) : -1; }
+    dm_guest_write_prepare(st, sizeof(*st));
+    if (fd < GUEST_FD_BASE) {
+        if (fd < 0) { guest_set_errno(EBADF); return -1; }
+        struct stat hst;
+        if (fstat(fd, &hst) != 0) {
+            guest_set_errno(errno);
+            return -1;
+        }
+        fill_guest_stat_from_host(st, &hst);
+        return 0;
+    }
+    pthread_mutex_lock(&s_guest_fd_lock);
+    GuestFdEntry *e = get_guest_fd(fd);
+    if (!e) {
+        pthread_mutex_unlock(&s_guest_fd_lock);
+        guest_set_errno(EBADF);
+        return -1;
+    }
+    if (e->is_rom) {
+        int64_t size = e->rom_size;
+        pthread_mutex_unlock(&s_guest_fd_lock);
+        memset(st, 0, sizeof(*st));
+        st->st_mode = 0100444; /* S_IFREG | 0444 */
+        st->st_nlink = 1;
+        st->st_size = size;
+        st->st_blksize = 4096;
+        st->st_blocks = (size + 511) / 512;
+        return 0;
+    } else {
+        int hfd = e->host_fd;
+        pthread_mutex_unlock(&s_guest_fd_lock);
+        struct stat hst;
+        if (fstat(hfd, &hst) != 0) {
+            guest_set_errno(errno);
+            return -1;
+        }
+        fill_guest_stat_from_host(st, &hst);
+        return 0;
+    }
+}
+
+static int host_libc_stat(const char *path, struct guest_stat *st) {
+    if (!path || !st) { guest_set_errno(EINVAL); return -1; }
+    dm_guest_write_prepare(st, sizeof(*st));
+    ready();
+    if (runtime_romfs_owns(path)) {
+        int type = -1;
+        unsigned r = runtime_romfs_entry_type(&type, path);
+        if (r != 0) {
+            guest_set_errno(ENOENT);
+            return -1;
+        }
+        if (type == 1) {
+            uint64_t h = 0;
+            if (runtime_romfs_open(&h, path, 1) != 0) {
+                guest_set_errno(ENOENT);
+                return -1;
+            }
+            int64_t size = 0;
+            runtime_romfs_size(&size, h);
+            runtime_romfs_close(h);
+            memset(st, 0, sizeof(*st));
+            st->st_mode = 0100444;
+            st->st_nlink = 1;
+            st->st_size = size;
+            st->st_blksize = 4096;
+            st->st_blocks = (size + 511) / 512;
+            return 0;
+        } else {
+            memset(st, 0, sizeof(*st));
+            st->st_mode = 0040555;
+            st->st_nlink = 2;
+            st->st_size = 0;
+            st->st_blksize = 4096;
+            return 0;
+        }
+    }
+    char host_p[1100];
+    int kind = M_FREE;
+    if (host_path_kind(path, host_p, sizeof host_p, &kind) == 0) {
+        struct stat hst;
+        if (stat(host_p, &hst) != 0) {
+            guest_set_errno(errno);
+            return -1;
+        }
+        fill_guest_stat_from_host(st, &hst);
+        return 0;
+    }
+    guest_set_errno(ENOENT);
+    return -1;
+}
+
+static int host_libc_ftruncate(int fd, off_t length) {
+    if (fd < GUEST_FD_BASE) {
+        if (fd > 2) { int (*fn)(int, off_t) = sdk_libc("ftruncate"); return fn ? fn(fd, length) : -1; }
+        guest_set_errno(EBADF);   /* stdio or negative: never truncate the host's */
+        return -1;
+    }
+    pthread_mutex_lock(&s_guest_fd_lock);
+    GuestFdEntry *e = get_guest_fd(fd);
+    if (!e) {
+        pthread_mutex_unlock(&s_guest_fd_lock);
+        guest_set_errno(EBADF);
+        return -1;
+    }
+    if (e->is_rom) {
+        pthread_mutex_unlock(&s_guest_fd_lock);
+        guest_set_errno(EROFS);
+        return -1;
+    }
+    int hfd = e->host_fd;
+    int is_save = e->is_save;
+    pthread_mutex_unlock(&s_guest_fd_lock);
+    int r = ftruncate(hfd, length);
+    if (r < 0) guest_set_errno(errno);
+    if (is_save) save_touched();
+    return r;
+}
+
+static int host_libc_unlink(const char *path) {
+    if (!path) { guest_set_errno(EINVAL); return -1; }
+    if (runtime_romfs_owns(path)) { guest_set_errno(EROFS); return -1; }
+    char p[1100];
+    if (save_change_path(path, p, sizeof p) == 0) {
+        int r = unlink(p);
+        if (r < 0) guest_set_errno(errno);
+        return r;
+    }
+    guest_set_errno(ENOENT);
+    return -1;
+}
+
+static int host_libc_mkdir(const char *path, mode_t mode) {
+    if (!path) { guest_set_errno(EINVAL); return -1; }
+    if (runtime_romfs_owns(path)) { guest_set_errno(EROFS); return -1; }
+    char p[1100];
+    if (save_change_path(path, p, sizeof p) == 0) {
+        int r = mkdir(p, mode);
+        if (r < 0) guest_set_errno(errno);
+        return r;
+    }
+    guest_set_errno(ENOENT);
+    return -1;
+}
+
+static int host_libc_rmdir(const char *path) {
+    if (!path) { guest_set_errno(EINVAL); return -1; }
+    if (runtime_romfs_owns(path)) { guest_set_errno(EROFS); return -1; }
+    char p[1100];
+    if (save_change_path(path, p, sizeof p) == 0) {
+        int r = rmdir(p);
+        if (r < 0) guest_set_errno(errno);
+        return r;
+    }
+    guest_set_errno(ENOENT);
+    return -1;
+}
+
 void *runtime_fs_host_override(const char *name) {
     static const struct { const char *name; void *fn; } map[] = {
+        {"open", host_libc_open}, {"fstat", host_libc_fstat}, {"read", host_libc_read},
+        {"lseek", host_libc_lseek}, {"close", host_libc_close}, {"stat", host_libc_stat},
+        {"write", host_libc_write}, {"ftruncate", host_libc_ftruncate}, {"unlink", host_libc_unlink},
+        {"mkdir", host_libc_mkdir}, {"rmdir", host_libc_rmdir},
         {"_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", open_file}, {"_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE", file_size},
         {"_ZN2nn2fs9CloseFileENS0_10FileHandleE", close_file}, {"_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc", entry_type},
         {"_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", read_file}, {"_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvmRKNS0_10ReadOptionE", read_options},

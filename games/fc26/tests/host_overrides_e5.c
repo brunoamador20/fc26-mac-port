@@ -15,6 +15,7 @@ typedef struct { uint64_t lo, hi; } Uid;
 typedef struct { Uid uid; uint64_t token; } UserHandle;
 
 pthread_key_t runtime_keys[8];
+void *runtime_symbol(const char *name) { (void)name; return NULL; }   /* fs_host.c: the sdk libc behind descriptors that are not ours */
 static void *objects[64];
 static int kinds[64];
 static unsigned nobjects;

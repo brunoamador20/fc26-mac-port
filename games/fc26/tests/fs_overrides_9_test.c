@@ -18,6 +18,7 @@
 #define R_INVALID_PATH 0x2ee602u
 
 pthread_key_t runtime_keys[8];
+void *runtime_symbol(const char *name) { (void)name; return NULL; }   /* fs_host.c: the sdk libc behind descriptors that are not ours */
 static void *objects[64];
 static int kinds[64];
 static unsigned nobjects;
