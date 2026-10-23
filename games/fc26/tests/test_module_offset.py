@@ -88,7 +88,7 @@ class Printers(unittest.TestCase):
         describe = src[src.index('void runtime_describe_address('):].split('\n', 1)[0]
         self.assertTrue('module_offset_hex(' in describe, 'runtime_describe_address prints the offset unsigned')
         crash = body(src, 'static void crash(')
-        self.assertEqual(crash.count('signal_offset('), 2, 'the faulting pc and every frame lr go through signal_offset')
+        self.assertEqual(crash.count('signal_offset('), 4, 'the faulting pc and every frame lr go through signal_offset')
         self.assertIsNone(re.search(r'signal_hex\(" offset="', crash), 'crash() prints a module offset unsigned')
         self.assertTrue('module_offset_hex(' in body(src, 'static void signal_offset('))
 

@@ -16,13 +16,27 @@ from test_fc26_ro_runtime import runtime_tree
 
 GAME = ROOT / 'games/fc26' if (ROOT / 'games/fc26/runtime/loader.c').exists() else ROOT / 'games/by3'
 
+
+def pre_integration(name):
+    """The file as it was right before integrar_estoria3.py was applied to FC 26's runtime (the commit that first
+    included ro/ro_module.h in loader.c), or the working copy when the runtime is not integrated yet."""
+    if 'ro/ro_module.h' not in (GAME / 'runtime/loader.c').read_text(): return (GAME / name).read_text()
+    git = ['git', '-C', str(ROOT)]
+    found = subprocess.run(git + ['log', '--format=%H', '-S', '#include "ro/ro_module.h"', '--', f'{GAME.relative_to(ROOT)}/runtime/loader.c'],
+                           capture_output=True, text=True)
+    commits = found.stdout.split()
+    if found.returncode or not commits: raise unittest.SkipTest('the pre-integration runtime is not in this checkout\'s history')
+    shown = subprocess.run(git + ['show', f'{commits[-1]}^:{GAME.relative_to(ROOT)}/{name}'], capture_output=True, text=True)
+    if shown.returncode: raise unittest.SkipTest(shown.stderr.strip())
+    return shown.stdout
+
 # Each fragment inside a function with the signature (and local names) it gets in loader.c / services.c.
 HARNESS = r'''#include "runtime.h"
 #include "ro/ro_module.h"
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-static void signal_hex(const char *label, uint64_t value) { (void)label; (void)value; }
+static void signal_offset(uint64_t off) { (void)off; }
 void f_dispatch(uint64_t ret, uint64_t *regs) { @dispatch@ }
 uint64_t f_permission(uint64_t address, uint64_t size, unsigned permission) { @permission@ }
 uint64_t f_lock(uint64_t address, uint64_t size, unsigned mask, unsigned attribute) { @lock@ }
@@ -41,7 +55,7 @@ class Integration(unittest.TestCase):
     def tree(self, directory):
         for name in ('runtime/loader.c', 'runtime/services.c', 'Makefile'):
             (directory / name).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(GAME / name, directory / name)
+            (directory / name).write_text(pre_integration(name))
         return {n: (directory / n).read_text() for n in ('runtime/loader.c', 'runtime/services.c', 'Makefile')}
 
     def run_script(self, *args):
