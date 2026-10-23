@@ -11,6 +11,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
+#include <sys/mman.h>
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -19,6 +21,21 @@
 /* ---------- stand-ins for the runtime ---------- */
 pthread_key_t runtime_keys[8];
 _Noreturn void runtime_fail(const char *message) { fprintf(stderr, "[test] runtime_fail: %s\n", message); fflush(stderr); exit(3); }
+void runtime_missing(const char *format, ...) {
+    va_list va;
+    va_start(va, format);
+    fprintf(stderr, "[fc26-missing] ");
+    vfprintf(stderr, format, va);
+    fputc('\n', stderr);
+    va_end(va);
+}
+static LateSlot test_late_slots_storage[16];
+static unsigned test_late_slots_count = 0;
+
+LateSlot *runtime_late_slots(unsigned *count) {
+    if (count) *count = test_late_slots_count;
+    return test_late_slots_storage;
+}
 static uint64_t stub_class_type_info[4], stub_allocate;
 static void *fake_g_pAutoLoadList = NULL;
 static void *fake_g_pManualLoadList = NULL;
@@ -327,6 +344,80 @@ static void stop_on_map(const char *nro_name) {
     exit(1);
 }
 
+static void test_late_slots(void) {
+    size_t nro_size, nrr_size;
+    uint8_t *nro = load("late.nro", &nro_size);
+    uint8_t *nrr = load("late.nrr", &nrr_size);
+    void *bss; if (posix_memalign(&bss, 0x1000, expect("bss_size"))) exit(2);
+
+    /* Allocate page for main's slots and protect as read-only (RELRO) */
+    uint64_t *slots_page = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (slots_page == MAP_FAILED) exit(2);
+    slots_page[0] = 0;
+    slots_page[1] = 0;
+    if (mprotect(slots_page, 0x4000, PROT_READ) != 0) exit(2);
+    CHECK_EQ(host_prot(ptr(slots_page)), 1);
+
+    test_late_slots_storage[0] = (LateSlot){ &slots_page[0], "late_var0", "late" };
+    test_late_slots_storage[1] = (LateSlot){ &slots_page[1], "late_var1", "late" };
+    test_late_slots_count = 2;
+
+    IpcSession s = open_session("ldr:ro");
+    CHECK_EQ(call(&s, 4, PID, 1, 0, 0, 0, 0, 0, NULL), 0);
+    CHECK_EQ(call(&s, 2, PID, 0, ptr(nrr), nrr_size, 0, 0, 2, NULL), 0);
+
+    /* Before Map: slots are 0 */
+    CHECK_EQ(slots_page[0], 0);
+    CHECK_EQ(slots_page[1], 0);
+
+    /* MapManualLoadModuleMemory */
+    uint64_t base = 0;
+    CHECK_EQ(call(&s, 0, PID, 0, ptr(nro), nro_size, ptr(bss), expect("bss_size"), 4, &base), 0);
+    CHECK(base != 0);
+
+    /* After Map: slots hold base + st_value */
+    CHECK_EQ(slots_page[0], base + expect("late_var0"));
+    CHECK_EQ(slots_page[1], base + expect("late_var1"));
+
+    /* Verify page remained read-only (RELRO preserved) */
+    CHECK_EQ(host_prot(ptr(slots_page)), 1);
+
+    /* UnmapManualLoadModuleMemory */
+    CHECK_EQ(call(&s, 1, PID, 0, base, 0, 0, 0, 1, NULL), 0);
+
+    /* After Unmap: slots are reset to 0 */
+    CHECK_EQ(slots_page[0], 0);
+    CHECK_EQ(slots_page[1], 0);
+
+    /* Protection still preserved */
+    CHECK_EQ(host_prot(ptr(slots_page)), 1);
+
+    s.close(s.state);
+    mprotect(slots_page, 0x4000, PROT_READ | PROT_WRITE);
+    munmap(slots_page, 0x4000);
+    free(nro); free(nrr); free(bss);
+}
+
+static void test_late_missing(void) {
+    size_t nro_size, nrr_size;
+    uint8_t *nro = load("late.nro", &nro_size);
+    uint8_t *nrr = load("late.nrr", &nrr_size);
+    void *bss; if (posix_memalign(&bss, 0x1000, expect("bss_size"))) exit(2);
+
+    uint64_t slot = 0;
+    test_late_slots_storage[0] = (LateSlot){ &slot, "nonexistent_late_symbol", "late" };
+    test_late_slots_count = 1;
+
+    IpcSession s = open_session("ldr:ro");
+    CHECK_EQ(call(&s, 4, PID, 1, 0, 0, 0, 0, 0, NULL), 0);
+    CHECK_EQ(call(&s, 2, PID, 0, ptr(nrr), nrr_size, 0, 0, 2, NULL), 0);
+
+    uint64_t base = 0;
+    call(&s, 0, PID, 0, ptr(nro), nro_size, ptr(bss), expect("bss_size"), 4, &base);
+    fprintf(stderr, "[test] the map returned instead of stopping\n");
+    exit(1);
+}
+
 int main(int argc, char **argv) {
     if (argc != 3) { fprintf(stderr, "usage: %s flow|missing|tampered <directory>\n", argv[0]); return 2; }
     dir = argv[2];
@@ -335,6 +426,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "missing")) { ro_module_set_dir(dir); stop_on_map("stranger.nro"); }
     else if (!strcmp(argv[1], "tampered")) stop_on_map("m.nro");   /* FC26_RO_DIR names the directory with the bad image */
     else if (!strcmp(argv[1], "probe")) { ro_module_set_dir(dir); return ro_module_probe() ? 1 : 0; }
+    else if (!strcmp(argv[1], "late")) { ro_module_set_dir(dir); test_late_slots(); }
+    else if (!strcmp(argv[1], "late_missing")) { ro_module_set_dir(dir); test_late_missing(); }
     else return 2;
     if (failures) { fprintf(stderr, "%u checks failed\n", failures); return 1; }
     puts("ro service ok");

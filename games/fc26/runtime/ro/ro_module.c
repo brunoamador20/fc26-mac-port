@@ -9,6 +9,10 @@
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #include <libkern/OSCacheControl.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#else
+#include <unistd.h>
 #endif
 
 typedef struct {
@@ -74,6 +78,103 @@ static void release(Loaded *m) {
     ro_guest_free(&m->guest); free(m->gates); free(m);
 }
 
+static void write_slot(void *slot, uintptr_t val) {
+#if defined(__APPLE__)
+    mach_vm_address_t a = (mach_vm_address_t)(uintptr_t)slot;
+    mach_vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object = MACH_PORT_NULL;
+    kern_return_t kr = mach_vm_region(mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count, &object);
+    if (object) mach_port_deallocate(mach_task_self(), object);
+    if (kr != KERN_SUCCESS) runtime_fail("mach_vm_region for late slot");
+    vm_prot_t orig = info.protection;
+    if (!(orig & VM_PROT_WRITE)) {
+        uintptr_t page = (uintptr_t)slot & ~(uintptr_t)0x3fff;
+        if (mprotect((void *)page, 0x4000, PROT_READ | PROT_WRITE) != 0) runtime_fail("mprotect RW for late slot");
+        *(uintptr_t *)slot = val;
+        if (mprotect((void *)page, 0x4000, (int)orig) != 0) runtime_fail("mprotect restore for late slot");
+    } else {
+        *(uintptr_t *)slot = val;
+    }
+#else
+    FILE *f = fopen("/proc/self/maps", "r");
+    int prot = 3;
+    if (f) {
+        char line[512];
+        uintptr_t addr = (uintptr_t)slot;
+        while (fgets(line, sizeof line, f)) {
+            unsigned long long lo, hi; char perms[8];
+            if (sscanf(line, "%llx-%llx %7s", &lo, &hi, perms) == 3 && addr >= lo && addr < hi) {
+                prot = (perms[0] == 'r' ? 1 : 0) | (perms[1] == 'w' ? 2 : 0) | (perms[2] == 'x' ? 4 : 0);
+                break;
+            }
+        }
+        fclose(f);
+    }
+    if (!(prot & 2)) {
+        long pagesize = sysconf(_SC_PAGESIZE);
+        if (pagesize <= 0) pagesize = 4096;
+        uintptr_t page = (uintptr_t)slot & ~(uintptr_t)(pagesize - 1);
+        int orig_prot = (prot & 1 ? PROT_READ : 0) | (prot & 4 ? PROT_EXEC : 0);
+        if (mprotect((void *)page, (size_t)pagesize, PROT_READ | PROT_WRITE) != 0) runtime_fail("mprotect RW for late slot");
+        *(uintptr_t *)slot = val;
+        if (mprotect((void *)page, (size_t)pagesize, orig_prot) != 0) runtime_fail("mprotect restore for late slot");
+    } else {
+        *(uintptr_t *)slot = val;
+    }
+#endif
+}
+
+static int nro_matches(const char *slot_nro, const char *module_name) {
+    if (!slot_nro || !module_name) return 0;
+    if (!strcmp(slot_nro, module_name)) return 1;
+    const char *dot = strrchr(slot_nro, '.');
+    if (dot && !strcmp(dot + 1, module_name)) return 1;
+    dot = strrchr(module_name, '.');
+    if (dot && !strcmp(dot + 1, slot_nro)) return 1;
+    return 0;
+}
+
+static void ro_late_slots_relink(Loaded *m) {
+    unsigned count = 0;
+    LateSlot *slots = runtime_late_slots(&count);
+    if (!slots || !count) return;
+    uint64_t end = (uint64_t)m->nro.size + m->nro.bss_size;
+    unsigned relinked = 0;
+    for (unsigned i = 0; i < count; i++) {
+        if (!nro_matches(slots[i].nro, m->name)) continue;
+        long idx = ro_symbol_find(m->base, end, &m->dynamic, slots[i].name);
+        RoSymbol s;
+        if (idx < 0 || ro_symbol(m->base, end, &m->dynamic, (uint32_t)idx, &s) || !s.defined) {
+            runtime_missing("late slot: module %s does not export %s", m->name, slots[i].name);
+            runtime_fail("late slot symbol missing");
+        }
+        uintptr_t target = (uintptr_t)m->base + s.value;
+        write_slot(slots[i].slot, target);
+        fprintf(stderr, "[fc26-ro] late slot %s -> %s+0x%llx\n", slots[i].name, m->name, (unsigned long long)s.value);
+        relinked++;
+    }
+    if (relinked > 0) {
+        fprintf(stderr, "[fc26-ro] %u late slots relinked for %s\n", relinked, m->name);
+    }
+}
+
+static void ro_late_slots_unlink(const char *name) {
+    unsigned count = 0;
+    LateSlot *slots = runtime_late_slots(&count);
+    if (!slots || !count) return;
+    unsigned cleared = 0;
+    for (unsigned i = 0; i < count; i++) {
+        if (!nro_matches(slots[i].nro, name)) continue;
+        write_slot(slots[i].slot, 0);
+        cleared++;
+    }
+    if (cleared > 0) {
+        fprintf(stderr, "[fc26-ro] %u late slots cleared for %s\n", cleared, name);
+    }
+}
+
 uint32_t ro_module_map(const uint8_t *nro, const RoNro *header, const uint8_t sha256[32], uint64_t *base) {
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
     runtime_fail("nn::ro modules on iOS need their code embedded like the static modules (not done)");
@@ -135,6 +236,7 @@ uint32_t ro_module_map(const uint8_t *nro, const RoNro *header, const uint8_t sh
     pthread_rwlock_unlock(&lock);
     fprintf(stderr, "[fc26-ro] mapped %s at %p size=%#llx gates=%u nro=%s\n", m->name, (void *)m->base,
             (unsigned long long)m->map_size, m->ngates, hex);
+    ro_late_slots_relink(m);
     *base = (uint64_t)(uintptr_t)m->base;
     return 0;
 }
@@ -147,6 +249,7 @@ uint32_t ro_module_unmap(uint64_t base) {
         __atomic_store_n(&loaded[i], NULL, __ATOMIC_RELEASE);
         pthread_rwlock_unlock(&lock);
         fprintf(stderr, "[fc26-ro] unmapped %s at %p\n", m->name, (void *)m->base);
+        ro_late_slots_unlink(m->name);
         release(m);
         return 0;
     }

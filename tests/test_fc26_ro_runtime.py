@@ -158,6 +158,50 @@ class Service(unittest.TestCase):
         self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
         self.assertIn('SHA-256 differs', run.stderr)
 
+    def test_late_slots_relinked_and_unmap_clears(self):
+        with tempfile.TemporaryDirectory() as temp:
+            late_dir = Path(temp)
+            late_symbols = [
+                ('late_var0', 1, 1, 0x8280),
+                ('late_var1', 1, 1, 0x8288),
+            ]
+            late = synth.make_nro(module_id=bytes(range(0x70, 0x84)) + bytes(12), extra_symbols=late_symbols)
+            (late_dir / 'late.nro').write_bytes(late)
+            synth.fake_rewrite(late, late_dir, 'late')
+            tool.register(late_dir / 'late.nro', late_dir, 'late')
+            digest = hashlib.sha256(late).digest()
+            (late_dir / 'late.nrr').write_bytes(synth.make_nrr([digest]))
+            values = dict(bss_size=synth.BSS_SIZE, late_var0=0x8280, late_var1=0x8288)
+            (late_dir / 'expect.txt').write_text(''.join(f'{k} {v:#x}\n' for k, v in values.items()))
+
+            run = subprocess.run([str(self.exe), 'late', str(late_dir)], capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, f'late slots test failed:\n{run.stderr}\n{run.stdout}')
+            self.assertIn('[fc26-ro] late slot late_var0 -> late+0x8280', run.stderr)
+            self.assertIn('[fc26-ro] late slot late_var1 -> late+0x8288', run.stderr)
+            self.assertIn('late slots relinked', run.stderr)
+            self.assertIn('late slots cleared', run.stderr)
+
+    def test_late_slot_unexported_symbol_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            late_dir = Path(temp)
+            late_symbols = [
+                ('late_var0', 1, 1, 0x8280),
+                ('late_var1', 1, 1, 0x8288),
+            ]
+            late = synth.make_nro(module_id=bytes(range(0x70, 0x84)) + bytes(12), extra_symbols=late_symbols)
+            (late_dir / 'late.nro').write_bytes(late)
+            synth.fake_rewrite(late, late_dir, 'late')
+            tool.register(late_dir / 'late.nro', late_dir, 'late')
+            digest = hashlib.sha256(late).digest()
+            (late_dir / 'late.nrr').write_bytes(synth.make_nrr([digest]))
+            values = dict(bss_size=synth.BSS_SIZE, late_var0=0x8280, late_var1=0x8288)
+            (late_dir / 'expect.txt').write_text(''.join(f'{k} {v:#x}\n' for k, v in values.items()))
+
+            run = subprocess.run([str(self.exe), 'late_missing', str(late_dir)], capture_output=True, text=True)
+            self.assertEqual(run.returncode, 3, f'late missing test failed:\n{run.stderr}\n{run.stdout}')
+            self.assertIn('[fc26-missing]', run.stderr)
+            self.assertIn('nonexistent_late_symbol', run.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

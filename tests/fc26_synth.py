@@ -71,7 +71,7 @@ def eh_frame_hdr(at, starts):
     return bytes(out)
 
 
-def make_nro(module_id=bytes(range(0x10, 0x24)) + bytes(12), tlsdesc=True, header_word=None):
+def make_nro(module_id=bytes(range(0x10, 0x24)) + bytes(12), tlsdesc=True, header_word=None, extra_symbols=None):
     image = bytearray(NRO_SIZE)
     # Text: RocrtHeader (version, MOD0 offset, version offset, reserved) and the NRO header, MOD0, then the code.
     struct.pack_into('<4I', image, 0, 0, MOD0, MOD0 + 0x34, 0)
@@ -83,21 +83,22 @@ def make_nro(module_id=bytes(range(0x10, 0x24)) + bytes(12), tlsdesc=True, heade
     # Ro: dynstr, dynsym, hash tables, relocation tables, eh_frame_hdr.
     dynstr, dynsym, hash_at, gnu_at, rela_at, jmprel_at, relr_at, ehdr_at = (
         0x4000, 0x4400, 0x4600, 0x4700, 0x4800, 0x4900, 0x4a00, 0x4b00)
+    symbols = list(SYMBOLS) + (list(extra_symbols) if extra_symbols else [])
     strings = bytearray(b'\0'); offsets = []
-    for name, *_ in SYMBOLS: offsets.append(len(strings)); strings += name.encode() + b'\0'
+    for name, *_ in symbols: offsets.append(len(strings)); strings += name.encode() + b'\0'
     image[dynstr:dynstr + len(strings)] = strings
-    for i, (name, binding, kind, value) in enumerate(SYMBOLS):
+    for i, (name, binding, kind, value) in enumerate(symbols):
         struct.pack_into('<IBBHQQ', image, dynsym + 24 * (i + 1), offsets[i], binding << 4 | kind, 0,
                          0 if value is None else (10 if kind == 6 else 1 if value < RO else 3), value or 0, 8)
-    nsym = len(SYMBOLS) + 1
+    nsym = len(symbols) + 1
     nbucket = 3
     buckets, chains = [0] * nbucket, [0] * nsym
     for i in range(1, nsym):
-        b = elf_hash(SYMBOLS[i - 1][0]) % nbucket
+        b = elf_hash(symbols[i - 1][0]) % nbucket
         chains[i], buckets[b] = buckets[b], i
     struct.pack_into(f'<II{nbucket}I{nsym}I', image, hash_at, nbucket, nsym, *buckets, *chains)
-    first = next(i + 1 for i, s in enumerate(SYMBOLS) if s[3] is not None)
-    hashes = [gnu_hash(SYMBOLS[i - 1][0]) for i in range(first, nsym)]
+    first = next(i + 1 for i, s in enumerate(symbols) if s[3] is not None)
+    hashes = [gnu_hash(symbols[i - 1][0]) for i in range(first, nsym)]
     bloom = 0
     for h in hashes: bloom |= 1 << (h % 64) | 1 << ((h >> 6) % 64)
     chain = [h & ~1 for h in hashes]; chain[-1] |= 1
@@ -117,6 +118,10 @@ def make_nro(module_id=bytes(range(0x10, 0x24)) + bytes(12), tlsdesc=True, heade
     struct.pack_into(f'<{len(relr)}Q', image, relr_at, *relr)
     for where, value in RELR_TARGETS.items(): struct.pack_into('<Q', image, where, value)
     struct.pack_into('<Q', image, EXPORT_DATA, 0x1234)
+    if extra_symbols:
+        for name, binding, kind, value in extra_symbols:
+            if value is not None and value >= DATA and value + 8 <= NRO_SIZE:
+                struct.pack_into('<Q', image, value, 0x5555)
     ehdr = eh_frame_hdr(ehdr_at, CODE)
     image[ehdr_at:ehdr_at + len(ehdr)] = ehdr
     # MOD0 [19.0.0+]: offsets relative to MOD0; module object at the bss start; then the SDK version.
