@@ -63,13 +63,15 @@ def write_fixture(directory, nro=None, name='m'):
 
 def runtime_tree(directory):
     """runtime/ro next to the runtime.h and ipc.h it includes: FC 26's own once story 2 has made them, else the kit's
-    (games/by3, which FC 26's runtime is a copy of), and a game_version.h with FC 26's program id."""
+    (games/by3, which FC 26's runtime is a copy of), and a game_version.h with FC 26's program id (and a version folder:
+    ro_module.c's default image folder is rewritten/<TOTK_GAME_DIR>)."""
     tree = directory / 'rt/runtime'
     shutil.copytree(RO, tree / 'ro')
     for header in ('runtime.h', 'ipc.h'):
         own = ROOT / 'games/fc26/runtime' / header
         shutil.copy(own if own.exists() else ROOT / 'games/by3/runtime' / header, tree / header)
-    (tree / 'game_version.h').write_text(f'#pragma once\n#define GAME_TITLE_ID {synth.FC26_PROGRAM_ID:#x}ULL\n')
+    (tree / 'game_version.h').write_text(f'#pragma once\n#define GAME_TITLE_ID {synth.FC26_PROGRAM_ID:#x}ULL\n'
+                                         '#define TOTK_GAME_DIR "vtest"\n')
     return tree
 
 
