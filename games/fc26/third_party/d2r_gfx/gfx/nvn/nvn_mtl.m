@@ -11146,19 +11146,13 @@ static int copy_t2t_scale(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsig
     if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return 1;
     static int failed;
     static id<MTL4ArgumentTable> at;
-    static id<MTLBuffer> pbuf[16];
-    static int pbuf_idx;
     if (failed) return 0;
     if (!at) {
         NSError *e = nil;
         MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new];
         ad.maxTextureBindCount = 1; ad.maxBufferBindCount = 1;
         at = [g_dev newArgumentTableWithDescriptor:ad error:&e];
-        for (int i = 0; i < 16; i++) {
-            pbuf[i] = [g_dev newBufferWithLength:32 options:MTLResourceStorageModeShared];
-            res_add(pbuf[i]);
-        }
-        if (!at || !pbuf[0]) { failed = 1; MLOG("【红】缩放拷贝参数表建不出 %s", e ? e.localizedDescription.UTF8String : "unknown"); return 0; }
+        if (!at) { failed = 1; MLOG("【红】缩放拷贝参数表建不出 %s", e ? e.localizedDescription.UTF8String : "unknown"); return 0; }
     }
     id<MTLRenderPipelineState> ps = copy_t2t_scale_pso(d.pixelFormat, linear);
     if (!ps) { RED_ONCE(51, "缩放拷贝目标格式不支持：%lu", (unsigned long)d.pixelFormat); return 0; }
@@ -11166,9 +11160,10 @@ static int copy_t2t_scale(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsig
     id<MTLTexture> sv = (s.textureType == tt && sl == 0 && ss == 0) ? s : [s newTextureViewWithPixelFormat:s.pixelFormat textureType:tt levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss, 1)];
     id<MTLTexture> dv = (d.textureType == tt && dl == 0 && ds == 0) ? d : [d newTextureViewWithPixelFormat:d.pixelFormat textureType:tt levels:NSMakeRange(dl, 1) slices:NSMakeRange(ds, 1)];
     if (!sv || !dv) { RED_ONCE(52, "缩放拷贝建不出视图"); return 0; }
-    id<MTLBuffer> pb = pbuf[pbuf_idx];
-    pbuf_idx = (pbuf_idx + 1) % 16;
-    uint32_t *p = (uint32_t *)pb.contents;
+    /* The parameters live in the submission's arena: the GPU reads them when the command buffer runs, so a fixed ring of
+       buffers was overwritten by later copies of the same submission (a cube's 6 faces x 3 levels is 18 copies). */
+    id<MTLBuffer> pb; size_t po = arena_alloc(32, &pb);
+    uint32_t *p = (uint32_t *)((uint8_t *)pb.contents + po);
     p[0] = (uint32_t)sx; p[1] = (uint32_t)sy; p[2] = (uint32_t)dx; p[3] = (uint32_t)dy;
     p[4] = (uint32_t)sw; p[5] = (uint32_t)sh; p[6] = (uint32_t)dw; p[7] = (uint32_t)dh;
     rp_end();
@@ -11184,7 +11179,7 @@ static int copy_t2t_scale(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsig
     [en barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
     [en setArgumentTable:at atStages:MTLRenderStageFragment];
     [at setTexture:sv.gpuResourceID atIndex:0];
-    [at setAddress:pb.gpuAddress atIndex:0];
+    [at setAddress:pb.gpuAddress + po atIndex:0];
     [en setViewport:(MTLViewport){0, 0, (double)dv.width, (double)dv.height, 0, 1}];
     [en setScissorRect:(MTLScissorRect){(NSUInteger)dx, (NSUInteger)dy, (NSUInteger)dw, (NSUInteger)dh}];
     [en setRenderPipelineState:ps];

@@ -239,6 +239,7 @@ static id g_blit;
 static int g_pso_dirty, g_dss_dirty;
 static id<MTLResidencySet> g_res;
 static void res_add(id o) { if (o && g_res) [g_res addAllocation:o]; }
+static size_t arena_alloc(size_t n, id<MTLBuffer> *buf) { *buf = [g_dev newBufferWithLength:n options:MTLResourceStorageModeShared]; res_add(*buf); return 0; }
 static void rp_end(void) {}
 static void blit_close(void) {}
 static void rs_sync(void) {}
