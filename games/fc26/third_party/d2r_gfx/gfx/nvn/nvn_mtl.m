@@ -11047,6 +11047,154 @@ static int copy_t2t_depth(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsig
     if (dv != d) defer_obj_unref(dv);
     return 1;
 }
+static const char k_scale_copy_msl[] =
+"#include <metal_stdlib>\nusing namespace metal;\n"
+"struct ScaleV2F { float4 pos [[position]]; };\n"
+"vertex ScaleV2F scale_copy_vs(uint vid [[vertex_id]]) {\n"
+"  float2 uv = float2((vid << 1) & 2, vid & 2);\n"
+"  ScaleV2F o; o.pos = float4(uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f); return o;\n"
+"}\n"
+"constexpr sampler s_lin(coord::pixel, filter::linear, address::clamp_to_edge);\n"
+"constexpr sampler s_near(coord::pixel, filter::nearest, address::clamp_to_edge);\n"
+"fragment float4 scale_copy_fs_lin(ScaleV2F in [[stage_in]], texture2d<float> src [[texture(0)]], constant uint4 *p [[buffer(0)]]) {\n"
+"  float2 dpos = in.pos.xy - float2(p[0].zw);\n"
+"  float2 u = dpos / float2(p[1].zw);\n"
+"  float2 spos = float2(p[0].xy) + u * float2(p[1].xy);\n"
+"  return src.sample(s_lin, spos);\n"
+"}\n"
+"fragment float4 scale_copy_fs_near(ScaleV2F in [[stage_in]], texture2d<float> src [[texture(0)]], constant uint4 *p [[buffer(0)]]) {\n"
+"  float2 dpos = in.pos.xy - float2(p[0].zw);\n"
+"  float2 u = dpos / float2(p[1].zw);\n"
+"  float2 spos = float2(p[0].xy) + u * float2(p[1].xy);\n"
+"  return src.sample(s_near, spos);\n"
+"}\n";
+static inline BOOL is_color_float_or_unorm(MTLPixelFormat fmt) {
+    switch (fmt) {
+        case MTLPixelFormatRGBA8Unorm:
+        case MTLPixelFormatRGBA8Unorm_sRGB:
+        case MTLPixelFormatRGBA8Snorm:
+        case MTLPixelFormatBGRA8Unorm:
+        case MTLPixelFormatBGRA8Unorm_sRGB:
+        case MTLPixelFormatRGBA16Float:
+        case MTLPixelFormatRGBA16Unorm:
+        case MTLPixelFormatRGBA16Snorm:
+        case MTLPixelFormatRG16Float:
+        case MTLPixelFormatRG16Unorm:
+        case MTLPixelFormatRG16Snorm:
+        case MTLPixelFormatR16Float:
+        case MTLPixelFormatR16Unorm:
+        case MTLPixelFormatR16Snorm:
+        case MTLPixelFormatRGBA32Float:
+        case MTLPixelFormatRG32Float:
+        case MTLPixelFormatR32Float:
+        case MTLPixelFormatR8Unorm:
+        case MTLPixelFormatR8Snorm:
+        case MTLPixelFormatRG8Unorm:
+        case MTLPixelFormatRG8Snorm:
+        case MTLPixelFormatRGB10A2Unorm:
+        case MTLPixelFormatRG11B10Float:
+        case MTLPixelFormatRGB9E5Float:
+        case MTLPixelFormatBGR10A2Unorm:
+            return YES;
+        default:
+            return NO;
+    }
+}
+static id<MTLRenderPipelineState> copy_t2t_scale_pso(MTLPixelFormat fmt, int linear) {
+    static struct { MTLPixelFormat fmt; id<MTLRenderPipelineState> ps[2]; } cache[16];
+    static int n_cached;
+    static id<MTLFunction> vf, ff_lin, ff_near;
+    static int failed;
+    if (failed) return nil;
+    for (int i = 0; i < n_cached; i++) {
+        if (cache[i].fmt == fmt) {
+            if (cache[i].ps[linear]) return cache[i].ps[linear];
+            MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+            pd.vertexFunction = vf;
+            pd.fragmentFunction = linear ? ff_lin : ff_near;
+            pd.colorAttachments[0].pixelFormat = fmt;
+            NSError *e = nil;
+            cache[i].ps[linear] = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+            if (!cache[i].ps[linear]) MLOG("【红】缩放拷贝管线建不出 %s (fmt %lu linear %d)", e.localizedDescription.UTF8String, (unsigned long)fmt, linear);
+            return cache[i].ps[linear];
+        }
+    }
+    if (!vf) {
+        NSError *e = nil;
+        id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k_scale_copy_msl) options:nil error:&e];
+        vf = lib ? [lib newFunctionWithName:@"scale_copy_vs"] : nil;
+        ff_lin = lib ? [lib newFunctionWithName:@"scale_copy_fs_lin"] : nil;
+        ff_near = lib ? [lib newFunctionWithName:@"scale_copy_fs_near"] : nil;
+        if (!vf || !ff_lin || !ff_near) { failed = 1; MLOG("【红】缩放拷贝着色器创建失败 %s", e ? e.localizedDescription.UTF8String : "missing func"); return nil; }
+    }
+    if (n_cached < 16) {
+        int idx = n_cached++;
+        cache[idx].fmt = fmt;
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = vf;
+        pd.fragmentFunction = linear ? ff_lin : ff_near;
+        pd.colorAttachments[0].pixelFormat = fmt;
+        NSError *e = nil;
+        cache[idx].ps[linear] = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+        if (!cache[idx].ps[linear]) MLOG("【红】缩放拷贝管线建不出 %s (fmt %lu linear %d)", e.localizedDescription.UTF8String, (unsigned long)fmt, linear);
+        return cache[idx].ps[linear];
+    }
+    return nil;
+}
+static int copy_t2t_scale(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds,
+                          int sx, int sy, int sw, int sh, int dx, int dy, int dw, int dh, int linear) {
+    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return 1;
+    static int failed;
+    static id<MTL4ArgumentTable> at;
+    static id<MTLBuffer> pbuf[16];
+    static int pbuf_idx;
+    if (failed) return 0;
+    if (!at) {
+        NSError *e = nil;
+        MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new];
+        ad.maxTextureBindCount = 1; ad.maxBufferBindCount = 1;
+        at = [g_dev newArgumentTableWithDescriptor:ad error:&e];
+        for (int i = 0; i < 16; i++) {
+            pbuf[i] = [g_dev newBufferWithLength:32 options:MTLResourceStorageModeShared];
+            res_add(pbuf[i]);
+        }
+        if (!at || !pbuf[0]) { failed = 1; MLOG("【红】缩放拷贝参数表建不出 %s", e ? e.localizedDescription.UTF8String : "unknown"); return 0; }
+    }
+    id<MTLRenderPipelineState> ps = copy_t2t_scale_pso(d.pixelFormat, linear);
+    if (!ps) { RED_ONCE(51, "缩放拷贝目标格式不支持：%lu", (unsigned long)d.pixelFormat); return 0; }
+    MTLTextureType tt = MTLTextureType2D;
+    id<MTLTexture> sv = (s.textureType == tt && sl == 0 && ss == 0) ? s : [s newTextureViewWithPixelFormat:s.pixelFormat textureType:tt levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss, 1)];
+    id<MTLTexture> dv = (d.textureType == tt && dl == 0 && ds == 0) ? d : [d newTextureViewWithPixelFormat:d.pixelFormat textureType:tt levels:NSMakeRange(dl, 1) slices:NSMakeRange(ds, 1)];
+    if (!sv || !dv) { RED_ONCE(52, "缩放拷贝建不出视图"); return 0; }
+    id<MTLBuffer> pb = pbuf[pbuf_idx];
+    pbuf_idx = (pbuf_idx + 1) % 16;
+    uint32_t *p = (uint32_t *)pb.contents;
+    p[0] = (uint32_t)sx; p[1] = (uint32_t)sy; p[2] = (uint32_t)dx; p[3] = (uint32_t)dy;
+    p[4] = (uint32_t)sw; p[5] = (uint32_t)sh; p[6] = (uint32_t)dw; p[7] = (uint32_t)dh;
+    rp_end();
+    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
+    rp.colorAttachments[0].texture = dv;
+    rp.colorAttachments[0].loadAction = (dx == 0 && dy == 0 && (NSUInteger)dw == dv.width && (NSUInteger)dh == dv.height) ? MTLLoadActionDontCare : MTLLoadActionLoad;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    blit_close(); rs_sync(); pt_mark(g_cb, 'R', rp);
+    id<MTL4RenderCommandEncoder> en = [g_cb renderCommandEncoderWithDescriptor:rp];
+    es_reset();
+    if (!en) { if (sv != s) defer_obj_unref(sv); if (dv != d) defer_obj_unref(dv); return 0; }
+    [en barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
+    [en setArgumentTable:at atStages:MTLRenderStageFragment];
+    [at setTexture:sv.gpuResourceID atIndex:0];
+    [at setAddress:pb.gpuAddress atIndex:0];
+    [en setViewport:(MTLViewport){0, 0, (double)dv.width, (double)dv.height, 0, 1}];
+    [en setScissorRect:(MTLScissorRect){(NSUInteger)dx, (NSUInteger)dy, (NSUInteger)dw, (NSUInteger)dh}];
+    [en setRenderPipelineState:ps];
+    [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    m4_end(en);
+    args_dirty_all(); g_pso_dirty = g_dss_dirty = 1;
+    if (sv != s) defer_obj_unref(sv);
+    if (dv != d) defer_obj_unref(dv);
+    return 1;
+}
 // GPU：贴图 → 贴图（原先误列为空操作，选角页每帧 3 次）。等尺寸、不镜像、同格式 → 逐层 blit；其余语义（缩放带过滤、镜像、换格式）blit 表达不了，报红待实现
 // GPU: texture -> texture (previously mislisted as a no-op, 3 times per frame on the character select page). Same size, not mirrored, same format -> blit layer by layer; the other semantics (scaling with filtering, mirroring, format change) cannot be expressed by blit: report a failure, to be implemented
 static void copy_t2t(const p_copy_t2t *c) {
@@ -11077,12 +11225,24 @@ static void copy_t2t(const p_copy_t2t *c) {
         for (int z = 0; z < nz && ok; z++) ok = copy_t2t_astc(s, d, sl, sz0 + c->sr.zoffset + z, dl, dz0 + c->dr.zoffset + z, c->sr.xoffset, c->sr.yoffset, c->dr.xoffset, c->dr.yoffset, c->sr.width, c->sr.height);
         if (ok) return;
     }
-    BOOL s_is_depth = (s.pixelFormat == MTLPixelFormatDepth32Float || s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || s.pixelFormat == MTLPixelFormatDepth16Unorm);
-    BOOL d_is_depth = (d.pixelFormat == MTLPixelFormatDepth32Float || d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || d.pixelFormat == MTLPixelFormatDepth16Unorm);
+    BOOL s_is_depth = (s.pixelFormat == MTLPixelFormatDepth32Float || s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || s.pixelFormat == MTLPixelFormatDepth16Unorm || s.pixelFormat == MTLPixelFormatStencil8);
+    BOOL d_is_depth = (d.pixelFormat == MTLPixelFormatDepth32Float || d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || d.pixelFormat == MTLPixelFormatDepth16Unorm || d.pixelFormat == MTLPixelFormatStencil8);
     if (s_is_depth && d_is_depth && s.pixelFormat != d.pixelFormat && !s3 && !d3 && c->sr.width == c->dr.width && c->sr.height == c->dr.height) {
         int ok = 1;
         for (int z = 0; z < nz && ok; z++)
             ok = copy_t2t_depth(s, d, sl, sz0 + c->sr.zoffset + z, dl, dz0 + c->dr.zoffset + z, c->sr.xoffset, c->sr.yoffset, c->dr.xoffset, c->dr.yoffset, c->sr.width, c->sr.height);
+        if (ok) return;
+    }
+    if (!s_is_depth && !d_is_depth && !s3 && !d3 && is_color_float_or_unorm(s.pixelFormat) && is_color_float_or_unorm(d.pixelFormat)
+        && ((c->sr.width != c->dr.width || c->sr.height != c->dr.height) || s.pixelFormat != d.pixelFormat)
+        && ((c->sr.depth ? c->sr.depth : 1) == (c->dr.depth ? c->dr.depth : 1))
+        && !(c->flags & ~NVN_COPY_FLAGS_ENGINE_2D_BIT & ~NVN_COPY_FLAGS_LINEAR_FILTER_BIT)) {
+        int linear = (c->flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT) != 0;
+        int ok = 1;
+        for (int z = 0; z < nz && ok; z++)
+            ok = copy_t2t_scale(s, d, sl, sz0 + c->sr.zoffset + z, dl, dz0 + c->dr.zoffset + z,
+                                c->sr.xoffset, c->sr.yoffset, c->sr.width, c->sr.height,
+                                c->dr.xoffset, c->dr.yoffset, c->dr.width, c->dr.height, linear);
         if (ok) return;
     }
     if (c->sr.width != c->dr.width || c->sr.height != c->dr.height || (c->sr.depth ? c->sr.depth : 1) != (c->dr.depth ? c->dr.depth : 1) || (c->flags & ~NVN_COPY_FLAGS_ENGINE_2D_BIT & ~NVN_COPY_FLAGS_LINEAR_FILTER_BIT)
