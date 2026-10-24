@@ -66,7 +66,7 @@ typedef struct thr {
     uint64_t cseq, core_since; struct thr *cnext;
     uint64_t prof[32], wake_ns, grant_ns;
     int wait_queue; /* fd + 1, 0 not created, -1 unavailable; protected by G */
-    uint32_t wh[4]; int nwh;   // handles of the current WaitSynchronization (state dump)
+    uint32_t wh[64]; int nwh;   // handles of the current WaitSynchronization (state dump)
     int last_hle;              // 1 + wrapper index of the last host call made while "hletrace" was on (state dump)
     uint64_t yrun_ns, yrun_svc;   // the current run of yields: when it started, and nsvc at its last yield (yield_backoff_ns)
 } thr_t;
@@ -458,7 +458,16 @@ static int sig_obj(uint32_t h, int *bad) {    // 1=已触发（持 G） | 1 = si
     }
 }
 static void wake_sync_waiters(void) {
-    for (thr_t *w = g_wait; w; ) { thr_t *n = w->next; if (w->wkind == 4) wake(w, -1); w = n; }
+    for (thr_t *w = g_wait; w; ) {
+        thr_t *next=w->next;
+        if(w->wkind==4) {
+            int bad=0,ready=w->cancel;
+            for(int i=0;i<w->nwh && !ready;i++) ready=sig_obj(w->wh[i],&bad);
+            /* Closed/invalid handles must also return to report the error. */
+            if(ready || bad) wake(w,-1);
+        }
+        w=next;
+    }
 }
 
 static int64_t now_mono_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec * 1000000000ll + ts.tv_nsec; }
@@ -689,7 +698,7 @@ int svc_thread(int num, uint64_t *regs) {
         int64_t deadline = ns > 0 ? (dm_detclock_enabled() ? (int64_t)guest_ns() : now_mono_ns()) + ns : 0;
         profile_lock();
         if(thread_profile_on){t->prof[19]++;t->prof[20]+=ns==0;t->prof[24]+=ns<0;}
-        t->nwh = n; for (int i = 0; i < n && i < 4; i++) t->wh[i] = hs[i];
+        t->nwh = n; for (int i = 0; i < n; i++) t->wh[i] = hs[i];
         int64_t r; int idx = -1;
         for (;;) {
             if (t->cancel) { t->cancel = 0; r = R_CANCELLED; break; }
