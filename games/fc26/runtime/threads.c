@@ -775,6 +775,18 @@ void hle_signal_system_event(void *ev) {   // 未绑定的按手动清除即时�
     profile_unlock();
 }
 
+/* Clear from host service code too: unlike calling the guest SDK, this is
+ * valid while a blocking service has temporarily released its virtual core. */
+void hle_clear_system_event(void *ev) {
+    pthread_mutex_lock(&g_se_lock); uint32_t wh=se_find(ev); pthread_mutex_unlock(&g_se_lock);
+    if(!wh) return;
+    profile_lock();
+    event_t *e=h_get(wh,O_EVENT_W);
+    if(!e) die("SystemEvent clear: invalid writable handle %#x",wh);
+    e->signaled=0;
+    profile_unlock();
+}
+
 // ---------- IPC support (ipc.c): sessions, transfer memory and service-owned events ----------
 // Weak fallbacks keep standalone thread tests linkable; the runtime links the real ipc.c versions.
 __attribute__((weak)) void runtime_ipc_session_closed(void *s) { (void)s; die("IPC session closed without ipc.c"); }

@@ -20,5 +20,7 @@ class ThreadSleepTest(unittest.TestCase):
             env = dict(os.environ)
             env.pop('TOTK_LISTCHECK', None)
             env.pop('TOTK_DUMP_AFTER', None)
+            env.pop('TOTK_FREE_CORES', None)
+            env.pop('FC26_THREAD_PROFILE', None)
             run = subprocess.run([str(exe)], capture_output=True, text=True, env=env, timeout=10)
             self.assertEqual(run.returncode, 0, run.stderr)

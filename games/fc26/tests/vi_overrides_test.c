@@ -10,6 +10,7 @@
 
 /* Minimal stubs required to link frontend.m standalone */
 void hle_bind_system_event(void *ev, int autoclear) { (void)ev; (void)autoclear; }
+void hle_clear_system_event(void *ev) { (void)ev; }
 void hle_signal_system_event(void *ev) { (void)ev; }
 int runtime_fs_save_busy(void) { return 0; }
 void runtime_gamepad_start(void) {}

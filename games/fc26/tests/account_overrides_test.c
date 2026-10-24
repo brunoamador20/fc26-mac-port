@@ -14,6 +14,7 @@
 
 /* Minimal stubs required to link account.c standalone */
 static int g_event_signaled = 0;
+void hle_clear_system_event(void *ev) { (void)ev; }
 void hle_signal_system_event(void *ev) {
     if (ev) {
         ((uint8_t *)ev)[0x28] = 1;

@@ -42,6 +42,7 @@ pthread_key_t runtime_keys[8];
 static int sdk_close_calls, sdk_close_fd = -1;
 static int fake_sdk_close(int fd) { sdk_close_calls++; sdk_close_fd = fd; return 0; }
 void *runtime_symbol(const char *name) { return !strcmp(name, "close") ? (void *)fake_sdk_close : NULL; }
+void hle_clear_system_event(void *ev) { (void)ev; }
 void hle_signal_system_event(void *ev) { (void)ev; }   /* account.c: the async contexts signal their event (threads.c in the runtime) */
 static int guest_errno(void) { int v; memcpy(&v, (uint8_t *)pthread_getspecific(runtime_keys[2]) + 0x1d8, sizeof v); return v; }
 static void *objects[64];

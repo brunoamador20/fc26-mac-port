@@ -23,6 +23,7 @@
 
 pthread_key_t runtime_keys[8];
 void *runtime_symbol(const char *name) { (void)name; return NULL; }
+void hle_clear_system_event(void *ev) { (void)ev; }
 void hle_signal_system_event(void *ev) { (void)ev; }
 static void *objects[64];
 static int kinds[64];

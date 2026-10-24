@@ -23,21 +23,31 @@ static uint8_t message_event[64] __attribute__((aligned(8)));
 static int message_event_bound;
 __attribute__((constructor)) static void started(void) { start_ns = runtime_now_ns(); }
 
+/* The notification event is level-triggered by queue occupancy. Updating it
+ * under the queue lock prevents a concurrent push from being cleared by pop. */
+static void refresh_message_event(void) {
+    if(!message_event_bound) return;
+    if(head!=tail) hle_signal_system_event(message_event);
+    else hle_clear_system_event(message_event);
+}
 void runtime_oe_push_message(uint32_t message) {
     pthread_mutex_lock(&lock);
     if (tail - head < 32) { messages[tail++ % 32] = message; pthread_cond_broadcast(&message_cv); }
+    refresh_message_event();
     pthread_mutex_unlock(&lock);
-    if (message_event_bound) hle_signal_system_event(message_event);
 }
 static void *get_notification_message_event(void) {
+    pthread_mutex_lock(&lock);
     if (!message_event_bound) {
         hle_bind_system_event(message_event, 0);
         message_event_bound = 1;
-        pthread_mutex_lock(&lock);
-        int pending = (head != tail);
-        pthread_mutex_unlock(&lock);
-        if (pending) hle_signal_system_event(message_event);
+        if(getenv("FC26_THREAD_PROFILE")) {
+            uint32_t (*getr)(const void *)=runtime_symbol("_ZN2nn2os30GetReadableHandleOfSystemEventEPKNS0_15SystemEventTypeE");
+            if(getr) fprintf(stderr,"[thread-profile] notification_message_handle=%x\n",getr(message_event));
+        }
+        refresh_message_event();
     }
+    pthread_mutex_unlock(&lock);
     return message_event;
 }
 static void disable_screen_shot(void) {}
@@ -97,13 +107,13 @@ static unsigned char try_pop_launch_parameter(uint64_t *size,void *buffer,uint64
     (void)buffer;(void)capacity;if(size)*size=0;return 0;
 }
 static unsigned char try_pop(uint32_t *out) {
-    pthread_mutex_lock(&lock); int ok = head != tail; if (ok && out) *out = messages[head++ % 32]; pthread_mutex_unlock(&lock); return (unsigned char)ok;
+    pthread_mutex_lock(&lock); int ok = head != tail; if (ok && out) *out = messages[head++ % 32]; refresh_message_event(); pthread_mutex_unlock(&lock); return (unsigned char)ok;
 }
 int runtime_core_away(void); void runtime_core_back(int *away);
 static uint32_t pop(void) {
     __attribute__((cleanup(runtime_core_back))) int away = runtime_core_away();   /* blocks like a Horizon wait */
     pthread_mutex_lock(&lock); while (head == tail) pthread_cond_wait(&message_cv, &lock);
-    uint32_t m = messages[head++ % 32]; pthread_mutex_unlock(&lock); return m;
+    uint32_t m = messages[head++ % 32]; refresh_message_event(); pthread_mutex_unlock(&lock); return m;
 }
 
 /* ---------- nn::prepo: play reports are not transmitted (no Nintendo servers) ---------- */
