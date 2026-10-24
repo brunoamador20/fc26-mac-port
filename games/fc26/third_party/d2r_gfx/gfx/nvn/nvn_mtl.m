@@ -2654,7 +2654,11 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     }
     d.textureType = depth_promote_type(t->d.format, d.textureType);
     d.storageMode = MTLStorageModePrivate;   // 渲染目标与素材都放 GPU 私有存储（可用无损压缩） | Render targets and assets both go in GPU private storage (lossless compression available)
-    d.usage = MTLTextureUsageShaderRead | (fmt_compressed(t->d.format) || packaged ? 0 : MTLTextureUsageRenderTarget)
+    /* Virtual native textures can start as CPU assets and later receive GPU clears
+       or scaled copies. Uploading them must preserve their render-target usage. */
+    int virtual_native = t->pool && (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) &&
+        t->d.target != 0 && t->d.target != 3 && !fmt_compressed(t->d.format);
+    d.usage = MTLTextureUsageShaderRead | (fmt_compressed(t->d.format) || (packaged && !virtual_native) ? 0 : MTLTextureUsageRenderTarget)
             | (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE ? MTLTextureUsageShaderWrite : 0)   // 图像用途：着色器可写（计算核生成 3D 调色表等） | Image usage: shader-writable (compute kernels generating the 3D color lookup table, etc.)
             | (t->d.target == 8 && t->d.width <= 64 && !fmt_compressed(t->d.format) && !packaged ? MTLTextureUsageShaderWrite : 0)   // TOTK: small cube render targets: the cube-merge copy-out kernel writes them (nvn_cube_group.h)
             | (unp ? MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView : 0);
