@@ -34,6 +34,6 @@ class DepthCopyParamsTest(unittest.TestCase):
   prefix=HARNESS.split('/*PRODUCTION*/')[0];prefix=re.sub(r'^static int copy_t2t_depth\(.*?\n','',prefix,flags=re.M);prefix=prefix.replace('newBufferWithLength:n options','newBufferWithLength:n+256 options').replace('res_add(*buf); return 0;','res_add(*buf); return 256;')
   with tempfile.TemporaryDirectory()as tmp:
    exe=Path(tmp)/'depth';build=subprocess.run(['clang','-x','objective-c','-I',str(NVN),'-I',str(NVN/'include'),'-framework','Metal','-framework','Foundation','-','-o',str(exe)],input=prefix+m.group(0)+MAIN,text=True,capture_output=True);self.assertEqual(build.returncode,0,build.stderr)
-   run=subprocess.run(['/usr/bin/lockf','-k','/tmp/fc26-boot.lock',str(exe)],text=True,capture_output=True,timeout=180)
+   run=subprocess.run([str(exe)],text=True,capture_output=True,timeout=180)
    if run.returncode==77:self.skipTest('No Metal device')
    self.assertEqual(run.returncode,0,run.stdout+run.stderr);self.assertIn('bad=0',run.stdout);print(run.stdout.strip())
