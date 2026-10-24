@@ -2661,6 +2661,12 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
 // 计数：选角 / 营地 / 野外 / 战斗 4 页 17473 张贴图换格式视图 0 次，所以这里是兜底，不靠预测哪些贴图需要
 // In-place upgrade: when the original texture was not created with PixelFormatView (off by default, to keep Apple GPU lossless compression) but a different-format view is needed, create a new one with the original spec + PixelFormatView, copy over every slice × level, and replace the registration.
 // Count: across the 4 screens character select / camp / wilderness / combat, 17473 textures needed a different-format view 0 times, so this is a fallback and does not rely on predicting which textures need it
+/* A copy of base made with another usage: Metal refuses a descriptor swizzle together with RenderTarget or ShaderWrite
+   ("Texture swizzling is not compatable with MTLTextureUsageShaderWrite", abort 2026-10-23 boot d3a), so such a copy keeps
+   identity channels and the swizzle lives on the sampling view as for textures made with that usage (tex_desc, tex_by_id). */
+static MTLTextureSwizzleChannels desc_swizzle(id<MTLTexture> base, MTLTextureUsage usage) {
+    return usage & (MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite) ? MTLTextureSwizzleChannelsDefault : base.swizzle;
+}
 static id<MTLTexture> tex_upgrade_pfv(const tex_t *t, id<MTLTexture> base, MTLPixelFormat view_pf) {
     if (g_tex_preparing && rp_active()) { g_tex_prepare_split = 1; return base; }
     { stor_key k;   // TOTK: a storage-shared base is recreated for every serial holding it, then this serial re-resolves
@@ -2720,7 +2726,7 @@ static id<MTLTexture> stor_recreate(const stor_key *k, MTLTextureUsage usage) {
     if (!base) return nil;
     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
     d.textureType = base.textureType; d.pixelFormat = base.pixelFormat; d.width = base.width; d.height = base.height; d.depth = base.depth;
-    d.swizzle = base.swizzle; d.arrayLength = base.arrayLength; d.mipmapLevelCount = base.mipmapLevelCount; d.sampleCount = base.sampleCount;
+    d.swizzle = desc_swizzle(base, usage); d.arrayLength = base.arrayLength; d.mipmapLevelCount = base.mipmapLevelCount; d.sampleCount = base.sampleCount;
     d.storageMode = base.storageMode; d.cpuCacheMode = base.cpuCacheMode; d.hazardTrackingMode = base.hazardTrackingMode;
     d.resourceOptions = base.resourceOptions; d.usage = usage;
     id<MTLTexture> nt = [g_dev newTextureWithDescriptor:d];
@@ -2765,7 +2771,7 @@ static id<MTLTexture> tex_upgrade_shader_write(const tex_t *t, id<MTLTexture> ba
     d.width = base.width;
     d.height = base.height;
     d.depth = base.depth;
-    d.swizzle = base.swizzle;
+    d.swizzle = desc_swizzle(base, base.usage | MTLTextureUsageShaderWrite);
     d.arrayLength = base.arrayLength;
     d.mipmapLevelCount = base.mipmapLevelCount;
     d.sampleCount = base.sampleCount;
@@ -6998,6 +7004,7 @@ static id<MTLDepthStencilState> dss_get(int has_depth, int has_stencil) {
 static uint64_t g_dummy_tex_rid[8][4], g_dummy_img_rid[8][4], g_dummy_tbuf_rid[4];
 /* TOTK: cached views of a texture as another texture type (2D <-> 2D array, 1 slice); keyed by the base texture object. */
 static NSMapTable<id, id<MTLTexture>> *g_type_views;
+static NSMapTable<id, id<MTLTexture>> *g_img_views;   // tex_image_view: writable plain view of a swizzled view's parent
 /* Cached views retain their parent allocation. Evict after that allocation has been removed from
    residency by the completed-fence retirement path; a strong cache must not keep every upload alive.
    Caller cadence is bounded, and deferral also protects views used by the most recent submission. */
@@ -7013,6 +7020,14 @@ static void type_views_sweep_retired(void) {
         defer_obj_unref(view); defer_obj_unref(key);
         [g_type_views removeObjectForKey:key]; g_type_retired_views++;
     }
+    for (id key in g_img_views.keyEnumerator.allObjects) {
+        id<MTLTexture> view = [g_img_views objectForKey:key], base = view;
+        while (base.parentTexture) base = base.parentTexture;
+        id<MTLResource> allocation = base.buffer ?: (id<MTLResource>)base;
+        if ([g_res_objects containsObject:allocation]) continue;
+        defer_obj_unref(view); defer_obj_unref(key);
+        [g_img_views removeObjectForKey:key];
+    }
     pthread_mutex_unlock(&g_res_mu);
     registry_unlock();
 }
@@ -7026,6 +7041,25 @@ static id<MTLTexture> tex_type_view(id<MTLTexture> base, MTLTextureType want) {
     [g_type_views setObject:v forKey:base];
     static int said; if (said++ < 3) MLOG("texture type view: %lu -> %lu for a %lux%lu texture", (unsigned long)base.textureType, (unsigned long)want, (unsigned long)base.width, (unsigned long)base.height);
     return v;
+}
+/* TOTK: an image slot writes the storage format; Maxwell surface loads / stores do not apply the texture's channel
+   swizzle, and Metal strips ShaderWrite from a view made with a swizzle (usage 0x1). A swizzled sampling view of a writable
+   texture is bound as an image through a plain view of the same format, type, levels and layers, cached per parent texture
+   like the type views (one view per parent; another range replaces it). */
+static id<MTLTexture> tex_image_view(id<MTLTexture> v) {
+    id<MTLTexture> p = v.parentTexture;
+    if (!p || !(p.usage & MTLTextureUsageShaderWrite)) return nil;
+    if (!g_img_views) g_img_views = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality valueOptions:NSPointerFunctionsStrongMemory];
+    NSUInteger faces = v.textureType == MTLTextureTypeCube || v.textureType == MTLTextureTypeCubeArray ? 6 : 1;
+    NSUInteger ns = v.textureType == MTLTextureType3D ? 1 : v.arrayLength * faces;
+    id<MTLTexture> w = [g_img_views objectForKey:p];
+    if (w && w.pixelFormat == v.pixelFormat && w.textureType == v.textureType && w.parentRelativeLevel == v.parentRelativeLevel && w.mipmapLevelCount == v.mipmapLevelCount
+        && w.parentRelativeSlice == v.parentRelativeSlice && w.arrayLength == v.arrayLength) return w;
+    if (w) defer_obj_unref(w);   // another range: draws encoded earlier may still use the old view
+    w = [p newTextureViewWithPixelFormat:v.pixelFormat textureType:v.textureType levels:NSMakeRange(v.parentRelativeLevel, v.mipmapLevelCount) slices:NSMakeRange(v.parentRelativeSlice, ns)];
+    if (!w || !(w.usage & MTLTextureUsageShaderWrite)) return nil;
+    [g_img_views setObject:w forKey:p];
+    return w;
 }
 static id<MTLTexture> dummy_tex(int dtt, int dpf) {
     static __strong id<MTLTexture> cache[8][4];
@@ -7397,25 +7431,24 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
             int tid = reg < 32 ? (int)(S.img[nvn_stage][reg] & 0xfffff) : 0;
             void *tv = NULL; uint64_t trid = tid ? tex_fast_rid(tid, &tv) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
             if (passdump()) PD("W %llu st%d reg%d tid=%d %s ser=%llu", g_stat_pass, nvn_stage, reg, tid, t ? "实" : "哑", t && tid < g_ntreg ? g_treg[tid].t.serial : 0ull);
-            if (t && !(t.usage & MTLTextureUsageShaderWrite)) {
-                if (tid > 0 && tid < g_ntreg && g_treg[tid].ok) {
-                    id<MTLTexture> up = tex_upgrade_shader_write(&g_treg[tid].t, t);
-                    if (up && (up.usage & MTLTextureUsageShaderWrite)) {
-                        t = up;
-                        trid = up.gpuResourceID._impl;
-                        g_treg[tid].view = (__bridge void *)up;
-                        g_treg[tid].view_rid = trid;
-                        g_treg[tid].view_ser = g_ser_gen;
+            if (t && !(t.usage & MTLTextureUsageShaderWrite) && tid > 0 && tid < g_ntreg && g_treg[tid].ok) {
+                /* The base gets ShaderWrite first (a copy when it was made without it); the registered view is then
+                   rebuilt, and a swizzled one (Metal strips ShaderWrite from those) is written through tex_image_view. */
+                id<MTLTexture> base = tex_mtl(&g_treg[tid].t);
+                if (base && !(base.usage & MTLTextureUsageShaderWrite)) {
+                    id<MTLTexture> up = tex_upgrade_shader_write(&g_treg[tid].t, base);
+                    if (up != base && (up.usage & MTLTextureUsageShaderWrite)) {
                         g_treg[tid].t.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
-                    } else {
-                        RED_ONCE(32, "图像槽绑的贴图没有可写用途（贴图号 %d）", tid);
-                        t = nil;
+                        treg_clear_view_locked(tid);
+                        trid = tex_fast_rid(tid, &tv); t = (__bridge id<MTLTexture>)tv;
                     }
-                } else {
-                    RED_ONCE(32, "图像槽绑的贴图没有可写用途（贴图号 %d）", tid);
-                    t = nil;
+                }
+                if (t && !(t.usage & MTLTextureUsageShaderWrite)) {
+                    id<MTLTexture> w = tex_image_view(t);
+                    if (w) { t = w; trid = w.gpuResourceID._impl; }
                 }
             }
+            if (t && !(t.usage & MTLTextureUsageShaderWrite)) { RED_ONCE(32, "图像槽绑的贴图没有可写用途（贴图号 %d）", tid); t = nil; }
             if (!t) { t = dummy_img(b->dtt, b->dpf); trid = g_dummy_img_rid[b->dtt & 7][b->dpf & 3]; }   // 未绑：D3D 语义写入丢弃——写进专用哑贴图，不污染读出 0 的那套 | Unbound: D3D semantics discard the write - write into a dedicated dummy texture so the set that reads 0 is not polluted
             slots[aid] = trid;
             USE(t, MTLResourceUsageRead | MTLResourceUsageWrite);
