@@ -1068,8 +1068,25 @@ static void cbk_compact(void) {
     }
     free(ob); g_cbk_used = live; g_cbk_empty = 0; g_cbk_compactions++;
 }
+/* FC 26 gives its command buffers no control memory up front: it registers a memory callback and adds memory when the
+   driver asks (2026-10-24 boot cmd1: 4,907 recordings, 0 AddControlMemory, every one with ctl=0). The real driver calls it
+   when a recording needs control memory it does not have; without that call no recording copy was ever released (a match:
+   20,000 live, 7 GiB, the Mac swapping and the game down to 13 frames/s). Ask, while still recording, for what the
+   recording's handle takes. The game answers with AddControlMemory on memory it recycles, which retires older copies. */
+static uint64_t g_ctl_asks, g_ctl_asks_answered;
+static void ctl_memory_need(NVNcommandBuffer *c, cmd_t *o, size_t need) {
+    static __thread int asking;   /* the callback is expected to call AddControlMemory, not to record: never ask from inside it */
+    if (asking || !o->cb || (o->ctl && o->ctl_used + need <= o->ctl_size)) return;
+    g_ctl_asks++;
+    asking = 1; o->cb(c, NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_CONTROL_MEMORY, need, o->cb_data); asking = 0;
+    if (o->ctl && o->ctl_used + need <= o->ctl_size) g_ctl_asks_answered++;
+    else if (g_ctl_asks - g_ctl_asks_answered <= 3) LOG("【红】[cmd] the control memory callback added no room for %zu bytes (cb=%p)", need, (void *)c);
+}
 NVN(nvnCommandBufferEndRecording, NVNcommandHandle, NVNcommandBuffer *c) {
     cmd_t *o = CB(c);
+#ifndef GAME_BOTW
+    ctl_memory_need(c, o, 64);
+#endif
     size_t hw_before = o->hw_used; uint8_t *p = cmd_alloc(o, 8); put_hdr(p, OP_END, 8); o->hw_used -= 8;
     o->recording = 0;
     if (reclog_limit() && (int)t_rec_n < reclog_limit()) { char line[1024]; size_t n = 0; t_rec_n++;
@@ -1103,10 +1120,10 @@ NVN(nvnCommandBufferEndRecording, NVNcommandHandle, NVNcommandBuffer *c) {
       if (b->empty) { b->empty = 0; g_cbk_empty--; }
       if (b->n == b->cap) { b->cap = b->cap ? b->cap * 2 : 8; b->v = realloc(b->v, b->cap * sizeof *b->v); if (!b->v) die("command copy table"); }
       b->v[b->n++] = (cmd_copy){lo, hi, copy, 0, (uint32_t)token}; g_ncopies++; }
-    { static uint64_t made; if (++made % 20000 == 0)
-        LOG("[cmd] recording copies: %llu made, %zu live, %.1f MiB, submit %llu; released %llu at a re-added control memory, %llu whose mark there was gone (%llu unmapped); index %zu buckets (%zu empty) of %zu, compacted %llu times",
+    { static uint64_t made; if (++made % 5000 == 0)
+        LOG("[cmd] recording copies: %llu made, %zu live, %.1f MiB, submit %llu; released %llu at a re-added control memory, %llu whose mark there was gone (%llu unmapped); index %zu buckets (%zu empty) of %zu, compacted %llu times; control memory asked %llu times, %llu answered",
             (unsigned long long)made, g_ncopies, g_copy_bytes / 1048576.0, (unsigned long long)g_submits, (unsigned long long)g_copy_drop_readd, (unsigned long long)g_copy_drop_token, (unsigned long long)g_copy_mark_faults,
-            g_cbk_used, g_cbk_empty, g_cbk_cap, (unsigned long long)g_cbk_compactions); }
+            g_cbk_used, g_cbk_empty, g_cbk_cap, (unsigned long long)g_cbk_compactions, (unsigned long long)g_ctl_asks, (unsigned long long)g_ctl_asks_answered); }
     pthread_mutex_unlock(&g_copy_mu);
     if (cmdlog_env()) LOG("[cmd] EndRecording cb=%p recorded=%p copy=%p ctl=%p", (void *)c, (void *)o->seg, (void *)copy, o->ctl);
     if (totk_life_on() && totk_life_cb_take(c)) { totk_life_log("end cb=%p handle=%p", (void *)c, (void *)copy); totk_life_handle_add((uint64_t)(uintptr_t)copy); }
