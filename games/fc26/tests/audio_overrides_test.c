@@ -298,6 +298,7 @@ int main(void) {
 
     /* IAudioOut Command 3: AppendAudioOutBuffer */
     int16_t sample_data[240 * 2] = {0};
+    sample_data[0] = 1000; sample_data[1] = -2000;   /* the levels line reports peak 2000, 2 nonzero */
     AudioBufferDescriptor desc = {
         .next = 0,
         .sample_buffer = (uintptr_t)sample_data,

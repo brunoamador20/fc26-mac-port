@@ -142,6 +142,8 @@ class TestAudioOverrides(unittest.TestCase):
             run = subprocess.run([str(exe)], capture_output=True, text=True, env=env)
             self.assertEqual(run.returncode, 0, f'Audio harness failed:\n{run.stderr}\n{run.stdout}')
             self.assertIn('ALL_AUDIO_TESTS_OK', run.stdout)
+            # Levels of the appended PCM, counted before the silent sink (one line on the first buffer).
+            self.assertIn('AudioOut levels: bufs 1 frames 240 rms 102.1 peak 2000 nonzero 2', run.stderr, run.stderr)
 
 
 if __name__ == '__main__':

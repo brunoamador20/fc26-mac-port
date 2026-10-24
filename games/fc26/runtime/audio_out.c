@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
 enum { STATE_STARTED = 0, STATE_STOPPED = 1, FORMAT_PCM16 = 2, DEFAULT_RATE = 48000, QUEUE_MAX = 32 };
 typedef struct { uint64_t next, sample_buffer, capacity, data_size, data_offset; } AudioOutBuffer;   /* the client's descriptor */
@@ -25,6 +26,9 @@ typedef struct {
     Queued queue[QUEUE_MAX]; unsigned nqueue;          /* appended, not yet played (head first) */
     uint64_t released[QUEUE_MAX]; unsigned nreleased;  /* played, not yet collected by GetReleasedAudioOutBuffers */
     uint64_t played_samples;
+    /* Levels of what the game appends, counted before the silent sink so a silent test boot shows them too: one line on
+       the first buffer, then every 5 s. played_cb counts the buffers Core Audio has played back. */
+    uint64_t lv_bufs, lv_frames, lv_nonzero, lv_played_cb, lv_report_ns; double lv_sumsq; int lv_peak, lv_started; OSStatus lv_start_status;
 } AudioOut;
 
 static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
@@ -40,7 +44,7 @@ static void release_head(AudioOut *o) {
 }
 static void played(void *user, AudioQueueRef q, AudioQueueBufferRef b) {   /* Core Audio thread */
     AudioOut *o = user;
-    pthread_mutex_lock(&o->lock); release_head(o); pthread_mutex_unlock(&o->lock);
+    pthread_mutex_lock(&o->lock); release_head(o); o->lv_played_cb++; pthread_mutex_unlock(&o->lock);
     AudioQueueFreeBuffer(q, b);
     runtime_event_signal(o->event);
 }
@@ -88,6 +92,19 @@ static const IpcBuffer *out_buffer(const IpcRequest *rq, int *pointer) {
     if (rq->nc && rq->c[0].size) { *pointer = 1; return &rq->c[0]; }
     return NULL;
 }
+static void levels(AudioOut *o, const int16_t *pcm, uint64_t samples) {
+    uint64_t now = now_ns();
+    pthread_mutex_lock(&o->lock);
+    for (uint64_t i = 0; i < samples; i++) { int v = pcm[i] < 0 ? -pcm[i] : pcm[i]; if (v > o->lv_peak) o->lv_peak = v; o->lv_nonzero += v != 0; o->lv_sumsq += (double)pcm[i] * pcm[i]; }
+    o->lv_bufs++; o->lv_frames += samples / o->channels;
+    if (o->lv_report_ns && now - o->lv_report_ns < 5000000000ull) { pthread_mutex_unlock(&o->lock); return; }
+    uint64_t n = o->lv_frames * o->channels;
+    fprintf(stderr, "[totk-audio] AudioOut levels: bufs %llu frames %llu rms %.1f peak %d nonzero %llu | played_cb %llu start_status %d %s\n",
+            (unsigned long long)o->lv_bufs, (unsigned long long)o->lv_frames, n ? sqrt(o->lv_sumsq / (double)n) : 0.0, o->lv_peak,
+            (unsigned long long)o->lv_nonzero, (unsigned long long)o->lv_played_cb, (int)o->lv_start_status, o->silent ? "silent sink" : "Core Audio");
+    o->lv_bufs = o->lv_frames = o->lv_nonzero = 0; o->lv_sumsq = 0; o->lv_peak = 0; o->lv_report_ns = now;
+    pthread_mutex_unlock(&o->lock);
+}
 static void append(AudioOut *o, const IpcRequest *rq) {
     const IpcBuffer *b = in_buffer(rq); need(b && b->size >= sizeof(AudioOutBuffer), "AppendAudioOutBuffer descriptor");
     AudioOutBuffer d; memcpy(&d, ipc_guest(b->addr, sizeof d), sizeof d);
@@ -97,6 +114,7 @@ static void append(AudioOut *o, const IpcRequest *rq) {
     need(o->nqueue < QUEUE_MAX, "AudioOut queue full");
     o->queue[o->nqueue++] = (Queued){tag, d.data_size};
     pthread_mutex_unlock(&o->lock);
+    levels(o, ipc_guest(d.sample_buffer + d.data_offset, d.data_size), d.data_size / 2);
     if (o->silent) return;
     uint64_t frames = d.data_size / (2ull * o->channels);
     AudioQueueBufferRef qb;
@@ -119,7 +137,10 @@ static void released(AudioOut *o, const IpcRequest *rq, IpcResponse *rs) {
 }
 static void set_state(AudioOut *o, uint32_t state) {
     pthread_mutex_lock(&o->lock); o->state = state; pthread_mutex_unlock(&o->lock);
-    if (o->aq) { if (state == STATE_STARTED) AudioQueueStart(o->aq, NULL); else AudioQueuePause(o->aq); }
+    if (o->aq) {
+        OSStatus r = state == STATE_STARTED ? AudioQueueStart(o->aq, NULL) : AudioQueuePause(o->aq);
+        if (state == STATE_STARTED && !o->lv_started) { o->lv_started = 1; o->lv_start_status = r; fprintf(stderr, "[totk-audio] AudioOut: AudioQueueStart = %d\n", (int)r); }
+    }
 }
 static void audio_out_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
     AudioOut *o = s->state;
