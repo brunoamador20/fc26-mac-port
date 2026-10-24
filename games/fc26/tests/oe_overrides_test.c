@@ -4,6 +4,7 @@
    GetPseudoDeviceId, GetDisplayVersion, GetNotificationMessageEvent,
    DisableScreenShot, EnterExitRequestHandlingSection, LeaveExitRequestHandlingSection. */
 #include "runtime.h"
+#include "ipc.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,8 +19,9 @@ static uint32_t fake_create_system_event(void *ev, int autoclear, int inter_proc
     (void)autoclear; (void)inter_process;
     memset(ev, 0, 0x38);
     ((uint8_t *)ev)[0x28] = 2; /* initialized */
-    *(uint32_t *)((uint8_t *)ev + 0x14) = 0x2001; /* write handle */
-    *(uint32_t *)((uint8_t *)ev + 0x18) = 0x2002; /* read handle */
+    uint32_t wh = runtime_event_new();
+    *(uint32_t *)((uint8_t *)ev + 0x14) = wh;
+    *(uint32_t *)((uint8_t *)ev + 0x18) = runtime_event_readable(wh);
     return 0;
 }
 static uint32_t fake_get_writable_handle(const void *ev) {

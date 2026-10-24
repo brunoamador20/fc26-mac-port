@@ -41,10 +41,6 @@ static void *get_notification_message_event(void) {
     if (!message_event_bound) {
         hle_bind_system_event(message_event, 0);
         message_event_bound = 1;
-        if(getenv("FC26_THREAD_PROFILE")) {
-            uint32_t (*getr)(const void *)=runtime_symbol("_ZN2nn2os30GetReadableHandleOfSystemEventEPKNS0_15SystemEventTypeE");
-            if(getr) fprintf(stderr,"[thread-profile] notification_message_handle=%x\n",getr(message_event));
-        }
         refresh_message_event();
     }
     pthread_mutex_unlock(&lock);
