@@ -4743,6 +4743,7 @@ static void shmap_load(void) {
 }
 
 @interface NvShader : NSObject { @public id<MTLFunction> fn; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, writes_depth, lay_ok; uint8_t drv_scanned[3];   /* drv_scanned (TOTK): driver segment c0 / c2 reads found by drv_scan in the MSL but missing from the reflection json */ /* lay_ok (TOTK): vertex MSL can write the layer (1) or not (-1), 0 = not checked yet; writes_depth (TOTK): the fragment function has a [[depth(...)]] output, so its pipeline needs a depth attachment */ const char *builtin; uint64_t logged; char key[80]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
+    NvShader *shared_exact; int shared_checked;
     uint16_t texture_slots[NVN_REFL_MAXB]; uint8_t texture_count, texture_plan_ready;
     // 上次编好的参数缓冲
     // The argument buffer encoded last time
@@ -5233,6 +5234,69 @@ static void ctl_key_update(CC_SHA256_CTX *ctx, const uint8_t *control) {
     CC_SHA256_Update(ctx, control, n < CTL_KEY_SKIP_LO ? n : CTL_KEY_SKIP_LO);
     if (n > CTL_KEY_SKIP_HI) CC_SHA256_Update(ctx, control + CTL_KEY_SKIP_HI, n - CTL_KEY_SKIP_HI);
 }
+/* NVN compute control +0x754 is shared-memory bytes. Old translations can contain
+   Ryujinx's 4096-byte fallback: the BC encoder needs 27644 bytes (64 lanes with
+   432-byte stride). Repair the declaration from control, without changing code
+   or the on-disk shader cache. Never shrink an existing allocation. The array
+   type also appears in helper-function parameters (passed by reference): those
+   grow with it, or the source no longer compiles. */
+static NSString *compute_shared_source(NSString *src, const uint8_t *control) {
+    if (!src || !control) return src;
+    uint32_t stage, bytes; memcpy(&stage, control + 0x714, 4); memcpy(&bytes, control + 0x754, 4);
+    if (stage != 5 || !bytes) return src;
+    NSUInteger words = ((uint64_t)bytes + 3) / 4;
+    /* Every cached compute has a single shared array. With more than one, the control
+       total does not say how to split it: growing each would pass the device limit. */
+    NSRegularExpression *decl = [NSRegularExpression regularExpressionWithPattern:
+        @"\\bthreadgroup\\s+(spvUnsafeArray<uint,\\s*\\d+>\\s+\\w+|uint\\s+\\w+\\s*\\[\\s*\\d+\\s*\\])\\s*;" options:0 error:nil];
+    if ([decl numberOfMatchesInString:src options:0 range:NSMakeRange(0, src.length)] != 1) return src;
+    NSString *patterns[] = {
+        @"\\bthreadgroup\\s+spvUnsafeArray<uint,\\s*(\\d+)>",
+        @"\\bthreadgroup\\s+uint\\s+\\w+\\s*\\[\\s*(\\d+)\\s*\\]\\s*;"
+    };
+    NSMutableString *out = [src mutableCopy];
+    for (unsigned i = 0; i < sizeof patterns / sizeof patterns[0]; i++) {
+        NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:patterns[i] options:0 error:nil];
+        NSArray<NSTextCheckingResult *> *matches = [re matchesInString:out options:0 range:NSMakeRange(0, out.length)];
+        for (NSTextCheckingResult *m in matches.reverseObjectEnumerator) {
+            NSRange n = [m rangeAtIndex:1];
+            if ((NSUInteger)[[out substringWithRange:n] longLongValue] < words)
+                [out replaceCharactersInRange:n withString:[NSString stringWithFormat:@"%lu", (unsigned long)words]];
+        }
+    }
+    return out;
+}
+static NvShader *shader_compute_memory(NvShader *sh, const uint8_t *control) {
+    if (!sh || sh->stage != 5) return sh;
+    @synchronized(sh) {
+        if (sh->shared_checked) return sh->shared_exact ?: sh;
+        NSString *src = sh_src(sh), *fixed = compute_shared_source(src, control);
+        if (!src || [fixed isEqualToString:src]) { sh->shared_checked = 1; return sh; }
+        uint32_t bytes; memcpy(&bytes, control + 0x754, 4);
+        /* Keep the old function on failure: its 4 KiB of shared memory is a visible artifact
+           (black bands in the BC1 skin), not a game that closes. */
+        sh->shared_checked = 1;
+        if (bytes > g_dev.maxThreadgroupMemoryLength) {
+            MLOG("【红】[shared-memory] compute %.16s needs %u bytes, device supports %lu: kept the old 4 KiB", sh->key, bytes, (unsigned long)g_dev.maxThreadgroupMemoryLength);
+            return sh;
+        }
+        NSError *err = nil; id<MTLLibrary> lib = totk_msl_library(fixed, &err);
+        id<MTLFunction> fn = [lib newFunctionWithName:sh->fn.name];
+        if (!fn) { MLOG("【红】[shared-memory] compute %.16s compile failed, kept the old 4 KiB: %s", sh->key, err.localizedDescription.UTF8String); return sh; }
+        /* A new object gives the pipeline cache a new key: a warmed pipeline of
+           the old function must not be reused. Constants and argument ABI match. */
+        NvShader *o = [NvShader new]; o->fn = fn; o->rf = sh->rf; o->stage = sh->stage;
+        o->range_ro = sh->range_ro; o->src = fixed; o->src_path = sh->src_path;
+        memcpy(o->drv_scanned, sh->drv_scanned, sizeof o->drv_scanned);
+        strlcpy(o->key, sh->key, sizeof o->key);
+        o->c1buf = sh->c1buf; o->c1_gpu = sh->c1_gpu; o->c1off = sh->c1off;
+        if (o->rf.nb) { o->ae = [fn newArgumentEncoderWithBufferIndex:o->rf.abi]; o->arg_len = o->ae.encodedLength;
+            if (o->arg_len != sh->arg_len) { MLOG("【红】[shared-memory] compute %.16s changed argument ABI, kept the old 4 KiB", sh->key); return sh; } }
+        sh->shared_exact = o;
+        MLOG("[shared-memory] compute %.16s: restored %u bytes from NVN control+0x754", sh->key, bytes);
+        return o;
+    }
+}
 static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // 只在提交线程调用 | Called only on the submit thread
     prog_t *p = (prog_t *)cp;
     static const prog_t *lp; static uint64_t lser, lgen; static NvProg *lpr;   // 上次结果：同一对象、同一序号且序号表未变即直接用 | Last result: same object, same serial and unchanged serial table means it is used directly
@@ -5266,6 +5330,7 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // 只在提�
         if(!variant){o->missing|=1<<st;o->ctl[st]=control;o->code[st]=(const uint8_t *)(uintptr_t)p->sd[i].data;o->key[st]=@(key);continue;}   // iOS: not translated yet, its draws are skipped
         NvShader *sh=shader_get([variant stringByAppendingString:@"_b"],st);
         if(!sh)MDIE("TOTK shader translation/reflection unavailable for %s",variant.UTF8String);
+        sh = shader_compute_memory(sh, control);
         o->sh[st]=sh; o->ctl[st]=control; o->code[st]=(const uint8_t *)(uintptr_t)p->sd[i].data; o->key[st]=@(key);
         o->sig[st]=stage_sig(st); o->alt[st]=[NSMutableDictionary dictionaryWithObject:sh forKey:@(o->sig[st])];
     }
