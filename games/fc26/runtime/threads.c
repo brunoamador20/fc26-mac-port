@@ -64,7 +64,8 @@ typedef struct thr {
     int cur_core;              // virtual core held while running guest code, -1 while blocked / not started
     int preempt;               // a higher-priority thread waits for this thread's core
     uint64_t cseq, core_since; struct thr *cnext;
-    uint64_t prof[28], wake_ns, grant_ns;
+    uint64_t prof[32], wake_ns, grant_ns;
+    int wait_queue; /* fd + 1, 0 not created, -1 unavailable; protected by G */
     uint32_t wh[4]; int nwh;   // handles of the current WaitSynchronization (state dump)
     int last_hle;              // 1 + wrapper index of the last host call made while "hletrace" was on (state dump)
     uint64_t yrun_ns, yrun_svc;   // the current run of yields: when it started, and nsvc at its last yield (yield_backoff_ns)
@@ -125,10 +126,54 @@ static int profile_cond(pthread_cond_t *cv, const struct timespec *deadline) {
     if (thread_profile_on) profile_g_since=now_ns();
     return r;
 }
+/* Timed waits use a critical kernel timer plus a sticky user event. A signal
+ * between unlocking G and entering kevent remains pending, so it cannot be
+ * lost. Infinite waits and core handoffs retain their existing condvar path. */
+static void thread_signal(thr_t *t) {
+    pthread_cond_signal(&t->cv);
+    if(t->wait_queue>0) {
+        struct kevent event;
+        EV_SET(&event,2,EVFILT_USER,0,NOTE_TRIGGER,0,NULL);
+        kevent(t->wait_queue-1,&event,1,NULL,0,NULL);
+    }
+}
+static void wait_queue_close(thr_t *t) {
+    if(t->wait_queue>0) close(t->wait_queue-1);
+    t->wait_queue=-1;
+}
+static int wait_queue_get(thr_t *t) {
+    if(t->wait_queue) return t->wait_queue-1;
+    int fd=kqueue();
+    if(fd>=0) {
+        struct kevent event;
+        EV_SET(&event,2,EVFILT_USER,EV_ADD|EV_CLEAR,0,0,NULL);
+        if(kevent(fd,&event,1,NULL,0,NULL)<0) { close(fd);fd=-1; }
+    }
+    t->wait_queue=fd>=0?fd+1:-1;
+    return fd;
+}
+static int profile_critical_wait(thr_t *t,uint64_t deadline,const struct timespec *fallback) {
+    int fd=wait_queue_get(t);
+    if(fd<0) return profile_cond(&t->cv,fallback);
+    uint64_t now=now_ns(); if(now>=deadline) return ETIMEDOUT;
+    struct kevent timer,events[2];
+    EV_SET(&timer,1,EVFILT_TIMER,EV_ADD|EV_ONESHOT,NOTE_NSECONDS|NOTE_CRITICAL,(intptr_t)(deadline-now),NULL);
+    profile_unlock();
+    int n=kevent(fd,&timer,1,events,2,NULL), error=errno;
+    profile_lock();
+    for(int i=0;i<n;i++) if(events[i].flags&EV_ERROR) { error=(int)events[i].data;n=-1;break; }
+    if(n<0 && error!=EINTR) {
+        wait_queue_close(t);
+        if(t->woke) return 0;
+        return profile_cond(&t->cv,fallback);
+    }
+    return now_ns()>=deadline?ETIMEDOUT:0;
+}
+
 void dm_thread_profile_frame(uint64_t frame) {
     pthread_once(&profile_once,profile_init);
     if (!thread_profile_on || frame % 300) return;
-    struct sample { uint32_t h; int prio,core,svc,kind; uint64_t entry,addr,p[28]; } rows[256];
+    struct sample { uint32_t h; int prio,core,svc,kind; uint64_t entry,addr,p[32]; } rows[256];
     unsigned n=0;
     profile_lock();
     for(thr_t *t=g_all;t && n<256;t=t->all) {
@@ -138,9 +183,9 @@ void dm_thread_profile_frame(uint64_t frame) {
     }
     profile_unlock();
     for(unsigned i=0;i<n;i++) { struct sample *r=&rows[i];
-        fprintf(stderr,"[thread-profile] frame=%llu h=%x entry=%llx prio=%d core=%d svc=%x kind=%d addr=%llx Gwait_us=%llu Ghold_us=%llu Gcalls=%llu core_us=%llu core_n=%llu grant_us=%llu wake_us=%llu wake_n=%llu lock_us=%llu cond_us=%llu addr_us=%llu sync_us=%llu sleep_us=%llu yield_us=%llu sleep_req_us=%llu sleep_n=%llu yield_n=%llu hold_us=%llu sync_n=%llu sync_zero=%llu sync_ready=%llu sync_bad=%llu sync_timeout=%llu sync_inf=%llu\n",
+        fprintf(stderr,"[thread-profile] frame=%llu h=%x entry=%llx prio=%d core=%d svc=%x kind=%d addr=%llx Gwait_us=%llu Ghold_us=%llu Gcalls=%llu core_us=%llu core_n=%llu grant_us=%llu wake_us=%llu wake_n=%llu lock_us=%llu cond_us=%llu addr_us=%llu sync_us=%llu sleep_us=%llu yield_us=%llu sleep_req_us=%llu sleep_n=%llu yield_n=%llu hold_us=%llu sync_n=%llu sync_zero=%llu sync_ready=%llu sync_bad=%llu sync_timeout=%llu sync_inf=%llu timed_req_us=%llu timed_us=%llu timed_n=%llu timeout_n=%llu\n",
         (unsigned long long)frame,r->h,(unsigned long long)r->entry,r->prio,r->core,r->svc,r->kind,(unsigned long long)r->addr,
-        r->p[0]/1000,r->p[1]/1000,r->p[2],r->p[3]/1000,r->p[4],r->p[5]/1000,r->p[6]/1000,r->p[7],r->p[9]/1000,r->p[10]/1000,r->p[11]/1000,r->p[12]/1000,r->p[13]/1000,r->p[14]/1000,r->p[15]/1000,r->p[16],r->p[17],r->p[18]/1000,r->p[19],r->p[20],r->p[21],r->p[22],r->p[23],r->p[24]);
+        r->p[0]/1000,r->p[1]/1000,r->p[2],r->p[3]/1000,r->p[4],r->p[5]/1000,r->p[6]/1000,r->p[7],r->p[9]/1000,r->p[10]/1000,r->p[11]/1000,r->p[12]/1000,r->p[13]/1000,r->p[14]/1000,r->p[15]/1000,r->p[16],r->p[17],r->p[18]/1000,r->p[19],r->p[20],r->p[21],r->p[22],r->p[23],r->p[24],r->p[25]/1000,r->p[26]/1000,r->p[27],r->p[28]);
     }
 }
 
@@ -161,7 +206,7 @@ static thr_t *pick(int kind, uint64_t a) {
     }
     return b;
 }
-static void wake(thr_t *t, int64_t res) { if(thread_profile_on) t->wake_ns=now_ns(); wait_unlink(t); t->wkind = 0; t->woke = 1; t->wres = res; pthread_cond_signal(&t->cv); }
+static void wake(thr_t *t, int64_t res) { if(thread_profile_on) t->wake_ns=now_ns(); wait_unlink(t); t->wkind = 0; t->woke = 1; t->wres = res; thread_signal(t); }
 // 挂起直到被唤醒或超时（ns<0 无限、0 立即超时）；返回 wres 或 R_TIMEOUT
 // Suspend until woken or timed out (ns<0 infinite, 0 immediate timeout); returns wres or R_TIMEOUT
 static int64_t block_inner(thr_t *t, int kind, int64_t ns);
@@ -183,7 +228,7 @@ static void core_grant(int c) {   // holding G: give free core c to the best wai
         if (core_allowed(*p, c) && (!b || (*p)->prio < b->prio || ((*p)->prio == b->prio && (*p)->cseq < b->cseq))) { b = *p; bp = p; }
     if (!b) return;
     if(thread_profile_on) b->grant_ns=now_ns();
-    *bp = b->cnext; b->cnext = NULL; b->cur_core = c; b->core_since = now_ns(); g_core_owner[c] = b; pthread_cond_signal(&b->cv);
+    *bp = b->cnext; b->cnext = NULL; b->cur_core = c; b->core_since = now_ns(); g_core_owner[c] = b; thread_signal(b);
 }
 static void core_put(thr_t *t) {   // holding G
     if (t->cur_core < 0) return;
@@ -278,6 +323,7 @@ static int64_t block_inner(thr_t *t, int kind, int64_t ns) {
     if (ns == 0) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
     struct timespec dl;
     int det_wait = ns > 0 && dm_detclock_enabled();
+    uint64_t host_deadline = ns>0 ? now_ns()+(uint64_t)ns : 0;
     uint64_t guest_deadline = det_wait ? guest_ns() + (uint64_t)ns : 0;
     if (ns > 0 && !det_wait) { clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += ns / 1000000000; dl.tv_nsec += ns % 1000000000;
                   if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; } }
@@ -288,7 +334,7 @@ static int64_t block_inner(thr_t *t, int kind, int64_t ns) {
             if (now >= guest_deadline) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
             (void)(guest_deadline - now);
             rc = profile_cond(&t->cv, NULL);
-        } else rc = ns > 0 ? profile_cond(&t->cv, &dl) : profile_cond(&t->cv, NULL);
+        } else rc = ns > 0 ? profile_critical_wait(t,host_deadline,&dl) : profile_cond(&t->cv, NULL);
         if (rc == ETIMEDOUT && !t->woke && (!det_wait || guest_ns() >= guest_deadline)) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
     }
     return t->wres;
@@ -345,7 +391,7 @@ static void *thread_main(void *p) {
 }
 static void thr_free(thr_t *t) {   // 持 G；从全部线程链摘下并释放 | Holding G; unlink from the all-threads chain and free
     for (thr_t **p = &g_all; *p; p = &(*p)->all) if (*p == t) { *p = t->all; break; }
-    pthread_cond_destroy(&t->cv); free(t);
+    wait_queue_close(t); pthread_cond_destroy(&t->cv); free(t);
 }
 
 static _Noreturn void thread_exit_on_host(void *argument) {
@@ -355,6 +401,7 @@ static _Noreturn void thread_exit_on_host(void *argument) {
     // No logging here: the exit happens on the guest thread's own stack (some are only a dozen or so KiB), and a printf with floating point would blow the stack (real-device smoke test: SIGBUS when LibcurlResolver exits, backtrace fprintf → __dtoa). Only the time is recorded, and it is printed later in the state dump
     profile_lock();
     core_put(t);
+    wait_queue_close(t);
     t->exited = 1;
     for (thr_t *w = g_wait; w; ) { thr_t *n = w->next; if (w->wkind == 4) wake(w, -1); w = n; }   // 同步等待者重查 | Synchronization waiters re-check
     pthread_setspecific(g_keythr, NULL);
@@ -418,7 +465,7 @@ static int64_t now_mono_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOT
 void dm_guest_clock_advanced(void) {
     if (!dm_detclock_enabled()) return;
     profile_lock();
-    for (thr_t *t = g_wait; t; t = t->next) if (t->wkind) pthread_cond_signal(&t->cv);
+    for (thr_t *t = g_wait; t; t = t->next) if (t->wkind) thread_signal(t);
     profile_unlock();
 }
 
@@ -471,7 +518,7 @@ int svc_thread(int num, uint64_t *regs) {
     case 0x09: {  // StartThread(w0)
         profile_lock();
         thr_t *t = h_get((uint32_t)regs[0], O_THREAD);
-        if (t) { t->started = 1; pthread_cond_signal(&t->cv); }
+        if (t) { t->started = 1; thread_signal(t); }
         profile_unlock();
         regs[0] = t ? 0 : R_BAD_HANDLE; return 1;
     }
@@ -654,8 +701,8 @@ int svc_thread(int num, uint64_t *regs) {
             if (ns > 0 && left <= 0) { r = R_TIMEOUT; break; }
             if (block(t, 4, left) == R_TIMEOUT) { r = R_TIMEOUT; break; }
         }
+        if(thread_profile_on){t->prof[21]+=r==0;t->prof[22]+=r==R_BAD_HANDLE;t->prof[23]+=r==R_TIMEOUT;}
         profile_unlock();
-        if(thread_profile_on){profile_lock();t->prof[21]+=r==0;t->prof[22]+=r==R_BAD_HANDLE;t->prof[23]+=r==R_TIMEOUT;profile_unlock();}
         regs[0] = (uint64_t)r; regs[1] = idx >= 0 ? (uint64_t)idx : 0; return 1;
     }
     case 0x19: {  // CancelSynchronization(w0 线程) | CancelSynchronization(w0 thread)
@@ -819,7 +866,7 @@ static void dump_threads(unsigned secs) {
         fprintf(stderr, "core=%d mask=%#llx ", t->cur_core, (unsigned long long)t->mask);
         fprintf(stderr, "h=%#x prio=%d %s wait=%d addr=%#llx key=%#llx tag=%#x word=%#x last_svc=%#x nsvc=%llu\n", t->handle, t->prio,
                 t->exited ? "exited" : t->started ? "run" : "new", t->wkind, (unsigned long long)t->waddr, (unsigned long long)t->wkey, t->wtag, word, t->last_svc, (unsigned long long)t->nsvc);
-        if (t->wkind == 4) { fprintf(stderr, "    waiting on %d handle(s):", t->nwh); for (int i = 0; i < t->nwh && i < 4; i++) fprintf(stderr, " %#x", t->wh[i]); fputc('\n', stderr); }
+        if (t->nwh) { fprintf(stderr, "    last WaitSynchronization on %d handle(s):", t->nwh); for (int i = 0; i < t->nwh && i < 4; i++) fprintf(stderr, " %#x", t->wh[i]); fputc('\n', stderr); }
         if (t->last_hle) { char nm[256]; runtime_hle_describe((unsigned)t->last_hle - 1, nm, sizeof nm); fprintf(stderr, "    last host call while tracing: %s\n", nm); }
         dump_chain(t->last_lr, t->last_fp);
         if (!t->wkind && !t->exited && t->mport && nrun < 64) run[nrun++] = t;
