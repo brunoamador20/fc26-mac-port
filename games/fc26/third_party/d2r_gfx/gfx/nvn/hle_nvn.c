@@ -262,6 +262,10 @@ NVN(nvnMemoryPoolMap, void *, const NVNmemoryPool *p){const pool_t *v=(const voi
 #endif
  if(v->magic!=MAGIC('P','O','O','L'))return NULL;return (v->flags&NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)?NULL:v->mem;}
 NVN(nvnMemoryPoolMapVirtual, NVNboolean, NVNmemoryPool *p, int n, const NVNmappingRequest *r) {
+    if (poollog_env()) { const totk_mapping_request *q = (const totk_mapping_request *)(const void *)r; static uint64_t calls; calls++;
+        for (int i = 0; i < n && calls <= 4000; i++) LOG("[pool] MapVirtual %p (mem %p) #%d/%d phys=%p(mem %p flags %#x) poff=%#llx voff=%#llx size=%#llx class=%d", (void *)p, (void *)((pool_t *)p)->mem, i, n,
+            (const void *)q[i].physical_pool, q[i].physical_pool ? (void *)((const pool_t *)(const void *)q[i].physical_pool)->mem : NULL, q[i].physical_pool ? ((const pool_t *)(const void *)q[i].physical_pool)->flags : 0,
+            (unsigned long long)q[i].physical_offset, (unsigned long long)q[i].virtual_offset, (unsigned long long)q[i].size, q[i].storage_class); }
     return (NVNboolean)totk_vpool_map((pool_t *)p, n, (const totk_mapping_request *)(const void *)r);
 }
 NVN(nvnMemoryPoolGetBufferAddress, NVNbufferAddress, const NVNmemoryPool *p) { return (NVNbufferAddress)((const pool_t *)p)->mem; }
