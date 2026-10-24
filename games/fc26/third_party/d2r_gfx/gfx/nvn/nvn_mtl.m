@@ -5866,7 +5866,8 @@ static void udc_note_draw(NvProg *pr) {
    - otherwise the bound stages are combined into a host program, one per distinct combination (cached by the component
      programs and their serials; a component's new SetShaders gives a new serial and so a new combination). */
 static int prog_stage_index(const prog_t *p, int stage) {
-    for (unsigned i = 0; p && i < p->nstage; i++) { uint32_t st; memcpy(&st, (const uint8_t *)p->sd[i].control + 0x714, 4); if ((int)st == stage) return (int)i; }
+    /* A program seen only ahead of its draw (pipeline prediction) may not have its shader data yet: no control section. */
+    for (unsigned i = 0; p && i < p->nstage; i++) { if (!p->sd[i].control) continue; uint32_t st; memcpy(&st, (const uint8_t *)p->sd[i].control + 0x714, 4); if ((int)st == stage) return (int)i; }
     return -1;
 }
 extern uint64_t nvn_new_serial(void);
