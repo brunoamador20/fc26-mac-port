@@ -725,7 +725,10 @@ static void fill_guest_stat_from_host(struct guest_stat *st, const struct stat *
     st->st_ctime_nsec = (int64_t)hst->st_ctimespec.tv_nsec;
 }
 
-static int host_libc_open(const char *path, int flags, ...) {
+/* The game is built for the Switch ABI: the mode of open(path, flags, ...) travels in w2 like a fixed argument. A
+   variadic host function would read it from the stack on macOS (Apple's arm64 ABI) and create files with whatever was
+   there; FC 26 left profile files at 040, 0200 or 0 that the next boot could not read (tests/test_libc_open_mode.py). */
+static int host_libc_open(const char *path, int flags, int mode_arg) {
     if (!path) { guest_set_errno(EINVAL); return -1; }
     ready();
 
@@ -750,15 +753,11 @@ static int host_libc_open(const char *path, int flags, ...) {
     int kind = M_FREE;
     if (host_path_kind(path, host_p, sizeof host_p, &kind) == 0) {
         runtime_fs_log((flags & 3) != GUEST_O_RDONLY ? "libc-write" : "libc-read", path);
-        mode_t mode = 0;
-        if (flags & GUEST_O_CREAT) {
-            va_list ap;
-            va_start(ap, flags);
-            mode = (mode_t)va_arg(ap, int);
-            va_end(ap);
-        }
+        mode_t mode = flags & GUEST_O_CREAT ? (mode_t)mode_arg : 0;
         int hflags = convert_guest_open_flags_to_host(flags);
         int fd = open(host_p, hflags, mode);
+        /* A file an earlier build created without the owner's bits: Switch storage has no permissions, so give them back. */
+        if (fd < 0 && errno == EACCES && !chmod(host_p, 0600)) fd = open(host_p, hflags, mode);
         if (fd < 0) {
             guest_set_errno(errno);
             return -1;
