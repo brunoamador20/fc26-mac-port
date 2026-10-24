@@ -116,7 +116,7 @@ int main(void) {
     assert(is_mounted("cst") == 0);
     assert(mount_cache_storage("cst") == 0);
     assert(is_mounted("cst") == 1);
-    assert(mount_cache_storage("cst") == R_ALREADY_EXISTS);
+    assert(mount_cache_storage("cst") == 0x7802u);   /* fs::ResultMountNameAlreadyExists */
     assert(mount_cache_storage(NULL) == R_INVALID_ARGUMENT);
 
     /* --- 2. GetCacheStorageMax(int*, long*) --- */

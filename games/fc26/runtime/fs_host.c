@@ -24,6 +24,10 @@
 
 #define R_PATH_NOT_FOUND 0x202u
 #define R_ALREADY_EXISTS 0x402u
+/* fs::ResultMountNameAlreadyExists (module 2, description 60). FC 26's EASaveLoad mounts "save" again for every save it
+   lists and takes 0 / 0xe02 / 0x7802 as "mounted"; any other result skips that save (main+0x76d30c4), so 0x402 here hid
+   every existing save and each boot started over (new Settings save, no career to load). */
+#define R_MOUNT_NAME_ALREADY_EXISTS 0x7802u
 #define R_NOT_EMPTY 0x1002u
 #define R_TARGET_NOT_FOUND 0x7d402u
 #define R_INVALID_ARGUMENT 0x2ee202u
@@ -93,7 +97,7 @@ static unsigned mount_add(const char *name, int kind, const char *root) {
     if (!name || !*name || strlen(name) >= 32 || strchr(name, ':') || strchr(name, '/')) return R_INVALID_ARGUMENT;
     pthread_mutex_lock(&lock);
     int slot = -1;
-    for (int i = 0; i < 16; i++) { if (mounts[i].kind && !strcmp(mounts[i].name, name)) { pthread_mutex_unlock(&lock); return R_ALREADY_EXISTS; } if (!mounts[i].kind && slot < 0) slot = i; }
+    for (int i = 0; i < 16; i++) { if (mounts[i].kind && !strcmp(mounts[i].name, name)) { pthread_mutex_unlock(&lock); return R_MOUNT_NAME_ALREADY_EXISTS; } if (!mounts[i].kind && slot < 0) slot = i; }
     if (slot < 0) runtime_fail("fs mount table full");
     mounts[slot].kind = kind; strcpy(mounts[slot].name, name); snprintf(mounts[slot].root, sizeof mounts[slot].root, "%s", root);
     pthread_mutex_unlock(&lock);
@@ -511,7 +515,13 @@ static unsigned read_directory(int64_t *count, DirectoryEntry *out, uint64_t h, 
         int is_dir = S_ISDIR(st.st_mode); if (!(d->mode & (is_dir ? 1 : 2))) continue;
         memset(&out[n], 0, sizeof *out); strcpy(out[n].name, e->d_name); out[n].type = is_dir ? 0 : 1; out[n].size = is_dir ? 0 : st.st_size; n++;
     }
-    *count = n; return 0;
+    *count = n;
+    if (getenv("TOTK_FS_LOG")) {
+        fprintf(stderr, "[totk-fs] ReadDirectory %s max %lld -> %lld:", d->path, (long long)max, (long long)n);
+        for (int64_t i = 0; i < n; i++) fprintf(stderr, " %s(%d,%lld)", out[i].name, out[i].type, (long long)out[i].size);
+        fputc('\n', stderr);
+    }
+    return 0;
 }
 static unsigned directory_entry_count(int64_t *out, uint64_t h) {
     if (!out) return R_INVALID_ARGUMENT;
@@ -542,6 +552,7 @@ static unsigned directory_entry_count(int64_t *out, uint64_t h) {
     }
     closedir(dp);
     *out = count;
+    if (getenv("TOTK_FS_LOG")) fprintf(stderr, "[totk-fs] GetDirectoryEntryCount %s -> %lld\n", path, (long long)count);
     return 0;
 }
 static void close_directory(uint64_t h) {
