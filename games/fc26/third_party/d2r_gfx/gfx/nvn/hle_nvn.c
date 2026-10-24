@@ -2616,7 +2616,9 @@ void nvn_gpu_recent(double *avg, double *p95, unsigned *n) {
     qsort(v, c, sizeof *v, dcmp); *n = c; *avg = c ? s / c : -1; *p95 = c ? v[(c * 95) / 100 < c ? (c * 95) / 100 : c - 1] : -1;
 }
 static int dcmp(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
+__attribute__((weak)) void dm_thread_profile_frame(uint64_t frame) { (void)frame; }
 static void tsummary(uint64_t frame) {
+    dm_thread_profile_frame(frame);
     char line[1024]; size_t o = 0;
     for (int k = 0; k < 6; k++) {
         unsigned n = g_tn[k] < TWIN ? g_tn[k] : TWIN; if (!n) continue;

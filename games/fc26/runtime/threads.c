@@ -62,6 +62,7 @@ typedef struct thr {
     int cur_core;              // virtual core held while running guest code, -1 while blocked / not started
     int preempt;               // a higher-priority thread waits for this thread's core
     uint64_t cseq, core_since; struct thr *cnext;
+    uint64_t prof[28], wake_ns, grant_ns;
     uint32_t wh[4]; int nwh;   // handles of the current WaitSynchronization (state dump)
     int last_hle;              // 1 + wrapper index of the last host call made while "hletrace" was on (state dump)
     uint64_t yrun_ns, yrun_svc;   // the current run of yields: when it started, and nsvc at its last yield (yield_backoff_ns)
@@ -96,6 +97,51 @@ static thr_t *cur(void) {
     return t;
 }
 
+/* Optional per-thread wall-time accounting. G protects counters and snapshots.
+ * Condition waits exclude their released-mutex interval from G hold time. */
+static int thread_profile_on;
+static pthread_once_t profile_once = PTHREAD_ONCE_INIT;
+static _Thread_local uint64_t profile_g_since;
+static void profile_init(void) { thread_profile_on = getenv("FC26_THREAD_PROFILE") != NULL; }
+static void prof_add(int slot, uint64_t value) {
+    thr_t *t = g_keythr ? pthread_getspecific(g_keythr) : NULL;
+    if (t) t->prof[slot] += value;
+}
+static void profile_lock(void) {
+    pthread_once(&profile_once, profile_init);
+    uint64_t start = thread_profile_on ? now_ns() : 0;
+    pthread_mutex_lock(&G);
+    if (thread_profile_on) { profile_g_since = now_ns(); prof_add(0, profile_g_since-start); prof_add(2,1); }
+}
+static void profile_release(void) {
+    if (thread_profile_on) prof_add(1, now_ns()-profile_g_since);
+}
+static void profile_unlock(void) { profile_release(); pthread_mutex_unlock(&G); }
+static int profile_cond(pthread_cond_t *cv, const struct timespec *deadline) {
+    profile_release();
+    int r = deadline ? pthread_cond_timedwait(cv,&G,deadline) : pthread_cond_wait(cv,&G);
+    if (thread_profile_on) profile_g_since=now_ns();
+    return r;
+}
+void dm_thread_profile_frame(uint64_t frame) {
+    pthread_once(&profile_once,profile_init);
+    if (!thread_profile_on || frame % 300) return;
+    struct sample { uint32_t h; int prio,core,svc,kind; uint64_t entry,addr,p[28]; } rows[256];
+    unsigned n=0;
+    profile_lock();
+    for(thr_t *t=g_all;t && n<256;t=t->all) {
+        struct sample *r=&rows[n++]; r->h=t->handle;r->prio=t->prio;r->core=t->cur_core;
+        r->svc=t->last_svc;r->kind=t->wkind;r->entry=t->entry;r->addr=t->wkind==2?t->wkey:t->waddr;
+        memcpy(r->p,t->prof,sizeof r->p); memset(t->prof,0,sizeof t->prof);
+    }
+    profile_unlock();
+    for(unsigned i=0;i<n;i++) { struct sample *r=&rows[i];
+        fprintf(stderr,"[thread-profile] frame=%llu h=%x entry=%llx prio=%d core=%d svc=%x kind=%d addr=%llx Gwait_us=%llu Ghold_us=%llu Gcalls=%llu core_us=%llu core_n=%llu grant_us=%llu wake_us=%llu wake_n=%llu lock_us=%llu cond_us=%llu addr_us=%llu sync_us=%llu sleep_us=%llu yield_us=%llu sleep_req_us=%llu sleep_n=%llu yield_n=%llu hold_us=%llu sync_n=%llu sync_zero=%llu sync_ready=%llu sync_bad=%llu sync_timeout=%llu sync_inf=%llu\n",
+        (unsigned long long)frame,r->h,(unsigned long long)r->entry,r->prio,r->core,r->svc,r->kind,(unsigned long long)r->addr,
+        r->p[0]/1000,r->p[1]/1000,r->p[2],r->p[3]/1000,r->p[4],r->p[5]/1000,r->p[6]/1000,r->p[7],r->p[9]/1000,r->p[10]/1000,r->p[11]/1000,r->p[12]/1000,r->p[13]/1000,r->p[14]/1000,r->p[15]/1000,r->p[16],r->p[17],r->p[18]/1000,r->p[19],r->p[20],r->p[21],r->p[22],r->p[23],r->p[24]);
+    }
+}
+
 // ---------- 等待原语（持 G 调用）----------
 // ---------- Wait primitives (called holding G) ----------
 static void wait_unlink(thr_t *t) {
@@ -113,7 +159,7 @@ static thr_t *pick(int kind, uint64_t a) {
     }
     return b;
 }
-static void wake(thr_t *t, int64_t res) { wait_unlink(t); t->wkind = 0; t->woke = 1; t->wres = res; pthread_cond_signal(&t->cv); }
+static void wake(thr_t *t, int64_t res) { if(thread_profile_on) t->wake_ns=now_ns(); wait_unlink(t); t->wkind = 0; t->woke = 1; t->wres = res; pthread_cond_signal(&t->cv); }
 // 挂起直到被唤醒或超时（ns<0 无限、0 立即超时）；返回 wres 或 R_TIMEOUT
 // Suspend until woken or timed out (ns<0 infinite, 0 immediate timeout); returns wres or R_TIMEOUT
 static int64_t block_inner(thr_t *t, int kind, int64_t ns);
@@ -134,10 +180,12 @@ static void core_grant(int c) {   // holding G: give free core c to the best wai
     for (thr_t **p = &g_core_wait; *p; p = &(*p)->cnext)
         if (core_allowed(*p, c) && (!b || (*p)->prio < b->prio || ((*p)->prio == b->prio && (*p)->cseq < b->cseq))) { b = *p; bp = p; }
     if (!b) return;
+    if(thread_profile_on) b->grant_ns=now_ns();
     *bp = b->cnext; b->cnext = NULL; b->cur_core = c; b->core_since = now_ns(); g_core_owner[c] = b; pthread_cond_signal(&b->cv);
 }
 static void core_put(thr_t *t) {   // holding G
     if (t->cur_core < 0) return;
+    if(thread_profile_on) t->prof[18]+=now_ns()-t->core_since;
     int c = t->cur_core; t->cur_core = -1; t->preempt = 0; g_core_owner[c] = NULL; core_grant(c);
 }
 static void core_take(thr_t *t) {   // holding G; waits until a core in t's mask is handed over
@@ -146,9 +194,11 @@ static void core_take(thr_t *t) {   // holding G; waits until a core in t's mask
     int c = t->core >= 0 && t->core < NCORE && core_allowed(t, t->core) && !g_core_owner[t->core] ? t->core : -1;
     for (int i = 0; c < 0 && i < NCORE; i++) if (core_allowed(t, i) && !g_core_owner[i]) c = i;
     if (c >= 0) { t->cur_core = c; t->core_since = now_ns(); g_core_owner[c] = t; return; }
+    uint64_t profile_start=thread_profile_on?now_ns():0;
     t->cseq = ++g_wseq; t->cnext = g_core_wait; g_core_wait = t;
     for (int i = 0; i < NCORE; i++) if (core_allowed(t, i) && g_core_owner[i] && g_core_owner[i]->prio > t->prio) g_core_owner[i]->preempt = 1;
-    while (t->cur_core < 0) pthread_cond_wait(&t->cv, &G);
+    while (t->cur_core < 0) profile_cond(&t->cv, NULL);
+    if(thread_profile_on) { t->prof[3]+=now_ns()-profile_start;t->prof[4]++;if(t->grant_ns){t->prof[5]+=now_ns()-t->grant_ns;t->grant_ns=0;} }
 }
 static thr_t *me_or_null(void) { return g_keythr ? pthread_getspecific(g_keythr) : NULL; }
 void runtime_thread_note_hle(unsigned i) { thr_t *t = me_or_null(); if (t) t->last_hle = (int)i + 1; }   // hle_stack.c, while tracing
@@ -156,22 +206,32 @@ uint32_t runtime_thread_current_handle(void) { thr_t *t = me_or_null(); return t
 // Host services that wait for other threads or the GPU give the core up around the wait (no host locks held).
 int runtime_core_away(void) {
     thr_t *t = me_or_null(); if (!t || t->cur_core < 0) return 0;
-    pthread_mutex_lock(&G); core_put(t); pthread_mutex_unlock(&G); return 1;
+    profile_lock(); core_put(t); profile_unlock(); return 1;
 }
 void runtime_core_back(int *away) {
     thr_t *t = me_or_null(); if (!*away || !t) return;
-    pthread_mutex_lock(&G); core_take(t); pthread_mutex_unlock(&G);
+    profile_lock(); core_take(t); profile_unlock();
 }
 // Preemption point at SVC entry: a higher-priority thread waits for this core.
 void runtime_core_checkpoint(void) {
     thr_t *t = me_or_null(); if (!t || !t->preempt) return;
-    pthread_mutex_lock(&G); t->preempt = 0; core_put(t); core_take(t); pthread_mutex_unlock(&G);
+    profile_lock(); t->preempt = 0; core_put(t); core_take(t); profile_unlock();
 }
 int runtime_current_core(void) { thr_t *t = me_or_null(); return t ? (t->cur_core >= 0 ? t->cur_core : t->core) : -1; }
 
+/* Positive guest sleeps release the virtual core in the SVC caller. */
+static void host_sleep_ns(int64_t ns) {
+    struct timespec ts = {ns / 1000000000, ns % 1000000000}; nanosleep(&ts, NULL);
+}
+
 static int64_t block(thr_t *t,int kind,int64_t ns) {
     if (ns == 0) return block_inner(t, kind, ns);
-    core_put(t); int64_t r = block_inner(t, kind, ns); core_take(t); return r;
+    uint64_t start=thread_profile_on?now_ns():0;
+    core_put(t); int64_t r = block_inner(t, kind, ns);
+    if(thread_profile_on) t->prof[8+kind]+=now_ns()-start;
+    core_take(t);
+    if(thread_profile_on && t->wake_ns){t->prof[6]+=now_ns()-t->wake_ns;t->prof[7]++;t->wake_ns=0;}
+    return r;
 }
 static int64_t block_inner(thr_t *t, int kind, int64_t ns) {
     t->wkind = kind; t->woke = 0; t->next = g_wait; g_wait = t; t->wseq = ++g_wseq;
@@ -187,8 +247,8 @@ static int64_t block_inner(thr_t *t, int kind, int64_t ns) {
             uint64_t now = guest_ns();
             if (now >= guest_deadline) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
             (void)(guest_deadline - now);
-            rc = pthread_cond_wait(&t->cv, &G);
-        } else rc = ns > 0 ? pthread_cond_timedwait(&t->cv, &G, &dl) : pthread_cond_wait(&t->cv, &G);
+            rc = profile_cond(&t->cv, NULL);
+        } else rc = ns > 0 ? profile_cond(&t->cv, &dl) : profile_cond(&t->cv, NULL);
         if (rc == ETIMEDOUT && !t->woke && (!det_wait || guest_ns() >= guest_deadline)) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
     }
     return t->wres;
@@ -238,7 +298,7 @@ static void *thread_main(void *p) {
     t->mport = pthread_mach_thread_np(pthread_self());
 
     guest_thread_init();
-    pthread_mutex_lock(&G); while (!t->started) pthread_cond_wait(&t->cv, &G); core_take(t); pthread_mutex_unlock(&G);
+    profile_lock(); while (!t->started) profile_cond(&t->cv, NULL); core_take(t); profile_unlock();
     { volatile char marker = 0; runtime_hle_stack_set((uintptr_t)&marker - 1024); }   // host services of this thread run below this frame
     dm_thread_enter(t->entry, t->arg, t->stack_top,t->host_context);   // 不返回：客体须经 ExitThread 退出 | Does not return: the guest must exit through ExitThread
     die("客体线程入口返回");
@@ -253,13 +313,13 @@ static _Noreturn void thread_exit_on_host(void *argument) {
     t->exit_ns = now_ns(); t->exit_tick = dm_thread_tick_fn ? dm_thread_tick_fn() : 0;
     // 这里不打日志：退出发生在客体线程自己的栈上（有的只有十几 KiB），带浮点的 printf 会把栈撑爆（真机冒烟：LibcurlResolver 退出时 SIGBUS，回溯 fprintf → __dtoa）。时刻只记下来，现场导出时再打
     // No logging here: the exit happens on the guest thread's own stack (some are only a dozen or so KiB), and a printf with floating point would blow the stack (real-device smoke test: SIGBUS when LibcurlResolver exits, backtrace fprintf → __dtoa). Only the time is recorded, and it is printed later in the state dump
-    pthread_mutex_lock(&G);
+    profile_lock();
     core_put(t);
     t->exited = 1;
     for (thr_t *w = g_wait; w; ) { thr_t *n = w->next; if (w->wkind == 4) wake(w, -1); w = n; }   // 同步等待者重查 | Synchronization waiters re-check
     pthread_setspecific(g_keythr, NULL);
     if (t->closed) thr_free(t);
-    pthread_mutex_unlock(&G);
+    profile_unlock();
     pthread_exit(NULL);
 }
 static _Noreturn void thread_exit(thr_t *t) {
@@ -276,7 +336,7 @@ uint32_t svc_thread_main_init(void) {
     pthread_cond_init(&t->cv, NULL);
     t->started = 1; t->prio = 44; t->core = 0; t->mask = 7; t->pt = pthread_self(); t->mport = pthread_mach_thread_np(t->pt);
     t->cur_core = -1;
-    pthread_mutex_lock(&G); t->handle = h_new(O_THREAD, t); t->id = g_next_id++; t->all = g_all; g_all = t; core_take(t); pthread_mutex_unlock(&G);
+    profile_lock(); t->handle = h_new(O_THREAD, t); t->id = g_next_id++; t->all = g_all; g_all = t; core_take(t); profile_unlock();
     pthread_setspecific(g_keythr, t);
     qos_class_t qc = QOS_CLASS_UNSPECIFIED; int rp = 0;
     pthread_get_qos_class_np(pthread_self(), &qc, &rp); t->qos = (uint32_t)qc;
@@ -287,13 +347,13 @@ static _Atomic uint64_t g_main_yield_n, g_main_yield_ns;   // 只有客体主线
 void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n = g_main_yield_n; *ns = g_main_yield_ns; }
 uint32_t dm_guest_work_qos(unsigned *count) {
     uint32_t qos = QOS_CLASS_UNSPECIFIED; unsigned n = 0;
-    pthread_mutex_lock(&G);
+    profile_lock();
     for (thr_t *t = g_all; t; t = t->all) {
         if (t->handle == 0x1001) continue;
         if (!n) qos = t->qos; else if (qos != t->qos) qos = UINT32_MAX;
         n++;
     }
-    pthread_mutex_unlock(&G);
+    profile_unlock();
     if (count) *count = n;
     return qos;
 }
@@ -317,9 +377,9 @@ static void wake_sync_waiters(void) {
 static int64_t now_mono_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec * 1000000000ll + ts.tv_nsec; }
 void dm_guest_clock_advanced(void) {
     if (!dm_detclock_enabled()) return;
-    pthread_mutex_lock(&G);
+    profile_lock();
     for (thr_t *t = g_wait; t; t = t->next) if (t->wkind) pthread_cond_signal(&t->cv);
-    pthread_mutex_unlock(&G);
+    profile_unlock();
 }
 
 // 处理线程 / 同步类 SVC；返回 1 = 已处理
@@ -360,7 +420,7 @@ int svc_thread(int num, uint64_t *regs) {
         t->entry = regs[1]; t->arg = regs[2]; t->stack_top = regs[3] & ~0xFull;
         t->prio = (int)regs[4]; t->core = (int)regs[5]; t->mask = t->core >= 0 ? 1ull << t->core : 7;
         t->born_ns = now_ns(); t->born_tick = dm_thread_tick_fn ? dm_thread_tick_fn() : 0;
-        pthread_mutex_lock(&G); t->handle = h_new(O_THREAD, t); t->id = g_next_id++; t->all = g_all; g_all = t; pthread_mutex_unlock(&G);
+        profile_lock(); t->handle = h_new(O_THREAD, t); t->id = g_next_id++; t->all = g_all; g_all = t; profile_unlock();
         pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 8 << 20);   // also the host-service stack of this guest thread
         pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);   // 退出即回收宿主资源（客体经句柄等待，不 join） | Host resources are reclaimed on exit (the guest waits through the handle, no join)
         if (pthread_create(&t->pt, &a, thread_main, t)) die("pthread_create");
@@ -369,10 +429,10 @@ int svc_thread(int num, uint64_t *regs) {
         regs[0] = 0; regs[1] = t->handle; return 1;
     }
     case 0x09: {  // StartThread(w0)
-        pthread_mutex_lock(&G);
+        profile_lock();
         thr_t *t = h_get((uint32_t)regs[0], O_THREAD);
         if (t) { t->started = 1; pthread_cond_signal(&t->cv); }
-        pthread_mutex_unlock(&G);
+        profile_unlock();
         regs[0] = t ? 0 : R_BAD_HANDLE; return 1;
     }
     case 0x0A: thread_exit(cur()); return 1;
@@ -380,57 +440,59 @@ int svc_thread(int num, uint64_t *regs) {
         int64_t ns = (int64_t)regs[0];
 
         thr_t *self = cur();
-        if (ns > 0) { pthread_mutex_lock(&G); core_put(self); pthread_mutex_unlock(&G); }
+        uint64_t sleep_start=thread_profile_on?now_ns():0;
+        if (ns > 0) { profile_lock(); core_put(self); profile_unlock(); }
         if (ns > 0 && dm_detclock_enabled()) {
             uint64_t deadline = guest_ns() + (uint64_t)ns;
             while (guest_ns() < deadline) { struct timespec ts = {0, 1000000}; nanosleep(&ts, 0); }
-        } else if (ns > 0) { struct timespec ts = {ns / 1000000000, ns % 1000000000}; nanosleep(&ts, 0); }
+        } else if (ns > 0) host_sleep_ns(ns);
         else {   // 让出（0 / -1 / -2）。主线程的让出次数与耗时记账：游戏渲染任务图「等全部做完」是纯轮询 + 让出（main+0x15ee898），量它占一帧多少 | Yield (0 / -1 / -2). Count and time of the main thread's yields are recorded: the game's render task graph "wait for everything to finish" is pure polling + yield (main+0x15ee898); measure how much of a frame it takes
             thr_t *me = (g_keythr ? pthread_getspecific(g_keythr) : NULL);
             uint64_t y0 = now_ns();
             if (me && me->nsvc != me->yrun_svc + 1) me->yrun_ns = y0;   // another SVC since the last yield: a new run
             if (me) me->yrun_svc = me->nsvc;
-            pthread_mutex_lock(&G);   // Horizon yield: hand the core to a waiting thread of equal or higher priority
+            profile_lock();   // Horizon yield: hand the core to a waiting thread of equal or higher priority
             int give = 0; for (thr_t *w = g_core_wait; w && !give; w = w->cnext) give = me->cur_core >= 0 && core_allowed(w, me->cur_core) && w->prio <= me->prio;
             if (give) { core_put(me); core_take(me); }
-            pthread_mutex_unlock(&G);
+            profile_unlock();
             uint64_t backoff = !give && me ? yield_backoff_ns(y0 - me->yrun_ns) : 0;
             if (backoff) {   // a long poll: sleep with the core given up, as SleepThread(ns) does
-                pthread_mutex_lock(&G); core_put(me); pthread_mutex_unlock(&G);
+                profile_lock(); core_put(me); profile_unlock();
                 struct timespec ts = {0, (long)backoff}; nanosleep(&ts, 0);
-                pthread_mutex_lock(&G); core_take(me); pthread_mutex_unlock(&G);
+                profile_lock(); core_take(me); profile_unlock();
             } else if (!give) sched_yield();
             if (me && me->handle == 0x1001) { g_main_yield_ns += now_ns() - y0; g_main_yield_n++; }
         }
-        if (ns > 0) { pthread_mutex_lock(&G); core_take(self); pthread_mutex_unlock(&G); }
+        if (ns > 0) { profile_lock(); core_take(self); profile_unlock(); }
+        if(thread_profile_on){profile_lock();self->prof[ns>0?13:14]+=now_ns()-sleep_start;self->prof[ns>0?16:17]++;if(ns>0)self->prof[15]+=(uint64_t)ns;profile_unlock();}
 
         return 1;
     }
-    case 0x0C: { pthread_mutex_lock(&G);thr_t *t = h_get((uint32_t)regs[1], O_THREAD); regs[0] = t ? 0 : R_BAD_HANDLE; regs[1] = t ? (uint64_t)t->prio : 0; pthread_mutex_unlock(&G);return 1; }
-    case 0x0D: { if(regs[1]<28||regs[1]>59){regs[0]=R_BAD_STATE;return 1;}pthread_mutex_lock(&G);thr_t *t = h_get((uint32_t)regs[0], O_THREAD); if (t) t->prio = (int)regs[1]; regs[0] = t ? 0 : R_BAD_HANDLE;pthread_mutex_unlock(&G); return 1; }
-    case 0x0E: { pthread_mutex_lock(&G);thr_t *t = h_get((uint32_t)regs[2], O_THREAD);
-                 regs[0] = t ? 0 : R_BAD_HANDLE; regs[1] = t ? (uint64_t)(uint32_t)t->core : 0; regs[2] = t ? t->mask : 0;pthread_mutex_unlock(&G); return 1; }
+    case 0x0C: { profile_lock();thr_t *t = h_get((uint32_t)regs[1], O_THREAD); regs[0] = t ? 0 : R_BAD_HANDLE; regs[1] = t ? (uint64_t)t->prio : 0; profile_unlock();return 1; }
+    case 0x0D: { if(regs[1]<28||regs[1]>59){regs[0]=R_BAD_STATE;return 1;}profile_lock();thr_t *t = h_get((uint32_t)regs[0], O_THREAD); if (t) t->prio = (int)regs[1]; regs[0] = t ? 0 : R_BAD_HANDLE;profile_unlock(); return 1; }
+    case 0x0E: { profile_lock();thr_t *t = h_get((uint32_t)regs[2], O_THREAD);
+                 regs[0] = t ? 0 : R_BAD_HANDLE; regs[1] = t ? (uint64_t)(uint32_t)t->core : 0; regs[2] = t ? t->mask : 0;profile_unlock(); return 1; }
     case 0x0F: {  // SetThreadCoreMask(w0, w1 理想核, x2 掩码)：-1 = 用进程缺省、-2/-3 = 不改理想核；宿主只记账 | SetThreadCoreMask(w0, w1 ideal core, x2 mask): -1 = use the process default, -2/-3 = leave the ideal core unchanged; the host only keeps the bookkeeping
-        pthread_mutex_lock(&G);thr_t *t = h_get((uint32_t)regs[0], O_THREAD);
+        profile_lock();thr_t *t = h_get((uint32_t)regs[0], O_THREAD);
         if (t) { int c = (int)regs[1]; if (c >= 0) t->core = c; else if (c == -1) t->core = 0; if (regs[2]) t->mask = regs[2];
                  if (t == cur() && t->cur_core >= 0 && !core_allowed(t, t->cur_core)) { core_put(t); core_take(t); } }   // migrate off a core no longer allowed
-        regs[0] = t ? 0 : R_BAD_HANDLE;pthread_mutex_unlock(&G); return 1;
+        regs[0] = t ? 0 : R_BAD_HANDLE;profile_unlock(); return 1;
     }
     case 0x10: { thr_t *t = cur(); regs[0] = (uint64_t)(uint32_t)(t->cur_core >= 0 ? t->cur_core : t->core); return 1; }   // GetCurrentProcessorNumber
-    case 0x25: { pthread_mutex_lock(&G);thr_t *t = h_get((uint32_t)regs[1], O_THREAD); regs[0] = t ? 0 : R_BAD_HANDLE; regs[1] = t ? t->id : 0;pthread_mutex_unlock(&G); return 1; }
+    case 0x25: { profile_lock();thr_t *t = h_get((uint32_t)regs[1], O_THREAD); regs[0] = t ? 0 : R_BAD_HANDLE; regs[1] = t ? t->id : 0;profile_unlock(); return 1; }
 
     case 0x1A: {  // ArbitrateLock(w0 持有者句柄, x1 地址, w2 本线程标签) | ArbitrateLock(w0 owner handle, x1 address, w2 this thread's tag)
         thr_t *t = cur(); uint64_t addr = regs[1];
-        pthread_mutex_lock(&G);
+        profile_lock();
         int64_t r = 0;
         if (ld32(addr) == ((uint32_t)regs[0] | WAITERS_BIT)) { t->waddr = addr; t->wtag = (uint32_t)regs[2]; r = block(t, 1, -1); }
-        pthread_mutex_unlock(&G);
+        profile_unlock();
         regs[0] = (uint64_t)r; return 1;
     }
-    case 0x1B: pthread_mutex_lock(&G); lock_handoff(regs[0]); pthread_mutex_unlock(&G); regs[0] = 0; return 1;
+    case 0x1B: profile_lock(); lock_handoff(regs[0]); profile_unlock(); regs[0] = 0; return 1;
     case 0x1C: {  // WaitProcessWideKeyAtomic(x0 锁地址, x1 条件键, w2 标签, x3 超时) | WaitProcessWideKeyAtomic(x0 lock address, x1 condition key, w2 tag, x3 timeout)
         thr_t *t = cur(); uint64_t addr = regs[0], key = regs[1];
-        pthread_mutex_lock(&G);
+        profile_lock();
         // 顺序要紧：先置条件键 = 1，再放互斥锁。SDK 的 InternalConditionVariable::Signal 在用户态先读条件键、为 0 就不发 svc 0x1D；
         // 用户态抢互斥锁也不经过 G。原先先 lock_handoff 后置键：放锁后、置键前，别的线程可在用户态抢到锁、改完条件、读到键 0 就不唤醒，
         // 本线程随后挂上去永远等不到（并行负载下资源表读写锁 main+0x320e5e0 卡死：读者计数 0、锁空闲、写者条件键 1、写者仍在等）。
@@ -454,33 +516,33 @@ int svc_thread(int num, uint64_t *regs) {
         t->wkey = key; t->waddr = addr; t->wtag = (uint32_t)regs[2];
 #endif
         int64_t r = block(t, 2, (int64_t)regs[3]);   // 超时：不重新拿锁（用户态自己拿） | Timeout: the lock is not re-acquired (user mode takes it itself)
-        pthread_mutex_unlock(&G);
+        profile_unlock();
         regs[0] = (uint64_t)r; return 1;
     }
     case 0x1D: {  // SignalProcessWideKey(x0 条件键, w1 个数，<=0 全部) | SignalProcessWideKey(x0 condition key, w1 count, <=0 all)
         uint64_t key = regs[0]; int cnt = (int)regs[1], n = 0;
-        pthread_mutex_lock(&G);
+        profile_lock();
         for (thr_t *w; (cnt <= 0 || n < cnt) && (w = pick(2, key)); n++) lock_acquire_for(w, w->waddr, w->wtag);   // 按内核顺序；转为锁等待或被唤醒后不再是 kind 2 | In kernel order; once turned into a lock wait or woken it is no longer kind 2
         int left = 0; for (thr_t *w = g_wait; w; w = w->next) if (w->wkind == 2 && w->wkey == key) { left = 1; break; }
         if (!left) st32(key, 0);
-        pthread_mutex_unlock(&G);
+        profile_unlock();
         regs[0] = 0; return 1;
     }
 
     case 0x34: {  // WaitForAddress(x0 地址, w1 类型, w2 值, x3 超时)：0 小于则等、1 小于则减一再等、2 相等则等 | WaitForAddress(x0 address, w1 type, w2 value, x3 timeout): 0 wait if less than, 1 decrement if less than then wait, 2 wait if equal
         thr_t *t = cur(); uint64_t addr = regs[0]; int type = (int)regs[1]; int32_t val = (int32_t)regs[2];
-        pthread_mutex_lock(&G);
+        profile_lock();
         int64_t r; uint32_t v = ld32(addr);
         int ok = type == 2 ? (int32_t)v == val : (int32_t)v < val;
         if (ok && type == 1) { while (!cas32(addr, &v, v - 1)) if (!((int32_t)v < val)) { ok = 0; break; } }
         if (!ok) r = R_BAD_STATE;
         else { t->waddr = addr; r = block(t, 3, (int64_t)regs[3]); }
-        pthread_mutex_unlock(&G);
+        profile_unlock();
         regs[0] = (uint64_t)r; return 1;
     }
     case 0x35: {  // SignalToAddress(x0 地址, w1 类型, w2 值, w3 个数)：0 唤醒、1 相等则加一并唤醒、2 相等则按等待数改值并唤醒 | SignalToAddress(x0 address, w1 type, w2 value, w3 count): 0 wake, 1 increment if equal and wake, 2 if equal modify the value by waiter count and wake
         uint64_t addr = regs[0]; int type = (int)regs[1]; int32_t val = (int32_t)regs[2]; int cnt = (int)regs[3];
-        pthread_mutex_lock(&G);
+        profile_lock();
         int nw = 0; for (thr_t *w = g_wait; w; w = w->next) if (w->wkind == 3 && w->waddr == addr) nw++;
         int64_t r = 0;
         if (type != 0) {
@@ -494,16 +556,16 @@ int svc_thread(int num, uint64_t *regs) {
         }
         if (!r) { int n = 0;
             for (thr_t *w; (cnt <= 0 || n < cnt) && (w = pick(3, addr)); n++) wake(w, 0); }
-        pthread_mutex_unlock(&G);
+        profile_unlock();
         regs[0] = (uint64_t)r; return 1;
     }
     case 0x36: sched_yield(); regs[0] = 0; return 1;   // SynchronizePreemptionState
     case 0x32: {                                        // SetThreadActivity(w0 thread, w1 pause)
-        pthread_mutex_lock(&G); thr_t *t = h_get((uint32_t)regs[0], O_THREAD); pthread_mutex_unlock(&G);
+        profile_lock(); thr_t *t = h_get((uint32_t)regs[0], O_THREAD); profile_unlock();
         regs[0] = t ? 0 : R_BAD_HANDLE; return 1;
     }
     case 0x33: {                                        // GetThreadContext3(x0 out_context, w1 thread)
-        pthread_mutex_lock(&G); thr_t *t = h_get((uint32_t)regs[1], O_THREAD); pthread_mutex_unlock(&G);
+        profile_lock(); thr_t *t = h_get((uint32_t)regs[1], O_THREAD); profile_unlock();
         if (!t) { regs[0] = R_BAD_HANDLE; return 1; }
         if (regs[0]) memset((void *)(uintptr_t)regs[0], 0, 0x320);
         regs[0] = 0; return 1;
@@ -515,11 +577,11 @@ int svc_thread(int num, uint64_t *regs) {
 
     case 0x45: {  // CreateEvent(→w1 写端, w2 读端) | CreateEvent(→w1 write end, w2 read end)
         event_t *e = calloc(1, sizeof *e); e->refs = 2;
-        pthread_mutex_lock(&G); uint32_t hw = h_new(O_EVENT_W, e), hr = h_new(O_EVENT_R, e); pthread_mutex_unlock(&G);
+        profile_lock(); uint32_t hw = h_new(O_EVENT_W, e), hr = h_new(O_EVENT_R, e); profile_unlock();
         regs[0] = 0; regs[1] = hw; regs[2] = hr; return 1;
     }
     case 0x11: case 0x12: case 0x17: {  // SignalEvent(写端) / ClearEvent(任一端) / ResetSignal(读端，未触发报错) | SignalEvent(write end) / ClearEvent(either end) / ResetSignal(read end, error if not signaled)
-        pthread_mutex_lock(&G);
+        profile_lock();
         // SignalEvent 只认写端；ClearEvent 两端都认；ResetSignal 只认读端
         // SignalEvent accepts only the write end; ClearEvent accepts both ends; ResetSignal accepts only the read end
         uint32_t h = (uint32_t)regs[0];
@@ -531,14 +593,15 @@ int svc_thread(int num, uint64_t *regs) {
         else if (num == 0x11) { e->signaled = 1; wake_sync_waiters(); }
         else if (num == 0x17 && !e->signaled) r = R_BAD_STATE;
         else e->signaled = 0;
-        pthread_mutex_unlock(&G);
+        profile_unlock();
         regs[0] = (uint64_t)r; return 1;
     }
     case 0x18: {  // WaitSynchronization(→w1 下标; x1 句柄数组, w2 个数, x3 超时) | WaitSynchronization(→w1 index; x1 handle array, w2 count, x3 timeout)
         thr_t *t = cur(); const uint32_t *hs = (const uint32_t *)regs[1]; int n = (int)regs[2]; int64_t ns = (int64_t)regs[3];
         if(n<0||n>64||(!hs&&n)){regs[0]=R_BAD_STATE;return 1;}
         int64_t deadline = ns > 0 ? (dm_detclock_enabled() ? (int64_t)guest_ns() : now_mono_ns()) + ns : 0;
-        pthread_mutex_lock(&G);
+        profile_lock();
+        if(thread_profile_on){t->prof[19]++;t->prof[20]+=ns==0;t->prof[24]+=ns<0;}
         t->nwh = n; for (int i = 0; i < n && i < 4; i++) t->wh[i] = hs[i];
         int64_t r; int idx = -1;
         for (;;) {
@@ -551,18 +614,19 @@ int svc_thread(int num, uint64_t *regs) {
             if (ns > 0 && left <= 0) { r = R_TIMEOUT; break; }
             if (block(t, 4, left) == R_TIMEOUT) { r = R_TIMEOUT; break; }
         }
-        pthread_mutex_unlock(&G);
+        profile_unlock();
+        if(thread_profile_on){profile_lock();t->prof[21]+=r==0;t->prof[22]+=r==R_BAD_HANDLE;t->prof[23]+=r==R_TIMEOUT;profile_unlock();}
         regs[0] = (uint64_t)r; regs[1] = idx >= 0 ? (uint64_t)idx : 0; return 1;
     }
     case 0x19: {  // CancelSynchronization(w0 线程) | CancelSynchronization(w0 thread)
-        pthread_mutex_lock(&G);
+        profile_lock();
         thr_t *t = h_get((uint32_t)regs[0], O_THREAD);
         if (t) { t->cancel = 1; if (t->wkind == 4) wake(t, -1); }
-        pthread_mutex_unlock(&G);
+        profile_unlock();
         regs[0] = t ? 0 : R_BAD_HANDLE; return 1;
     }
     case 0x16: {  // CloseHandle(w0)：事件两端都关才释放；线程句柄关闭后槽位回收，对象在线程也退出后释放 | CloseHandle(w0): an event is freed only when both ends are closed; after a thread handle is closed the slot is recycled, and the object is freed once the thread has also exited
-        pthread_mutex_lock(&G);
+        profile_lock();
         unsigned i = (uint32_t)regs[0] - 0x1000;int valid=0;
         if (i > 0 && i < MAX_H && (g_h[i].type == O_EVENT_R || g_h[i].type == O_EVENT_W)) {
             valid=1;event_t *e = g_h[i].obj; if (--e->refs == 0) free(e);
@@ -570,16 +634,16 @@ int svc_thread(int num, uint64_t *regs) {
         } else if (i > 0 && i < MAX_H && (g_h[i].type == O_SESSION || g_h[i].type == O_TMEM)) {
             valid=1;void *o = g_h[i].obj; int session = g_h[i].type == O_SESSION;
             g_h[i].type = O_FREE; g_h[i].obj = NULL;
-            pthread_mutex_unlock(&G);
+            profile_unlock();
             if (session) runtime_ipc_session_closed(o); else runtime_ipc_tmem_closed(o);
-            pthread_mutex_lock(&G);
+            profile_lock();
         } else if (i > 0 && i < MAX_H && g_h[i].type == O_THREAD) {
             valid=1;thr_t *t = g_h[i].obj;
             g_h[i].type = O_FREE; g_h[i].obj = NULL;
             t->closed = 1;
             if (t->exited) thr_free(t);
         }
-        pthread_mutex_unlock(&G);
+        profile_unlock();
         regs[0] = valid?0:R_BAD_HANDLE; return 1;
     }
     }
@@ -617,38 +681,38 @@ void hle_bind_system_event(void *ev, int autoclear) {      // 必须在客体线
 void hle_signal_system_event(void *ev) {   // 未绑定的按手动清除即时绑定（只能在客体线程上发生） | An unbound one is bound on the spot as manual-clear (can only happen on a guest thread)
     pthread_mutex_lock(&g_se_lock); uint32_t wh = se_find(ev); pthread_mutex_unlock(&g_se_lock);
     if (!wh) { hle_bind_system_event(ev, 0); pthread_mutex_lock(&g_se_lock); wh = se_find(ev); pthread_mutex_unlock(&g_se_lock); }
-    pthread_mutex_lock(&G);
+    profile_lock();
     event_t *e = h_get(wh, O_EVENT_W);
     if (!e) die("SystemEvent 写端句柄失效 %#x", wh);
     e->signaled = 1; wake_sync_waiters();
-    pthread_mutex_unlock(&G);
+    profile_unlock();
 }
 
 // ---------- IPC support (ipc.c): sessions, transfer memory and service-owned events ----------
 // Weak fallbacks keep standalone thread tests linkable; the runtime links the real ipc.c versions.
 __attribute__((weak)) void runtime_ipc_session_closed(void *s) { (void)s; die("IPC session closed without ipc.c"); }
 __attribute__((weak)) void runtime_ipc_tmem_closed(void *t) { (void)t; die("transfer memory closed without ipc.c"); }
-uint32_t runtime_handle_new(int session, void *obj) { pthread_mutex_lock(&G); uint32_t h = h_new(session ? O_SESSION : O_TMEM, obj); pthread_mutex_unlock(&G); return h; }
-void *runtime_handle_get(uint32_t h, int session) { pthread_mutex_lock(&G); void *o = h_peek(h, session ? O_SESSION : O_TMEM); pthread_mutex_unlock(&G); return o; }
+uint32_t runtime_handle_new(int session, void *obj) { profile_lock(); uint32_t h = h_new(session ? O_SESSION : O_TMEM, obj); profile_unlock(); return h; }
+void *runtime_handle_get(uint32_t h, int session) { profile_lock(); void *o = h_peek(h, session ? O_SESSION : O_TMEM); profile_unlock(); return o; }
 /* Removes a session handle without closing the session (ipc.c: a session made inside a CMIF domain becomes a domain object). */
 void *runtime_handle_take_session(uint32_t h) {
-    pthread_mutex_lock(&G); void *o = h_peek(h, O_SESSION);
+    profile_lock(); void *o = h_peek(h, O_SESSION);
     if (o) { unsigned i = h - 0x1000; g_h[i].type = O_FREE; g_h[i].obj = NULL; }
-    pthread_mutex_unlock(&G); return o;
+    profile_unlock(); return o;
 }
 // Service-side event: returns the writable handle kept by the service.
 uint32_t runtime_event_new(void) {
     event_t *e = calloc(1, sizeof *e); if (!e) die("event allocation"); e->refs = 1;
-    pthread_mutex_lock(&G); uint32_t hw = h_new(O_EVENT_W, e); pthread_mutex_unlock(&G); return hw;
+    profile_lock(); uint32_t hw = h_new(O_EVENT_W, e); profile_unlock(); return hw;
 }
 // Copy-handle transfer of the readable end: each call gives the client its own handle to the same event.
 uint32_t runtime_event_readable(uint32_t hw) {
-    pthread_mutex_lock(&G); event_t *e = h_get(hw, O_EVENT_W); if (!e) die("service event handle %#x", hw);
-    e->refs++; uint32_t hr = h_new(O_EVENT_R, e); pthread_mutex_unlock(&G); return hr;
+    profile_lock(); event_t *e = h_get(hw, O_EVENT_W); if (!e) die("service event handle %#x", hw);
+    e->refs++; uint32_t hr = h_new(O_EVENT_R, e); profile_unlock(); return hr;
 }
 void runtime_event_signal(uint32_t hw) {
-    pthread_mutex_lock(&G); event_t *e = h_get(hw, O_EVENT_W); if (!e) die("service event handle %#x", hw);
-    e->signaled = 1; wake_sync_waiters(); pthread_mutex_unlock(&G);
+    profile_lock(); event_t *e = h_get(hw, O_EVENT_W); if (!e) die("service event handle %#x", hw);
+    e->signaled = 1; wake_sync_waiters(); profile_unlock();
 }
 
 // ---------- Diagnostics: TOTK_DUMP_AFTER=<seconds> prints every guest thread's wait state and guest return chain ----------
@@ -720,7 +784,7 @@ static void dump_threads(unsigned secs) {
         dump_chain(t->last_lr, t->last_fp);
         if (!t->wkind && !t->exited && t->mport && nrun < 64) run[nrun++] = t;
     }
-    if (locked) pthread_mutex_unlock(&G);
+    if (locked) profile_unlock();
     for (int i = 0; i < nrun; i++) { thr_t *t = run[i]; fprintf(stderr, "[totk-dump] live h=%#x\n", t->handle);
             for (int k = 0; k < 3; k++) {
                 arm_thread_state64_t st; mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
