@@ -14,7 +14,7 @@ NVN = Path(os.environ.get('FC26_NVN_DIR') or Path(__file__).resolve().parents[1]
 
 @unittest.skipUnless(platform.system() == 'Darwin', 'requer clang do macOS')
 class VirtualTextureTest(unittest.TestCase):
-    def test_virtual_bc_materials_import_pool_contents(self):
+    def test_virtual_materials_import_pool_contents(self):
         src = (NVN / 'nvn_mtl.m').read_text()
         # O caminho real de upload protege páginas apenas quando não usa hash.
         self.assertIn('if (!pkg_hashed(t)) nvn_dirty_protect(t->mem, t->L.size);', src)
@@ -34,8 +34,12 @@ int main(void) {
  for(int fmt=0x41;fmt<=0x50;fmt++) {t.d.format=fmt;printf("virtual_bc_%x=%d\\n",fmt,tex_mirrored(&t));}
  printf("virtual_hash=%d\\n",pkg_hashed(&t));
  t.d.format=0x25;printf("virtual_rgba=%d\\n",tex_mirrored(&t));
+ t.d.format=0x38;printf("virtual_srgba=%d\\n",tex_mirrored(&t));printf("virtual_srgba_hash=%d\\n",pkg_hashed(&t));
  t.d.format=0x46;t.d.flags=NVN_TEXTURE_FLAGS_DISPLAY;printf("display=%d\\n",tex_mirrored(&t));
- t.d.flags=0;t.d.samples=4;printf("msaa=%d\\n",tex_mirrored(&t));
+ t.d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE;printf("compressible=%d\\n",tex_mirrored(&t));
+ t.d.flags=0;t.d.format=0x36;printf("depth=%d\\n",tex_mirrored(&t));
+ t.d.format=0x38;t.d.target=10;printf("buffer=%d\\n",tex_mirrored(&t));
+ t.d.target=1;t.d.samples=4;printf("msaa=%d\\n",tex_mirrored(&t));
  t.d.samples=1;p.flags=0x121;printf("physical_hash=%d\\n",pkg_hashed(&t));printf("physical=%d\\n",tex_mirrored(&t));
  p.flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED;p.host=NULL;printf("cpu=%d\\n",tex_mirrored(&t));
  t.mem=NULL;printf("no_storage=%d\\n",tex_mirrored(&t));
@@ -53,8 +57,11 @@ int main(void) {
             for fmt in range(0x41, 0x51):
                 with self.subTest(format=fmt):
                     self.assertIn(f'virtual_bc_{fmt:x}=1', r.stdout)
-            for name in ['virtual_rgba', 'physical', 'display', 'msaa', 'no_storage']:
+            for name in ['physical', 'display', 'compressible', 'depth', 'buffer', 'msaa', 'no_storage']:
                 self.assertIn(f'{name}=0', r.stdout)
+            self.assertIn('virtual_rgba=1', r.stdout)
+            self.assertIn('virtual_srgba=1', r.stdout)
+            self.assertIn('virtual_srgba_hash=1', r.stdout)
             self.assertIn('cpu=1', r.stdout)
             self.assertIn('virtual_hash=1', r.stdout)
             self.assertIn('physical_hash=0', r.stdout)

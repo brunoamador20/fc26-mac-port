@@ -3255,8 +3255,8 @@ static int pkg_hashed(const tex_t *t) {
     /* Pools virtuais mudam de backing e a CPU escreve pelo alias físico. Proteger o
        alias virtual não detecta essas escritas e pode competir com MapVirtual.
        Compare seu conteúdo uma vez por submissão, sem proteger suas páginas. */
-    int virtual_bc = t->pool && (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) && fmt_compressed(t->d.format);
-    return t->L.size && (virtual_bc || (on && t->L.size <= PKG_HASH_MAX));
+    int virtual_asset = t->pool && (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL);
+    return t->L.size && (virtual_asset || (on && t->L.size <= PKG_HASH_MAX));
 }
 static uint64_t pkg_hash(const void *p, uint64_t n) {
     const uint8_t *b = p; uint64_t a[4] = {0x9E3779B97F4A7C15ull ^ n, 0xC2B2AE3D27D4EB4Full, 0x165667B19E3779F9ull, 0x27D4EB2F165667C5ull}, i = 0;
@@ -3549,10 +3549,10 @@ static int tex_mirrored(const tex_t *t) {
     static int on = -1; if (on < 0) { const char *e = getenv("TOTK_TEX_MIRROR"); on = !e || atoi(e); }
     if (!on) return 0;
     const pool_t *p = t->pool;
-    /* FC 26: streamed BC assets also live in mapped virtual pools (0x221). Their backing
-       contains block-linear texels even though NVN forbids MemoryPoolMap on that pool. */
-    int virtual_bc = p && (p->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) && fmt_compressed(t->d.format);
-    if (!p || (!virtual_bc && (p->host || !(p->flags & (NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_CPU_CACHED))))) return 0;
+    /* FC 26: streamed assets, including uncompressed sRGB skin sources, live in virtual
+       pools (0x221). Their mapped backing contains block-linear texels. */
+    int virtual_asset = p && (p->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL);
+    if (!p || (!virtual_asset && (p->host || !(p->flags & (NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_CPU_CACHED))))) return 0;
     if (t->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_ADAPTIVE_ZCULL |
                       NVN_TEXTURE_FLAGS_DEPTH16_PREFER_FAST_CLEAR | NVN_TEXTURE_FLAGS_ZCULL_SUPPORT_STENCIL)) return 0;
     if (t->d.samples > 1 || t->d.target == 10) return 0;
