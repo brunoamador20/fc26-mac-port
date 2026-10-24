@@ -10991,8 +10991,6 @@ static int copy_t2t_depth(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsig
     static id<MTLRenderPipelineState> ps_d32, ps_d32s8, ps_d16;
     static id<MTLDepthStencilState> dss;
     static id<MTL4ArgumentTable> at;
-    static id<MTLBuffer> pbuf[4];
-    static int pbuf_idx;
     if (failed) return 0;
     if (!dss) {
         NSError *e = nil;
@@ -11015,11 +11013,7 @@ static int copy_t2t_depth(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsig
         MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new];
         ad.maxTextureBindCount = 1; ad.maxBufferBindCount = 1;
         at = [g_dev newArgumentTableWithDescriptor:ad error:&e];
-        for (int i = 0; i < 4; i++) {
-            pbuf[i] = [g_dev newBufferWithLength:32 options:MTLResourceStorageModeShared];
-            res_add(pbuf[i]);
-        }
-        if (!dss || !ps_d32 || !at || !pbuf[0]) { failed = 1; MLOG("【红】深度拷贝管线建不出 %s", e.localizedDescription.UTF8String); return 0; }
+        if (!dss || !ps_d32 || !at) { failed = 1; MLOG("【红】深度拷贝管线建不出 %s", e.localizedDescription.UTF8String); return 0; }
     }
     id<MTLRenderPipelineState> ps = (d.pixelFormat == MTLPixelFormatDepth32Float) ? ps_d32 :
                                    (d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) ? ps_d32s8 :
@@ -11029,9 +11023,9 @@ static int copy_t2t_depth(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsig
     id<MTLTexture> sv = (s.textureType == tt && sl == 0 && ss == 0) ? s : [s newTextureViewWithPixelFormat:s.pixelFormat textureType:tt levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss, 1)];
     id<MTLTexture> dv = (d.textureType == tt && dl == 0 && ds == 0) ? d : [d newTextureViewWithPixelFormat:d.pixelFormat textureType:tt levels:NSMakeRange(dl, 1) slices:NSMakeRange(ds, 1)];
     if (!sv || !dv) { RED_ONCE(49, "深度拷贝建不出视图"); return 0; }
-    id<MTLBuffer> pb = pbuf[pbuf_idx];
-    pbuf_idx = (pbuf_idx + 1) % 4;
-    uint32_t *p = (uint32_t *)pb.contents;
+    id<MTLBuffer> pb;
+    size_t poff = arena_alloc(32, &pb);   // Parameters remain live until this submission completes.
+    uint32_t *p = (uint32_t *)((uint8_t *)pb.contents + poff);
     p[0] = (uint32_t)sx; p[1] = (uint32_t)sy; p[2] = (uint32_t)dx; p[3] = (uint32_t)dy;
     p[4] = (uint32_t)w; p[5] = (uint32_t)h; p[6] = 0; p[7] = 0;
     rp_end();
@@ -11047,7 +11041,7 @@ static int copy_t2t_depth(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsig
     [en barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
     [en setArgumentTable:at atStages:MTLRenderStageFragment];
     [at setTexture:sv.gpuResourceID atIndex:0];
-    [at setAddress:pb.gpuAddress atIndex:0];
+    [at setAddress:pb.gpuAddress + poff atIndex:0];
     [en setViewport:(MTLViewport){0, 0, (double)dv.width, (double)dv.height, 0, 1}];
     [en setScissorRect:(MTLScissorRect){(NSUInteger)dx, (NSUInteger)dy, (NSUInteger)w, (NSUInteger)h}];
     [en setRenderPipelineState:ps];
