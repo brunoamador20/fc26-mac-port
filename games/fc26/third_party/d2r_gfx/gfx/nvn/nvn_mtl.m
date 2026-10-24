@@ -6086,6 +6086,41 @@ static id<MTLFunction> fs_fn_border(NvShader *fs, int nodepth) {
     os_unfair_lock_unlock(&lock);
     return fn;
 }
+/* Dual-source blending (blend factors SRC1_COLOR / SRC1_ALPHA and their ONE_MINUS forms, NVN 0x10..0x13): on Maxwell the
+   second blend source of render target 0 is the fragment shader's colour output 1, the same register the translator
+   declares as [[color(1)]]. Metal takes that source only from [[color(0), index(1)]] and refuses the pipeline otherwise
+   ("Fragment shader does not write to render target color(0), index(1) that is required for blending", 12 pipelines of
+   the match's scene pass, boot base2c). msl_dual_source moves output 1 there; nil when the source has no [[color(1)]]. */
+static int blend_src1(int f) { return f >= 0x10 && f <= 0x13; }
+static int pso_dual_source(const pso_key *k) {   // Metal allows dual-source blending with one colour attachment only (render target 0)
+    const blend_st *b = &k->blend[0];
+    for (int i = 1; i < 8; i++) if (k->cfmt[i]) return 0;
+    return (k->blend_en & 1) && k->cfmt[0] && (blend_src1(b->src_rgb) || blend_src1(b->dst_rgb) || blend_src1(b->src_a) || blend_src1(b->dst_a));
+}
+static NSString *msl_dual_source(NSString *src) {
+    NSRegularExpression *c1 = [NSRegularExpression regularExpressionWithPattern:@"\\[\\[color\\(1\\)\\]\\]" options:0 error:nil];
+    if ([c1 numberOfMatchesInString:src options:0 range:NSMakeRange(0, src.length)] != 1) return nil;
+    return [c1 stringByReplacingMatchesInString:src options:0 range:NSMakeRange(0, src.length) withTemplate:@"[[color(0), index(1)]]"];
+}
+/* The fragment function for a dual-source blended draw (pso_dual_source); nil when the shader has no output 1 to move. */
+static id<MTLFunction> fs_fn_dual(NvShader *fs, int nodepth) {
+    if (!fs || !sh_has_src(fs)) return nil;
+    NSString *key = nodepth && fs->writes_depth ? @"dual;nodepth" : @"dual";
+    static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT; os_unfair_lock_lock(&lock);
+    id<MTLFunction> fn = fs->bpatch[key];
+    if (!fn) {
+        NSString *src = msl_dual_source(nodepth && fs->writes_depth ? fs_src_without_depth(fs) : sh_src(fs));
+        if (!src) { os_unfair_lock_unlock(&lock); RED_ONCE(50, "双源混合：片元着色器 %s 没有第 1 个颜色输出可改成 color(0) index(1)", fs->key); return nil; }
+        NSError *err = nil; id<MTLLibrary> lib = totk_msl_library(src, &err);
+        fn = lib ? [lib newFunctionWithName:fs->fn.name] : nil;
+        if (!fn) MDIE("fragment shader %s with a dual-source output: %s", fs->key, err.localizedDescription.UTF8String);
+        if (!fs->bpatch) fs->bpatch = [NSMutableDictionary dictionary];
+        fs->bpatch[key] = fn;
+        static int said; if (said++ < 8) MLOG("[totk] fragment shader %s: colour output 1 is the second source of a dual-source blend (color(0) index(1))", fs->key);
+    }
+    os_unfair_lock_unlock(&lock);
+    return fn;
+}
 static id<MTLFunction> vs_fn_for(NvShader *vs, NvShader *fs, int layered, int border) {
     static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT;
     if (layered && !vs_layerable(vs)) MDIE("vertex shader %s cannot write the render target array index", vs->key);
@@ -6416,6 +6451,7 @@ static void pso_pend_reclaim(uint64_t submit) {
 }
 static void pso_pend_kick(const pso_key *k, NvShader *vs, NvShader *fs) {   // 提交线程调：没在缓存、没在表里才丢 | Called by the submit thread: kick only if it is neither in the cache nor in the table
     if (hm_get_id(&g_pso, k)) return;
+    if (pso_dual_source(k)) return;   // its draw uses the dual-source fragment variant (fs_fn_dual), a different key: built at the draw
     pthread_mutex_lock(&g_pp_mu);
     pso_pend_reclaim(g_sub_serial);
     int at = pso_pend_find(k), slot = -1;
@@ -6449,6 +6485,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get(NvProg *pr, MTLRen
     if (g_mfx.role) k.a2c |= (uint32_t)g_mfx.role << 2;   // TOTK_MFX: scene / UI copy variant (see pso_desc)
     if (g_pso_lmap) { memcpy(k.lmap, g_pso_lmap, 8); k.fsfn = (__bridge void *)g_pso_fsfn; }
     __unsafe_unretained id<MTLFunction> bfn = !g_pso_lmap && !g_mfx.role ? fs_fn_border(fs, k.dfmt == 0) : nil;   // TOTK: sampler border colour emulation
+    if (!bfn && !g_pso_lmap && !g_mfx.role && pso_dual_source(&k)) bfn = fs_fn_dual(fs, k.dfmt == 0);   // dual-source blending (a border variant of such a shader keeps the plain outputs)
     if (bfn) k.fsfn = (__bridge void *)bfn;
     { float bc[8][4]; int ba[8], bn; if (border_key(vs, 0, bc, ba, &bn)) k.a2c |= PSO_VBORDER; }
     __unsafe_unretained id<MTLRenderPipelineState> cached = (__bridge id<MTLRenderPipelineState>)hm_get_ptr(&g_pso, &k);
