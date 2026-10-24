@@ -31,6 +31,8 @@
 #include <mach/mach.h>
 #include <pthread/qos.h>
 #include <dlfcn.h>
+#include <sys/event.h>
+#include <unistd.h>
 
 #define R_TIMEOUT     0xEA01u   // 内核模块 1，描述 117 | Kernel module 1, description 117
 #define R_CANCELLED   0xEC01u   // 118
@@ -219,16 +221,54 @@ void runtime_core_checkpoint(void) {
 }
 int runtime_current_core(void) { thr_t *t = me_or_null(); return t ? (t->cur_core >= 0 ? t->cur_core : t->core) : -1; }
 
-/* Positive guest sleeps release the virtual core in the SVC caller. */
+/* Positive guest sleeps release the virtual core in the SVC caller.
+ * The default host timer coalescing adds several milliseconds to short guest
+ * sleeps even at USER_INTERACTIVE QoS. Use a critical timer, without spinning
+ * or changing the guest duration. Each host thread owns its queue until exit. */
+static pthread_key_t sleep_queue_key;
+static pthread_once_t sleep_queue_once = PTHREAD_ONCE_INIT;
+static int sleep_queue_error;
+static void sleep_queue_close(void *value) { close((int)(intptr_t)value - 1); }
+static void sleep_queue_init(void) { sleep_queue_error=pthread_key_create(&sleep_queue_key,sleep_queue_close); }
 static void host_sleep_ns(int64_t ns) {
-    struct timespec ts = {ns / 1000000000, ns % 1000000000}; nanosleep(&ts, NULL);
+    if(ns<=0) return;
+    uint64_t deadline=now_ns()+(uint64_t)ns;
+    pthread_once(&sleep_queue_once,sleep_queue_init);
+    int fd=-1;
+    if(!sleep_queue_error) {
+        intptr_t value=(intptr_t)pthread_getspecific(sleep_queue_key);
+        if(value) fd=(int)value-1;
+        else {
+            fd=kqueue();
+            if(fd>=0 && pthread_setspecific(sleep_queue_key,(void *)(intptr_t)(fd+1))) { close(fd);fd=-1; }
+        }
+    }
+    for(;;) {
+        uint64_t now=now_ns(); if(now>=deadline) return;
+        uint64_t remaining=deadline-now;
+        if(fd>=0) {
+            struct kevent event;
+            EV_SET(&event,1,EVFILT_TIMER,EV_ADD|EV_ONESHOT,NOTE_NSECONDS|NOTE_CRITICAL,(intptr_t)remaining,NULL);
+            int n=kevent(fd,&event,1,&event,1,NULL);
+            if(n==1 && !(event.flags&EV_ERROR)) continue;
+            if(n<0 && errno==EINTR) continue;
+            /* Resource failure: preserve SleepThread's wait semantics. */
+            fd=-1;
+        } else {
+            struct timespec ts={(time_t)(remaining/1000000000),(long)(remaining%1000000000)};
+            nanosleep(&ts,NULL);
+        }
+    }
 }
 
 static int64_t block(thr_t *t,int kind,int64_t ns) {
     if (ns == 0) return block_inner(t, kind, ns);
     uint64_t start=thread_profile_on?now_ns():0;
     core_put(t); int64_t r = block_inner(t, kind, ns);
-    if(thread_profile_on) t->prof[8+kind]+=now_ns()-start;
+    if(thread_profile_on) {
+        uint64_t elapsed=now_ns()-start;t->prof[8+kind]+=elapsed;
+        if(ns>0){t->prof[25]+=(uint64_t)ns;t->prof[26]+=elapsed;t->prof[27]++;t->prof[28]+=r==R_TIMEOUT;}
+    }
     core_take(t);
     if(thread_profile_on && t->wake_ns){t->prof[6]+=now_ns()-t->wake_ns;t->prof[7]++;t->wake_ns=0;}
     return r;
