@@ -1,4 +1,4 @@
-"""Exercise the positive SleepThread host wait compiled from real threads.c."""
+"""Timed waits, signals and core ownership in the real threads.c."""
 from pathlib import Path
 import os
 import subprocess

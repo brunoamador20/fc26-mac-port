@@ -1,4 +1,4 @@
-"""Exercise the positive SleepThread host wait compiled from real threads.c."""
+"""Notification queue and kernel event use the real service and threads.c."""
 from pathlib import Path
 import os
 import subprocess

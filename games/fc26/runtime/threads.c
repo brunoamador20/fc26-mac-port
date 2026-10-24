@@ -29,6 +29,7 @@
 #include <sys/mman.h>
 #include <time.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <pthread/qos.h>
 #include <dlfcn.h>
 #include <sys/event.h>
@@ -170,22 +171,34 @@ static int profile_critical_wait(thr_t *t,uint64_t deadline,const struct timespe
     return now_ns()>=deadline?ETIMEDOUT:0;
 }
 
+/* FC26 SDK GetThreadNamePointer is a load at ThreadType+0x1a0.
+ * Read diagnostically from the host; never execute guest SDK without a core. */
+static void profile_thread_name(uint64_t arg,char name[64]) {
+    strcpy(name,"unknown");
+    if(!arg) return;
+    uint64_t pointer=0;mach_vm_size_t got=0;char value[64]={0};
+    if(mach_vm_read_overwrite(mach_task_self(),arg+0x1a0,8,(mach_vm_address_t)(uintptr_t)&pointer,&got)!=KERN_SUCCESS || got!=8 || !pointer) return;
+    if(mach_vm_read_overwrite(mach_task_self(),pointer,63,(mach_vm_address_t)(uintptr_t)value,&got)!=KERN_SUCCESS) return;
+    for(unsigned i=0;i<got && value[i];i++) if((unsigned char)value[i]<32 || (unsigned char)value[i]>126) return;
+    if(value[0]) memcpy(name,value,sizeof value);
+}
+
 void dm_thread_profile_frame(uint64_t frame) {
     pthread_once(&profile_once,profile_init);
     if (!thread_profile_on || frame % 300) return;
-    struct sample { uint32_t h; int prio,core,svc,kind; uint64_t entry,addr,p[32]; } rows[256];
+    struct sample { uint32_t h; int prio,core,svc,kind; uint64_t entry,arg,addr,p[32]; } rows[256];
     unsigned n=0;
     profile_lock();
     for(thr_t *t=g_all;t && n<256;t=t->all) {
         struct sample *r=&rows[n++]; r->h=t->handle;r->prio=t->prio;r->core=t->cur_core;
-        r->svc=t->last_svc;r->kind=t->wkind;r->entry=t->entry;r->addr=t->wkind==2?t->wkey:t->waddr;
+        r->svc=t->last_svc;r->kind=t->wkind;r->entry=t->entry;r->arg=t->arg;r->addr=t->wkind==2?t->wkey:t->waddr;
         memcpy(r->p,t->prof,sizeof r->p); memset(t->prof,0,sizeof t->prof);
     }
     profile_unlock();
-    for(unsigned i=0;i<n;i++) { struct sample *r=&rows[i];
-        fprintf(stderr,"[thread-profile] frame=%llu h=%x entry=%llx prio=%d core=%d svc=%x kind=%d addr=%llx Gwait_us=%llu Ghold_us=%llu Gcalls=%llu core_us=%llu core_n=%llu grant_us=%llu wake_us=%llu wake_n=%llu lock_us=%llu cond_us=%llu addr_us=%llu sync_us=%llu sleep_us=%llu yield_us=%llu sleep_req_us=%llu sleep_n=%llu yield_n=%llu hold_us=%llu sync_n=%llu sync_zero=%llu sync_ready=%llu sync_bad=%llu sync_timeout=%llu sync_inf=%llu timed_req_us=%llu timed_us=%llu timed_n=%llu timeout_n=%llu\n",
+    for(unsigned i=0;i<n;i++) { struct sample *r=&rows[i];char name[64];profile_thread_name(r->arg,name);
+        fprintf(stderr,"[thread-profile] frame=%llu h=%x entry=%llx prio=%d core=%d svc=%x kind=%d addr=%llx Gwait_us=%llu Ghold_us=%llu Gcalls=%llu core_us=%llu core_n=%llu grant_us=%llu wake_us=%llu wake_n=%llu lock_us=%llu cond_us=%llu addr_us=%llu sync_us=%llu sleep_us=%llu yield_us=%llu sleep_req_us=%llu sleep_n=%llu yield_n=%llu hold_us=%llu sync_n=%llu sync_zero=%llu sync_ready=%llu sync_bad=%llu sync_timeout=%llu sync_inf=%llu timed_req_us=%llu timed_us=%llu timed_n=%llu timeout_n=%llu name=%s\n",
         (unsigned long long)frame,r->h,(unsigned long long)r->entry,r->prio,r->core,r->svc,r->kind,(unsigned long long)r->addr,
-        r->p[0]/1000,r->p[1]/1000,r->p[2],r->p[3]/1000,r->p[4],r->p[5]/1000,r->p[6]/1000,r->p[7],r->p[9]/1000,r->p[10]/1000,r->p[11]/1000,r->p[12]/1000,r->p[13]/1000,r->p[14]/1000,r->p[15]/1000,r->p[16],r->p[17],r->p[18]/1000,r->p[19],r->p[20],r->p[21],r->p[22],r->p[23],r->p[24],r->p[25]/1000,r->p[26]/1000,r->p[27],r->p[28]);
+        r->p[0]/1000,r->p[1]/1000,r->p[2],r->p[3]/1000,r->p[4],r->p[5]/1000,r->p[6]/1000,r->p[7],r->p[9]/1000,r->p[10]/1000,r->p[11]/1000,r->p[12]/1000,r->p[13]/1000,r->p[14]/1000,r->p[15]/1000,r->p[16],r->p[17],r->p[18]/1000,r->p[19],r->p[20],r->p[21],r->p[22],r->p[23],r->p[24],r->p[25]/1000,r->p[26]/1000,r->p[27],r->p[28],r->h==0x1001?"main":name);
     }
 }
 
