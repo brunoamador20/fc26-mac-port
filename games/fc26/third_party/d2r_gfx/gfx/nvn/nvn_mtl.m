@@ -986,6 +986,11 @@ static int g_nupd, g_nshadow; static inline int upd_guard(uint64_t lo, uint64_t 
    and whether they passed the depth / stencil tests). Metal writes capture files only if MTL_CAPTURE_ENABLED=1 was set
    when the game started. */
 static _Atomic uint64_t g_cur_frame;   // tentative declaration, defined further down
+/* TOTK diagnostics (texture streaming, TOTK_B2T_LOG): GPU writers of memory, from frame TOTK_B2T_CS_FROM on, at most 20000 lines each. */
+static int b2t_log_gate(_Atomic uint64_t *n) {
+    static int on = -1; static long from; if (on < 0) { on = getenv("TOTK_B2T_LOG") != NULL; const char *e = getenv("TOTK_B2T_CS_FROM"); from = e ? atol(e) : 0; }
+    return on && (long)atomic_load(&g_cur_frame) >= from && atomic_fetch_add(n, 1) < 20000;
+}
 static char g_cap_path[1024]; static long g_cap_at = -1; static int g_cap_on;
 void dm_gfx_gpucapture_next(const char *path) {
     snprintf(g_cap_path, sizeof g_cap_path, "%s", path); g_cap_at = (long)atomic_load(&g_cur_frame) + 2;
@@ -1537,6 +1542,8 @@ void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
     pend_note(dst, n, (const void *)(uintptr_t)src, 1); pd_xfer("copy", src, dst, n);
     usnap_drop(dst, n);   // TOTK: later readers see the copied bytes (memory, on the GPU timeline)
     anom_note_xfer('Y', src, dst, n, NULL);   // TOTK_ANOMALY
+    { static int on = -1; static uint64_t k; if (on < 0) on = getenv("TOTK_B2T_LOG") != NULL;   // TOTK diagnostics (texture streaming): buffer copies
+      if (on && ++k <= 40000) MLOG("[b2b] F%llu src=%#llx dst=%#llx n=%#llx", (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n); }
     void *sb, *db; uint64_t so, dof;
     if (!mtl_addr(src, n, &sb, &so) || !mtl_addr(dst, n, &db, &dof))
         MDIE("缓冲拷贝地址不在任何内存池内 src=%#llx dst=%#llx n=%#llx", (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n);
@@ -4472,6 +4479,8 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
     for (int i = 0; i < R.rt.n; i++) {
         if (!R.rt.color[i] || (clear_only == 1 && !R.clear_c[i])) continue; BOTW_RT_DUP_SKIP(i)
         attach(pd.colorAttachments[i], R.rt.color[i], &R.rt.cview[i], R.rt.has_cview[i]);
+        { static _Atomic uint64_t n; const tex_t *ot = R.rt.color[i];   // TOTK diagnostics (texture streaming): render targets as GPU writers of memory
+          if (b2t_log_gate(&n)) MLOG("[b2t-rt] F%llu c%d ser=%llu mem=%p size=%llu fmt=%#x %ux%u", (unsigned long long)atomic_load(&g_cur_frame), i, (unsigned long long)ot->serial, (void *)ot->mem, (unsigned long long)ot->L.size, ot->d.format, ot->d.width, ot->d.height); }
         { const tex_t *ot = R.rt.color[i]; BOTW_TEX_FOLLOW(ot) int was = gpu_owned(ot->serial); gpu_owned_mark(ot->serial);
           if (ot->mem && tex_mirrored(ot)) wb_note(ot);
           static int ownlog = -1; if (ownlog < 0) ownlog = getenv("DM_NVN_OWNLOG") != NULL;
@@ -4583,8 +4592,8 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
         uint64_t db = dt ? (comb ? whole / 5 * 4 : whole) : 0, sb = stt && stt != dt ? (comb ? whole / 5 : whole) : stt ? whole - db : 0;
         if (dt) { natt++; g_bw_store += db; if (pd.depthAttachment.loadAction == MTLLoadActionLoad) { g_bw_load += db; nload++; } }
         if (stt) { natt += !dt; g_bw_store += sb; if (pd.stencilAttachment.loadAction == MTLLoadActionLoad) { g_bw_load += sb; nload += !dt; } }
-        if (dt) PD("P %llu d ser=%llu fmt=%lu %lux%lu lv%lu sl%lu %s mem=%p", g_stat_pass + 1, R.rt.depth->serial, (unsigned long)dt.pixelFormat,
-                   (unsigned long)dt.width, (unsigned long)dt.height, (unsigned long)pd.depthAttachment.level, (unsigned long)pd.depthAttachment.slice, pd.depthAttachment.loadAction == MTLLoadActionClear ? "clear" : "load"  , (void *)R.rt.depth->mem);
+        if (dt) PD("P %llu d ser=%llu fmt=%lu %lux%lu lv%lu sl%lu %s depth=%g mem=%p", g_stat_pass + 1, R.rt.depth->serial, (unsigned long)dt.pixelFormat,
+                   (unsigned long)dt.width, (unsigned long)dt.height, (unsigned long)pd.depthAttachment.level, (unsigned long)pd.depthAttachment.slice, pd.depthAttachment.loadAction == MTLLoadActionClear ? "clear" : "load", pd.depthAttachment.clearDepth, (void *)R.rt.depth->mem);
         else if (stt) PD("P %llu s ser=%llu fmt=%lu %lux%lu %s（只挂模板）", g_stat_pass + 1, R.rt.depth->serial, (unsigned long)stt.pixelFormat,
                    (unsigned long)stt.width, (unsigned long)stt.height, pd.stencilAttachment.loadAction == MTLLoadActionClear ? "clear" : "load");
     }
@@ -7430,6 +7439,8 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
         } else if (b->kind == NVN_RB_IMG) {   // 可写贴图：NVN 图像槽 r（BindImages）↔ D3D u_r | Writable texture: NVN image slot r (BindImages) ↔ D3D u_r
             int tid = reg < 32 ? (int)(S.img[nvn_stage][reg] & 0xfffff) : 0;
             void *tv = NULL; uint64_t trid = tid ? tex_fast_rid(tid, &tv) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
+            { static _Atomic uint64_t n;   // TOTK diagnostics (texture streaming): image slots as GPU writers of memory
+              if (tid > 0 && tid < g_ntreg && b2t_log_gate(&n)) MLOG("[b2t-img] F%llu st%d reg%d ser=%llu mem=%p size=%llu fmt=%#x", (unsigned long long)atomic_load(&g_cur_frame), nvn_stage, reg, (unsigned long long)g_treg[tid].t.serial, (void *)g_treg[tid].t.mem, (unsigned long long)g_treg[tid].t.L.size, g_treg[tid].t.d.format); }
             if (passdump()) PD("W %llu st%d reg%d tid=%d %s ser=%llu", g_stat_pass, nvn_stage, reg, tid, t ? "实" : "哑", t && tid < g_ntreg ? g_treg[tid].t.serial : 0ull);
             if (t && !(t.usage & MTLTextureUsageShaderWrite) && tid > 0 && tid < g_ntreg && g_treg[tid].ok) {
                 /* The base gets ShaderWrite first (a copy when it was made without it); the registered view is then
@@ -10675,6 +10686,13 @@ static void dispatch(const p_dispatch *dp) {
         for (int i = 0; i < 16 && o < sizeof b - 64; i++) if (S.ssbo[5][i].addr) o += snprintf(b + o, sizeof b - o, " s%d=%#llx+%llu", i, (unsigned long long)S.ssbo[5][i].addr, (unsigned long long)S.ssbo[5][i].size);
         PD("C %llu cs=%.16s grid=%ux%ux%u%s tg=%ux%ux%u%s", g_stat_pass, cs->key, g_dispatch_grid[0], g_dispatch_grid[1], g_dispatch_grid[2], indirect ? " indirect" : "", tg[0], tg[1], tg[2], b);
     }
+    { static const char *tdp, *tdcs; static int tdi, tdone;   // TOTK diagnostics: TOTK_B2T_TEXDUMP=<path with %d> + TOTK_B2T_TEXDUMP_CS=<compute key prefix>: texdump + passdump of the frame after its first dispatch
+      if (!tdi) { tdi = 1; tdp = getenv("TOTK_B2T_TEXDUMP"); tdcs = getenv("TOTK_B2T_TEXDUMP_CS"); }
+      if (tdp && tdcs && !tdone && !strncmp(cs->key, tdcs, strlen(tdcs))) { tdone = 1; dm_gfx_texdump_next(tdp); dm_gfx_passdump_next(1); MLOG("[b2t] texdump armed at the first dispatch of %s", tdcs); } }
+    { static _Atomic uint64_t n;   // TOTK diagnostics (texture streaming): dispatches and their storage buffers
+      if (b2t_log_gate(&n)) { char b[600]; size_t o = 0;
+        for (int i = 0; i < 16 && o < sizeof b - 64; i++) if (S.ssbo[5][i].addr) o += snprintf(b + o, sizeof b - o, " s%d=%#llx+%llu", i, (unsigned long long)S.ssbo[5][i].addr, (unsigned long long)S.ssbo[5][i].size);
+        MLOG("[b2t-cs] F%llu cs=%.16s grid=%ux%ux%u%s%s", (unsigned long long)atomic_load(&g_cur_frame), cs->key, g_dispatch_grid[0], g_dispatch_grid[1], g_dispatch_grid[2], indirect ? " indirect" : "", b); } }
     encode_args(ce, cs, 5, 0);
     if (atomic_load(&g_draw_log) > 0) MLOG("[uw] F%llu pass %llu dispatch cs %.8s grid %dx%dx%d", (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, cs->key, dp->x, dp->y, dp->z);
     if (!indirect) enc_c_dispatch(ce, MTLSizeMake(dp->x, dp->y, dp->z), MTLSizeMake(tg[0], tg[1], tg[2]));
@@ -10682,6 +10700,35 @@ static void dispatch(const p_dispatch *dp) {
         [(id<MTL4ComputeCommandEncoder>)ce dispatchThreadgroupsWithIndirectBuffer:((__bridge id<MTLBuffer>)ib).gpuAddress + io threadsPerThreadgroup:MTLSizeMake(tg[0], tg[1], tg[2])];
     else [ce dispatchThreadgroupsWithIndirectBuffer:(__bridge id<MTLBuffer>)ib indirectBufferOffset:io threadsPerThreadgroup:MTLSizeMake(tg[0], tg[1], tg[2])];
     if (!reuse) enc_c_end(ce);
+    {   /* TOTK diagnostics TOTK_B2T_ENC_CS=<compute key prefix> (texture streaming): for the first 6 dispatches, the texels the
+           shader reads at (0,0) of its texture slot 0 (every level) and the first words it wrote to image slot 0, read back
+           once the GPU is done, with cp_c3[0] (the level it reads). */
+        static const char *pre; static int init, nprobe; static long from;
+        if (!init) { init = 1; pre = getenv("TOTK_B2T_ENC_CS"); const char *e = getenv("TOTK_B2T_CS_FROM"); from = e ? atol(e) : 0; }
+        if (pre && nprobe < 6 && (long)atomic_load(&g_cur_frame) >= from && !strncmp(cs->key, pre, strlen(pre))) {
+            int k = nprobe++; registry_lock();
+            int ti = (int)(S.tex[5][0] & 0xfffff), ii = (int)(S.img[5][0] & 0xfffff); void *tv = NULL, *iv = NULL;
+            if (ti) tex_fast_rid(ti, &tv); if (ii) tex_fast_rid(ii, &iv);
+            uint64_t tser = ti && ti < g_ntreg ? g_treg[ti].t.serial : 0, iser = ii && ii < g_ntreg ? g_treg[ii].t.serial : 0;
+            registry_unlock();
+            id<MTLTexture> it = (__bridge id<MTLTexture>)tv, ot = (__bridge id<MTLTexture>)iv;
+            const p_bind_buf *u = &S.ubo[5][0]; uint32_t c3[4] = {0}; if (u->addr && u->size >= 16) memcpy(c3, (const void *)(uintptr_t)u->addr, 16);
+            MLOG("[b2t-enc] #%d F%llu in ser=%llu %s %lux%lu lv%lu fmt %lu | out ser=%llu %lux%lu lv%lu fmt %lu | cp_c3[0]=%08x %08x %08x %08x grid %ux%u", k, (unsigned long long)atomic_load(&g_cur_frame),
+                 (unsigned long long)tser, it ? "" : "(none)", (unsigned long)it.width, (unsigned long)it.height, (unsigned long)it.mipmapLevelCount, (unsigned long)it.pixelFormat,
+                 (unsigned long long)iser, (unsigned long)ot.width, (unsigned long)ot.height, (unsigned long)ot.mipmapLevelCount, (unsigned long)ot.pixelFormat, c3[0], c3[1], c3[2], c3[3], g_dispatch_grid[0], g_dispatch_grid[1]);
+            if (it && ot && it.pixelFormat == MTLPixelFormatRGBA8Unorm && ot.textureType == MTLTextureType2D) {
+                id<MTLBuffer> pb = [g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared]; res_add(pb);
+                id<MTL4ComputeCommandEncoder> b = blit(); NSUInteger nl = MIN(it.mipmapLevelCount, 10u);
+                for (NSUInteger l = 0; l < nl; l++) enc_b_copy_texture_buffer(b, it, 0, l, MTLOriginMake(0, 0, 0), MTLSizeMake(MIN(4u, MAX(it.width >> l, 1u)), 1, 1), pb, 64 * l, 64, 64);
+                enc_b_copy_texture_buffer(b, ot, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(MIN(4u, ot.width), 1, 1), pb, 1024, 256, 256);
+                [g_commit_blocks addObject:^{ const uint8_t *q = pb.contents; char h[1200]; size_t o = 0;
+                    for (NSUInteger l = 0; l < nl && o < 1000; l++) { o += snprintf(h + o, sizeof h - o, " L%lu:", (unsigned long)l); for (int i = 0; i < 16; i++) o += snprintf(h + o, sizeof h - o, "%02x", q[64 * l + i]); }
+                    char w[80]; for (int i = 0; i < 32; i++) snprintf(w + 2 * i, 3, "%02x", q[1024 + i]);
+                    MLOG("[b2t-enc] #%d done: input texels at (0,0)%s | output words %s", k, h, w); }];
+                defer_obj_release(pb);
+            }
+        }
+    }
     bright_lut(cs);   // 3D 画面加亮：游戏算完调色表之后重写 | 3D picture brightening: rewrite after the game finishes computing the color lookup table
     /* TOTK_EXPO_LOG=<file> (diagnostic): after each dispatch of the exposure kernel (ae725063), copy floats 96..127 of its
        storage buffer 0 (statistics; exposure at 108..111) into a shared ring and write them with the frame number once
@@ -10715,6 +10762,9 @@ static void copy_t2b(const p_copy_b2t *c) {
     upd_guard(c->src, c->src + L.span);   // TOTK: renamed uniform updates before a GPU write to the range
     if (!mtl_addr(c->src, L.span, &mb, &mo)) { RED_ONCE(31, "贴图→缓冲拷贝的目标不在内存池里"); return; }
     usnap_drop(c->src, L.span);   // TOTK: a GPU write: no uniform copy of these bytes from here on
+    { static _Atomic uint64_t n;   // TOTK diagnostics (texture streaming): texture -> buffer copies as GPU writers of memory
+      if (b2t_log_gate(&n)) MLOG("[b2t-t2b] F%llu ser=%llu fmt=%#x %ux%u mem=%p | region %d,%d %dx%d level %u -> dst=%#llx span=%zu", (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)c->tex->serial, c->tex->d.format,
+                                 c->tex->d.width, c->tex->d.height, (void *)c->tex->mem, c->r.xoffset, c->r.yoffset, c->r.width, c->r.height, level, (unsigned long long)c->src, (size_t)L.span); }
     id<MTL4ComputeCommandEncoder> b = blit(); BOTW_T2B_NOTE(c, t, mb, mo, L.span) BOTW_GPU_COPY_SUPERSEDES(mb, mo, L.span)
     if (is3d && img == L.tight)
         enc_b_copy_texture_buffer(b, t, 0, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, c->r.zoffset), MTLSizeMake(c->r.width, c->r.height, nz), (__bridge id<MTLBuffer>)mb, mo, row, img);
@@ -10833,6 +10883,13 @@ static void copy_b2t(const p_copy_b2t *c) {
     void *mb; uint64_t mo;
     upd_guard(c->src, c->src + L.span);   // TOTK: renamed uniform updates before a GPU read of the range
     if (!mtl_addr(c->src, L.span, &mb, &mo)) { RED_ONCE(23, "缓冲→贴图拷贝的源不在内存池里"); return; }
+    { static int on = -1; static uint64_t n; if (on < 0) on = getenv("TOTK_B2T_LOG") != NULL;   // TOTK diagnostics: buffer -> texture copies (texture streaming)
+      if (on && ++n <= 20000) { const uint8_t *sp = [(__bridge id<MTLBuffer>)mb contents]; uint64_t nz = 0; if (sp) for (uint64_t i = 0; i + 8 <= L.span; i += 8) nz += *(const uint64_t *)(sp + mo + i) != 0;
+        MLOG("[b2t] F%llu ser=%llu fmt=%#x %ux%u lv%u tex mem=%p | region %d,%d,%d %dx%dx%d level %u src=%#llx span=%zu nz8=%llu", (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)c->tex->serial, c->tex->d.format,
+             c->tex->d.width, c->tex->d.height, c->tex->d.levels, (void *)c->tex->mem, c->r.xoffset, c->r.yoffset, c->r.zoffset, c->r.width, c->r.height, c->r.depth, level, (unsigned long long)c->src, (size_t)L.span, (unsigned long long)nz);
+        { static long w = -1; static int armed; if (w < 0) { const char *e = getenv("TOTK_B2T_WATCH"); w = e ? atol(e) : 0; }   // TOTK_B2T_WATCH=<frame>: from that frame, arm the guest write watch on the staging page of the first BC1 / BC4 level-0 copy: the next writer of that ring slot is logged
+          if (w > 0 && (long)atomic_load(&g_cur_frame) >= w && !armed && level == 0 && (c->tex->d.format == 0x46 || c->tex->d.format == 0x49) && c->r.width >= 128) { extern void runtime_watch_set(uintptr_t, size_t); armed = 1; runtime_watch_set((uintptr_t)c->src & ~(uintptr_t)0x3fff, 0x4000); MLOG("[b2t] watch armed on src %#llx", (unsigned long long)c->src); } }
+        if (sp && L.span >= 4096) for (int r = 0; r < 3; r++) { char hx[80]; size_t o = (size_t)r * L.row; for (int i = 0; i < 32; i++) snprintf(hx + 2 * i, 3, "%02x", sp[mo + o + i]); MLOG("[b2t]   row %d @%#zx: %s flags=%#x row=%zu", r, o, hx, c->flags, (size_t)L.row); } } }
     uint32_t upf; int ubpp;
     if (pf_astc4(t.pixelFormat) && bc1_fmt(c->tex->d.format)) {   // TOTK: BC1 stored as ASTC 4x4: the source blocks are transcoded on the CPU
         const uint8_t *src = [(__bridge id<MTLBuffer>)mb contents];
@@ -10996,6 +11053,10 @@ static void copy_t2t(const p_copy_t2t *c) {
         if (zskip_has(c->src->serial, sl, ss)) zskip_add(c->dst->serial, dl, ds);
     }
     id<MTLTexture> s = tex_mtl(c->src), d = tex_mtl(c->dst);
+    { static _Atomic uint64_t n;   // TOTK diagnostics (texture streaming): texture -> texture copies
+      if (c->src && c->dst && b2t_log_gate(&n)) MLOG("[b2t-t2t] F%llu src=%llu lv%u %dx%d -> dst=%llu lv%u %dx%d flags=%#x fmt %lu->%lu", (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)c->src->serial,
+          c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, c->sr.width, c->sr.height, (unsigned long long)c->dst->serial, c->has_dv && c->dv.set_levels ? c->dv.base_level : 0, c->dr.width, c->dr.height, c->flags,
+          (unsigned long)(s ? s.pixelFormat : 0), (unsigned long)(d ? d.pixelFormat : 0)); }
     PD("T src=%llu dst=%llu %dx%dx%d→%dx%dx%d flags=%#x", c->src->serial, c->dst->serial, c->sr.width, c->sr.height, c->sr.depth, c->dr.width, c->dr.height, c->dr.depth, c->flags);
     if (!s || !d) return;
     unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
