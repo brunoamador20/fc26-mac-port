@@ -200,9 +200,13 @@ class AppLaunch(unittest.TestCase):
                 self.assertEqual(r.returncode, 0, r.stderr)
                 return json.loads(r.stdout)
             p = prepare()
-            binary = Path(p['app']) / 'Contents/MacOS/FC 26'
+            # The tools and boot_gpu.sh find the player's game by its command line ("fc26-native rewritten ...").
+            binary = Path(p['app']) / 'Contents/MacOS/fc26-native'
+            self.assertTrue(binary.is_file())
             self.assertFalse(binary.is_symlink())
             info = plistlib.loads((Path(p['app']) / 'Contents/Info.plist').read_bytes())
+            self.assertEqual(info['CFBundleExecutable'], 'fc26-native')
+            self.assertEqual(info['CFBundleName'], 'FC 26')
             self.assertEqual(info['CFBundleIdentifier'], 'org.macnativegames.fc26.game')
             self.assertEqual(info['LSApplicationCategoryType'], 'public.app-category.sports-games')
             signature = subprocess.run(['codesign', '--verify', '--strict', p['app']], capture_output=True, text=True)
@@ -216,7 +220,7 @@ class AppLaunch(unittest.TestCase):
             newer = prepare("1")
             expected = dict(p["environment"], FC26_FPS60="1")
             self.assertEqual(newer["environment"], expected)
-            self.assertEqual(subprocess.run([str(Path(newer['app']) / 'Contents/MacOS/FC 26')]).returncode, 1)
+            self.assertEqual(subprocess.run([str(Path(newer['app']) / 'Contents/MacOS/fc26-native')]).returncode, 1)
 
 
 

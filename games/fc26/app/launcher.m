@@ -256,8 +256,9 @@ static NSURL *prepare_game_app(LaunchPlan *p, NSError **error) {
     NSString *contents = [app stringByAppendingPathComponent:@"Contents"];
     NSString *mac = [contents stringByAppendingPathComponent:@"MacOS"];
     if (![fm createDirectoryAtPath:mac withIntermediateDirectories:YES attributes:nil error:error] ||
-        ![fm copyItemAtPath:p.args[0] toPath:[mac stringByAppendingPathComponent:@"FC 26"] error:error]) return nil;
-    NSDictionary *info = @{@"CFBundleExecutable": @"FC 26", @"CFBundleIdentifier": @"org.macnativegames.fc26.game",
+        ![fm copyItemAtPath:p.args[0] toPath:[mac stringByAppendingPathComponent:@"fc26-native"] error:error]) return nil;
+    /* Executable keeps the runtime's name: the tools and boot_gpu.sh find the player's game by "fc26-native rewritten". */
+    NSDictionary *info = @{@"CFBundleExecutable": @"fc26-native", @"CFBundleIdentifier": @"org.macnativegames.fc26.game",
         @"CFBundleName": @"FC 26", @"CFBundlePackageType": @"APPL", @"CFBundleVersion": @"1",
         @"LSApplicationCategoryType": @"public.app-category.sports-games", @"NSHighResolutionCapable": @YES,
         @"CFBundleIconFile": @"AppIcon"};
