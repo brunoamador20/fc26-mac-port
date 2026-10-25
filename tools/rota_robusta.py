@@ -87,6 +87,7 @@ class Route:
         return path,rows
     def confirm(self,path,rows,label,pattern,box=None):
         if not re.search(pattern,norm(' '.join(r['text'] for r in rows))): return False
+        if box is None and label=='lado': box=(.44,.47,.56,.51)
         if box is None and label=='entrada_em_campo': box=(.27,.38,.40,.66)
         if box is None:
             hit=next((r for r in rows if re.search(pattern,norm(r['text']))),None)
