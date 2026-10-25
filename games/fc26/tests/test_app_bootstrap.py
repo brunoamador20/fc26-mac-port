@@ -35,9 +35,13 @@ class AppBootstrap(unittest.TestCase):
             self.assertEqual(previous.read_text(), 'old log')
             self.assertIn(f'stdout:{root.resolve()}:new:absent', log.read_text())
             self.assertIn('stderr:consumed', log.read_text())
+            self.assertTrue(log.read_text().startswith(f'[launcher] work {root}, present ? Hz, display ?, fullscreen no, window ?, drawable scale 1, MetalFX off, sound on\n'))
             env['FC26_APP_BOOTSTRAP'] = '{}'
             bad = subprocess.run([str(root / 'runtime')], env=env, capture_output=True)
             self.assertEqual(bad.returncode, 7)
+            self.assertIn(b'fc26-bootstrap-error.log', bad.stderr)
+            error_path = Path(bad.stderr.decode().split('Veja ', 1)[1].strip())
+            self.assertIn('não conseguiu preparar', error_path.read_text())
 
 
 if __name__ == '__main__':

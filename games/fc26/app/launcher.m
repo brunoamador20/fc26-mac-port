@@ -292,7 +292,9 @@ static BOOL open_game(LaunchPlan *p, NSError **error) {
     NSWorkspaceOpenConfiguration *config = [NSWorkspaceOpenConfiguration configuration];
     config.createsNewApplicationInstance = YES;
     config.arguments = [p.args subarrayWithRange:NSMakeRange(1, p.args.count - 1)];
-    config.environment = @{@"FC26_APP_BOOTSTRAP": [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]};
+    NSMutableDictionary *initial = [payload[@"environment"] mutableCopy];
+    initial[@"FC26_APP_BOOTSTRAP"] = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    config.environment = initial;
     __block BOOL done = NO, ok = NO; __block NSError *launchError = nil;
     [NSWorkspace.sharedWorkspace openApplicationAtURL:app configuration:config completionHandler:^(NSRunningApplication *running, NSError *e) {
         dispatch_async(dispatch_get_main_queue(), ^{
