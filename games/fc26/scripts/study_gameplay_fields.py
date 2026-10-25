@@ -31,6 +31,8 @@ def main():
               0x66: 'EnableMultipleAccelCurveBuckets', 0x4e: 'EnableOffBallMarkingSpecificAccel',
               0x57: 'EnableLocomotionProceduralLean', 0x71: 'EnableRunningShield',
               0x30: 'CpuAiObjectivesUpdateMode', 0x81: 'EnableHighPrequencyPerceptionUpdate',
+              0x51: 'EnablePPCriticalReducedEvaluation',
+              0x56: 'EnablePPAlternateFrameOptimization',
               0x5f: 'EnableExtraPassEvaluations'}
     with args.output.open('w') as out:
         out.write('Bounded direct accesses only; all addresses are main module offsets.\n')
