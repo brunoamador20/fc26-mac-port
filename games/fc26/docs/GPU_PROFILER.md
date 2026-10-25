@@ -61,3 +61,11 @@ As marcações são relaxadas: as etapas podem se sobrepor. Sua soma não mede
 ocupação exclusiva de GPU. Ordene os grupos para investigação e confirme cada
 economia com imagens e uma coleta separada. Exclua os quadros de diagnóstico
 das comparações de fps: medir também tem custo.
+
+Para registrar somente o preparo de uma textura por desenho, use
+`DM_NVN_PASSDUMP_RT=512x1024`. O filtro considera o tamanho base dos
+destinos de cor e profundidade; os pedidos por quadro e pelo arquivo de
+comandos continuam funcionando junto com ele. Isso permite capturar uma
+etapa curta durante o carregamento sem registrar todos os menus. Como o
+registro completo altera o caminho de diagnóstico, essas execuções não
+servem como referência de velocidade. O filtro fica desligado por padrão.

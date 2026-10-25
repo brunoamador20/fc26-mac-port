@@ -3824,7 +3824,20 @@ static int passdump(void) {
     static long a0 = -2, a1; if (a0 == -2) { const char *e = getenv("DM_NVN_PASSDUMP"); a0 = e ? atol(e) : -1; a1 = e && strchr(e, '-') ? atol(strchr(e, '-') + 1) : a0; }
     long f = (long)atomic_load(&g_cur_frame);
     if (g_pd_at >= 0 && f >= g_pd_at && f < g_pd_at + g_pd_n) return 1;   // TOTK: "passdump <frames>" from TOTK_INPUT_FILE
-    return a0 >= 0 && f >= a0 && f <= a1;
+    if (a0 >= 0 && f >= a0 && f <= a1) return 1;
+    /* Optional base-size filter: capture a one-time texture producer without
+       dumping every menu and match frame. Frame requests remain additive. */
+    static int rt = -1; static unsigned rw, rh;
+    if (rt < 0) { const char *e = getenv("DM_NVN_PASSDUMP_RT"); rt = e && sscanf(e, "%ux%u", &rw, &rh) == 2 && rw && rh; }
+    if (rt && R.has_rt) {
+        for (int i = 0; i < R.rt.n && i < 8; i++) {
+            const tex_t *t = R.rt.color[i];
+            if (t && t->d.width == rw && t->d.height == rh) return 1;
+        }
+        const tex_t *t = R.rt.depth;
+        if (t && t->d.width == rw && t->d.height == rh) return 1;
+    }
+    return 0;
 }
 /* TOTK: TOTK_INPUT_FILE command "passdump <n>": full pass dump (as DM_NVN_PASSDUMP_ALL) of the n frames after the next one. */
 void dm_gfx_passdump_next(long n) { g_pd_n = n > 0 && n < 16 ? n : 1; g_pd_at = (long)atomic_load(&g_cur_frame) + 2; MLOG("[pass] 按输入文件转储帧 %ld 起 %ld 帧", g_pd_at, g_pd_n); }
