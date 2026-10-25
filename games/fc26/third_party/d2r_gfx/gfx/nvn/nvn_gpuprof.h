@@ -76,11 +76,19 @@ static void gp_begin(id e, char kind, MTL4RenderPassDescriptor *d) {
     if (!e) return;
     int i = gp_prepare(kind, d); if (i >= 0) { g_gp_encoder = e; gp_stamp(e, kind, g_gp_heap, 2 * i, 0); }
 }
-static void gp_end(id e) {
-    if (g_gp_cur < 0 || e != g_gp_encoder) return;
+static int gp_end(id e) {
+    if (g_gp_cur < 0 || e != g_gp_encoder) return -1;
     int i = g_gp_cur; gp_label *p = &g_gp_labels[i];
     p->draws = p->kind == 'O' ? 1 : (uint32_t)(g_stat_draw - p->draw0);
-    gp_stamp(e, p->kind, g_gp_heap, 2 * i + 1, 1); g_gp_cur = -1;
+    g_gp_cur = -1;
+    /* Metal does not write an after-fragment timestamp for a clear-only pass
+       (proved on M1: start is valid, end stays zero). Its end is instead marked
+       on the command buffer immediately AFTER endEncoding, including stores. */
+    if (p->kind == 'R' && !p->draws) return 2 * i + 1;
+    gp_stamp(e, p->kind, g_gp_heap, 2 * i + 1, 1); return -1;
+}
+static void gp_clear_end(id<MTL4CommandBuffer> cb, int index) {
+    if (index >= 0) [cb writeTimestampIntoHeap:g_gp_heap atIndex:(NSUInteger)index];
 }
 /* For copy/compute encoders, record the first texture destination. Buffer-only
  * encoders have no image dimensions or pixel format (zero in the capture). */
@@ -111,14 +119,23 @@ static void gp_finish(TotkCommitOptions *options) {
             if (feedback.error || hz <= 0 || data.length < (NSUInteger)(2 * n) * sizeof *t) {
                 MLOG("【红】GPUPROF: invalid results (%s)", feedback.error.description.UTF8String); free(labels); return;
             }
-            
+
             pthread_mutex_lock(&g_gp_file_mu);
             const char *path = getenv("DM_NVN_GPUPROF_FILE"); FILE *file = path ? fopen(path, "a") : NULL;
             if (!file) MLOG("【红】GPUPROF: output unavailable (set DM_NVN_GPUPROF_FILE)");
             int invalid = 0;
             for (int i = 0; i < n; i++) {
                 uint64_t a = t[2*i].timestamp, b = t[2*i+1].timestamp;
-                if (!a || !b || b < a) { invalid++; continue; }
+                if (!a || !b || b < a) {
+                    static unsigned invalid_reported;
+                    if (invalid_reported++ < 16) {
+                        const gp_label *p = &labels[i];
+                        MLOG("[gpuprof-invalid] frame %llu kind %c draws %u %ux%u key %s begin %llu end %llu",
+                            (unsigned long long)p->frame, p->kind, p->draws, p->w, p->h, p->key,
+                            (unsigned long long)a, (unsigned long long)b);
+                    }
+                    invalid++; continue;
+                }
                 const gp_label *p = &labels[i];
                 if (file) fprintf(file, "%llu\t%llu\t%c\t%.6f\t%u\t%u\t%u\t%u,%u,%u,%u,%u,%u,%u,%u\t%u\t%u\t%u\t%u\t%s\n",
                     (unsigned long long)p->frame, (unsigned long long)p->pass, p->kind, (b-a)/hz*1e3,

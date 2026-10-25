@@ -1091,13 +1091,13 @@ static MTL4VisibilityOptions bar_vis(void) { static int v = -1; if (v < 0) { con
 static MTL4VisibilityOptions blit_vis(void) { return bar_vis() | (g_blit_alias ? MTL4VisibilityOptionResourceAlias : 0); }
 #include "nvn_gpuprof.h"
 static inline void m4_end(id e) {
-    gp_end(e);
+    int gp_empty = gp_end(e);
     if (e == g_blit && g_blit_alias) {
         [g_blit barrierAfterStages:MTLStageAll beforeQueueStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionResourceAlias];
         g_blit_alias = 0;
     }
     if (bar_end_on() && [e conformsToProtocol:@protocol(MTL4CommandEncoder)]) [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageAll beforeQueueStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
-    [e endEncoding];
+    [e endEncoding]; gp_clear_end(g_cb, gp_empty);
 }
 /* TOTK_BARRIER_NARROW (2026-10-16): 2 = between render passes order only what the next pass can actually depend on: copies and
    compute before every stage, earlier render work before the fragment stage -- so the next pass's vertex stage (binning) overlaps
@@ -1113,11 +1113,11 @@ static int bar_narrow(void) {
 static int bar_start_mode(void) { return bar_start_on() ? (bar_narrow() == 2 ? 2 : 1) : 0; }
 static int bar_end_mode(void) { return bar_end_on() ? (bar_narrow() == 2 ? 2 : 1) : 0; }
 static inline void m4_end_render(id<MTL4RenderCommandEncoder> e) {
-    gp_end(e);   // end of a render encoder the replay thread encoded itself
+    int gp_empty = gp_end(e);   // end of a render encoder the replay thread encoded itself
     int m = bar_end_mode();
     if (m == 2) [e barrierAfterStages:MTLStageVertex | MTLStageFragment beforeQueueStages:MTLStageFragment | MTLStageBlit | MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
     else if (m) [e barrierAfterStages:MTLStageAll beforeQueueStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
-    [e endEncoding];
+    [e endEncoding]; gp_clear_end(g_cb, gp_empty);
 }
 /* TOTK_PASS_GPU=<frame>[:<frames>[:<stride>]]: GPU time of every encoder in those frames (with a stride, only every
    stride-th frame of the range), from command-buffer timestamps written
@@ -1224,11 +1224,13 @@ static void gp_render_begin(id e, MTL4RenderPassDescriptor *d) {
     int i = gp_prepare('R', d);
     if (i >= 0) { g_gp_encoder = e; rs_gp_stamp(g_gp_heap, 2 * i, 0); }
 }
-static void gp_render_end(id e) {
-    if (g_gp_cur < 0 || e != g_gp_encoder) return;
+static int gp_render_end(id e) {
+    if (g_gp_cur < 0 || e != g_gp_encoder) return -1;
     int i = g_gp_cur;
     g_gp_labels[i].draws = (uint32_t)(g_stat_draw - g_gp_labels[i].draw0);
-    rs_gp_stamp(g_gp_heap, 2 * i + 1, 1); g_gp_cur = -1;
+    g_gp_cur = -1;
+    if (!g_gp_labels[i].draws) return 2 * i + 1;
+    rs_gp_stamp(g_gp_heap, 2 * i + 1, 1); return -1;
 }
 
 static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor *d) { blit_close();
@@ -1240,7 +1242,7 @@ static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor 
                     [e barrierAfterQueueStages:MTLStageVertex | MTLStageFragment beforeStages:MTLStageFragment visibilityOptions:bar_vis()]; }
       else if (m) [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:bar_vis()]; }
     [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_render_begin(e, d); return e; }
-static inline void enc_r_end(id e) { if (rs_using(e)) { gp_render_end(e); rs_pass_end(e, bar_end_mode(), (uint64_t)MTL4VisibilityOptionDevice); } else m4_end_render(e); }
+static inline void enc_r_end(id e) { if (rs_using(e)) { int empty = gp_render_end(e); rs_pass_end(e, bar_end_mode(), (uint64_t)MTL4VisibilityOptionDevice); if (empty >= 0) rs_gp_clear_end(g_gp_heap, empty, g_cb); } else m4_end_render(e); }
 static inline void enc_r_pso(id<MTL4RenderCommandEncoder> e, id<MTLRenderPipelineState> p) { if (rs_using(e)) rs_object(RS_PSO, p); else [e setRenderPipelineState:p]; }
 static inline void enc_r_dss(id<MTL4RenderCommandEncoder> e, id<MTLDepthStencilState> s) { if (rs_using(e)) rs_object(RS_DSS, s); else [e setDepthStencilState:s]; }
 /* TOTK: render state already set on the current encoder. The replay sets viewport, scissor, cull, winding, fill, depth bias,

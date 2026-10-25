@@ -20,6 +20,7 @@
 #include <dispatch/dispatch.h>
 
 enum {
+    RS_GPU_CLEAR_END, /* heap; index; command buffer: only after RS_END */
     RS_GPU_TIMESTAMP, /* retained heap; index; 0 vertex / 1 fragment */
     RS_PSO, RS_DSS, RS_VIEWPORT, RS_SCISSOR, RS_CULL, RS_WINDING, RS_FILL,
     RS_BIAS, RS_CLIP, RS_STENCIL, RS_BLEND, RS_VISIBILITY, RS_ADDRESS,
@@ -59,8 +60,15 @@ static inline uint64_t rs_now(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_
 static void rs_apply(id<MTL4RenderCommandEncoder> *enc, id<MTL4ArgumentTable> *vt, id<MTL4ArgumentTable> *ft, const nvn_encode_packet *p) {
     const uint64_t *u = p->u; id<MTL4RenderCommandEncoder> e = *enc;
     if (g_rs_probe_negative && (p->op == RS_DRAW || p->op == RS_INSTANCED || p->op == RS_INDEXED || p->op == RS_INDIRECT || p->op == RS_INDEXED_INDIRECT)) return;
-    if (p->op != RS_BEGIN && !e) MDIE("render stream packet %llu without an encoder", (unsigned long long)p->op);
+    if (p->op != RS_BEGIN && p->op != RS_GPU_CLEAR_END && !e) MDIE("render stream packet %llu without an encoder", (unsigned long long)p->op);
     switch (p->op) {
+        case RS_GPU_CLEAR_END: {
+            if (e) MDIE("GPUPROF: clear end inside an encoder");
+            id<MTL4CounterHeap> heap = (__bridge id<MTL4CounterHeap>)(void *)(uintptr_t)u[0];
+            id<MTL4CommandBuffer> cb = (__bridge id<MTL4CommandBuffer>)(void *)(uintptr_t)u[2];
+            [cb writeTimestampIntoHeap:heap atIndex:(NSUInteger)u[1]];
+            CFRelease((CFTypeRef)(uintptr_t)u[0]); CFRelease((CFTypeRef)(uintptr_t)u[2]); break;
+        }
         case RS_GPU_TIMESTAMP: {
             id<MTL4CounterHeap> heap = (__bridge id<MTL4CounterHeap>)(void *)(uintptr_t)u[0];
             gp_stamp(e, 'R', heap, (int)u[1], (int)u[2]);
@@ -234,4 +242,10 @@ static void rs_sub_end(void) {
 static void rs_gp_stamp(id<MTL4CounterHeap> heap, int index, int end) {
     rs_put((nvn_encode_packet){.op=RS_GPU_TIMESTAMP,
         .u={(uint64_t)(uintptr_t)CFBridgingRetain(heap), (uint64_t)index, (uint64_t)end}}, 0);
+}
+
+static void rs_gp_clear_end(id<MTL4CounterHeap> heap, int index, id<MTL4CommandBuffer> cb) {
+    rs_put((nvn_encode_packet){.op=RS_GPU_CLEAR_END,
+        .u={(uint64_t)(uintptr_t)CFBridgingRetain(heap), (uint64_t)index,
+            (uint64_t)(uintptr_t)CFBridgingRetain(cb)}}, 1);
 }
