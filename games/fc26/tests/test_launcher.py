@@ -109,6 +109,14 @@ class Launcher(unittest.TestCase):
         self.assertEqual(p['previous_log'], '/Users/someone/Library/Logs/MacNativeGames/fc26.previous.log')
         self.assertEqual(p['set']['TOTK_INPUT_FILE'], '/Users/someone/Library/Application Support/MacNativeGames/FC26/input.txt')
 
+    def test_fps60_only_when_chosen(self):
+        fresh = self.plan()
+        self.assertNotIn('FC26_FPS60', fresh['set'])
+        chosen = self.plan('FPS60=1')
+        self.assertEqual(chosen['set'].pop('FC26_FPS60'), '1')
+        self.assertEqual(chosen, fresh)
+        self.assertEqual(self.plan('FPS60=0'), fresh)
+
     def test_metalfx_only_when_chosen(self):
         # the boots that reached the game's screens ran without MetalFX (boot_all1.log: "[mfx-up] ... off")
         fresh = self.plan()
