@@ -1,3 +1,4 @@
+// Variable c1 adapted from nxnative (c) 2026 seedds, MIT; see ../../LICENSE.nxnative.
 // 着色器反射 json → 定长 C 数组（A：PC 链反射；B：Switch 原版翻译的反射，route = "B"，tools/dmsh_build.py 出）。
 // B 新增种类：SBUFP = 存储缓冲设备指针（NVN 存储缓冲槽）；SUPPORT = Ryujinx 辅助常量；C1 = 着色器自带常数段（c[1]）；
 //            DRV0 / DRV2 = NVN 驱动常量段 c[0]（存储缓冲地址表）/ c[2]（贴图与采样器句柄表）
@@ -47,9 +48,10 @@ typedef struct {
     // 顶点——插值输出 locn 的 .x / .y = fma(属性 uv_aff_attr[locn] 的 .x / .y, 缩放, 偏移)，缩放 / 偏移引用 uniform：(槽 << 8) | (向量 << 2) | 分量
     // Vertex - .x / .y of interpolated output locn = fma(.x / .y of attribute uv_aff_attr[locn], scale, offset), where scale / offset reference a uniform: (slot << 8) | (vector << 2) | component
     int8_t uv_aff_attr[32]; uint16_t uv_aff[32][4];   // [sx, ox, sy, oy]
-    uint8_t c1[4096];        // c1 常数段原样（B） | c1 constant segment as-is (B)
+    uint8_t *c1;        // c1 常数段原样（B） | c1 constant segment as-is (B)
 } nvn_refl;
 
+void nvn_refl_destroy(nvn_refl *r);
 int drv_fillable(int stage, int bank, unsigned off);
 int drv_access_components_fillable(int stage, int bank, unsigned long idx, const char *after);
 int msl_drv_unfillable_check(const char *msl, int stage, const char *entry);

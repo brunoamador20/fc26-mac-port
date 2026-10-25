@@ -1,9 +1,13 @@
+// Variable c1 adapted from nxnative (c) 2026 seedds, MIT; see ../../LICENSE.nxnative.
 // 着色器反射 json（B：Switch 原版翻译，tools/dmsh_build.py 出）→ 定长 C 数组（nvn_refl.h）
 // Shader reflection json (B: produced by translating the original Switch shaders, output of tools/dmsh_build.py) → fixed-length C arrays (nvn_refl.h)
 #import "nvn_refl.h"
 #import <Metal/Metal.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+
+void nvn_refl_destroy(nvn_refl *r) { free(r->c1); r->c1 = NULL; r->c1_len = 0; r->has_c1 = 0; }
 
 // 哑贴图类型：与原 dummy_tex 同一套前缀判定（未绑贴图槽按 D3D 语义读出 0）
 // Dummy texture type: same prefix rules as the original dummy_tex (an unbound texture slot reads 0 per D3D semantics)
@@ -168,7 +172,7 @@ int msl_drv_unfillable_check(const char *msl, int stage, const char *entry) {
 
 int nvn_refl_from_json_msl(NSDictionary *j, NSString *msl, nvn_refl *o, char *err, int errlen) {
     memset(o, 0, sizeof *o);
-    #define FAIL(...) do { snprintf(err, errlen, __VA_ARGS__); return 1; } while (0)
+    #define FAIL(...) do { snprintf(err, errlen, __VA_ARGS__); nvn_refl_destroy(o); return 1; } while (0)
     if (![j[@"route"] isEqual:@"B"]) FAIL("不是 B 反射（route ≠ B；A 路线 / PC 链反射已退役）");
     {   // Switch 原版翻译：种类与 NVN 槽号已由 dmsh_build.py 从 MSL 成员名解出 | Translated original Switch shaders: kind and NVN slot number are already parsed from the MSL member names by dmsh_build.py
         NSArray *bs = j[@"bindings"];
@@ -264,8 +268,8 @@ int nvn_refl_from_json_msl(NSDictionary *j, NSString *msl, nvn_refl *o, char *er
             }
         }
         NSString *c1 = j[@"c1"];
-        if (c1.length % 2 || c1.length / 2 > sizeof o->c1) FAIL("c1 长 %lu 字节，超上限或不成对", (unsigned long)c1.length / 2);
-        if (c1.length) { o->has_c1 = 1; o->c1_len = (uint16_t)(c1.length / 2); for (unsigned i = 0; i < o->c1_len; i++) o->c1[i] = (uint8_t)strtoul([[c1 substringWithRange:NSMakeRange(2 * i, 2)] UTF8String], NULL, 16); }
+        if (c1.length % 2 || c1.length / 2 > UINT16_MAX) FAIL("c1 长 %lu 字节，超上限或不成对", (unsigned long)c1.length / 2);
+        if (c1.length) { o->c1 = malloc(c1.length / 2); if (!o->c1) FAIL("c1 allocation failed"); o->has_c1 = 1; o->c1_len = (uint16_t)(c1.length / 2); for (unsigned i = 0; i < o->c1_len; i++) o->c1[i] = (uint8_t)strtoul([[c1 substringWithRange:NSMakeRange(2 * i, 2)] UTF8String], NULL, 16); }
         for (NSDictionary *v in j[@"vertex_inputs"]) {   // [[attribute(n)]]：n 即 NVN 顶点属性号 | [[attribute(n)]]: n is the NVN vertex attribute number
             int loc = [v[@"location"] intValue]; NSString *t = v[@"msl_type"];
             if (loc < 0 || loc >= NVN_REFL_MAXV || o->nv >= NVN_REFL_MAXV) FAIL("B 顶点输入 %d 越界", loc);

@@ -4758,7 +4758,10 @@ static void shmap_load(void) {
     id<MTLBuffer> ab_buf; uint64_t ab_gpu; size_t ab_off; uint64_t ab_pass;   // ab_pass：编这块参数的渲染通道序号——只在同一通道内复用（跨通道 / 跨提交的块所在 arena 可能已回收重写） | ab_pass: serial of the render pass that encoded this argument block - reused only within the same pass (the arena holding a block from another pass / another submission may already have been reclaimed and rewritten)
     id<MTLLibrary> bflib; int bflib_tried; NSMutableDictionary<NSString *, id<MTLFunction>> *bffn; id<MTLFunction> no_depth_fn;
     NSString *src, *src_path; NSDictionary<NSNumber *, NSString *> *io; NSMutableDictionary<NSString *, id<MTLFunction>> *vpatch; id<MTLFunction> mfx_fn[8]; uint8_t mfx_tried[8]; NSMutableDictionary<NSString *, id<MTLFunction>> *bpatch; int border_seen; } @end   // TOTK: MSL source, user varyings (locn -> type), patched vertex functions   // bflib：可读 tile 版本 <键>_bf（合并 B 第 2 步） | bflib: readable-tile version <key>_bf (merge B step 2)
-@implementation NvShader @end
+// Variable c1 ownership adapted from nxnative (c) 2026 seedds, MIT; see ../../LICENSE.nxnative.
+@implementation NvShader
+- (void)dealloc { nvn_refl_destroy(&rf); }
+@end
 /* TOTK: a shader's MSL source is needed only to build derived functions (varying patches, layered vertex, depth-less and
    MetalFX UI fragment variants). The Mac keeps it; iOS keeps only the path and reads it when needed (thousands of sources
    held as strings cost on the order of 100 MB on a device that may use about 4 GB in total). */
@@ -5291,7 +5294,13 @@ static NvShader *shader_compute_memory(NvShader *sh, const uint8_t *control) {
         if (!fn) { MLOG("【红】[shared-memory] compute %.16s compile failed, kept the old 4 KiB: %s", sh->key, err.localizedDescription.UTF8String); return sh; }
         /* A new object gives the pipeline cache a new key: a warmed pipeline of
            the old function must not be reused. Constants and argument ABI match. */
-        NvShader *o = [NvShader new]; o->fn = fn; o->rf = sh->rf; o->stage = sh->stage;
+        NvShader *o = [NvShader new]; o->fn = fn; o->rf = sh->rf; o->rf.c1 = NULL;
+        if (sh->rf.c1_len) {
+            o->rf.c1 = malloc(sh->rf.c1_len);
+            if (!o->rf.c1) return sh;
+            memcpy(o->rf.c1, sh->rf.c1, sh->rf.c1_len);
+        }
+        o->stage = sh->stage;
         o->range_ro = sh->range_ro; o->src = fixed; o->src_path = sh->src_path;
         memcpy(o->drv_scanned, sh->drv_scanned, sizeof o->drv_scanned);
         strlcpy(o->key, sh->key, sizeof o->key);

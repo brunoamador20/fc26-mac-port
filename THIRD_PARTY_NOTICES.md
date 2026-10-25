@@ -14,6 +14,8 @@ Code in this repository that comes from other projects keeps its license; the li
 | in `games/totk/runtime/threads.c`: SignalToAddress that wakes all waiters subtracts 2, SystemEvent bindings that end with their write handle, signals that wake only the waiters of the signalled object (checked by `games/totk/tests/system_event_bind`) | [nxnative](https://github.com/seedds/nxnative) commits `d47f899`, `49ee623`, `df7badd`, rewritten for this runtime (via PR #159) | MIT | `games/totk/third_party/licenses/nxnative.txt` |
 | audio effects in `games/totk/runtime/audio_reverb.c`, `games/totk/runtime/audio_effects.c` (delay, reverb, compressor) and the mixer | ported from Ryujinx.Audio | MIT | `games/totk/third_party/licenses/Ryujinx-Audio.txt` |
 
+| variable shader constants and GPU timestamp profiler in `games/fc26/third_party/d2r_gfx/gfx/nvn` | [nxnative](https://github.com/seedds/nxnative), `7a3b95873bf1836bf7f70e2e2e3245e1cabb1620`, adapted | MIT | `games/fc26/third_party/d2r_gfx/LICENSE.nxnative` |
+
 Fetched or linked at build time (not in this repository):
 
 | Code | Use | License |
