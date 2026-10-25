@@ -7,7 +7,10 @@
 
 /* LaunchServices may discard stderr before the normal log is opened. */
 static int fc26_bootstrap_failure(void) {
-    NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/MacNativeGames"];
+    /* Failure tests must never write into the player's Library. */
+    const char *override = getenv("FC26_BOOTSTRAP_LOG_DIR");
+    NSString *dir = override && *override ? @(override) :
+        [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/MacNativeGames"];
     [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     NSString *path = [dir stringByAppendingPathComponent:@"fc26-bootstrap-error.log"];
     NSString *message = [NSString stringWithFormat:@"%@ — O FC 26 não conseguiu preparar o ambiente ou abrir o log.\n", NSDate.date];

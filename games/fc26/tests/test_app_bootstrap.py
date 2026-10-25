@@ -20,7 +20,8 @@ class AppBootstrap(unittest.TestCase):
             root = Path(tmp)
             build = compile_objc([HERE / 'tests/app_bootstrap_test.m'], root / 'runtime')
             self.assertEqual(build.returncode, 0, build.stderr)
-            env = dict(os.environ, KEEP='old', TOTK_HEADLESS='1')
+            env = dict(os.environ, KEEP='old', TOTK_HEADLESS='1',
+                       FC26_BOOTSTRAP_LOG_DIR=str(root / 'bootstrap-errors'))
             env.pop('FC26_APP_BOOTSTRAP', None)
             plain = subprocess.run([str(root / 'runtime')], env=env, capture_output=True, text=True)
             self.assertEqual(plain.returncode, 0, plain.stderr)
@@ -41,6 +42,7 @@ class AppBootstrap(unittest.TestCase):
             self.assertEqual(bad.returncode, 7)
             self.assertIn(b'fc26-bootstrap-error.log', bad.stderr)
             error_path = Path(bad.stderr.decode().split('Veja ', 1)[1].strip())
+            self.assertEqual(error_path, root / 'bootstrap-errors/fc26-bootstrap-error.log')
             self.assertIn('não conseguiu preparar', error_path.read_text())
 
 
