@@ -13,7 +13,8 @@ static const struct { const char *name;uint64_t hz; } sources[FC_CLOCK_COUNT]={
  {"hardware-main",19200000},{"hardware-nro",19200000},{"GetSystemTick",19200000},
  {"GetSystemTickFrequency",0},{"nn-time-realtime",1000000000},{"nn-time-steady",1},
  {"nn-time-posix",1},{"host-vblank",60},{"vi-vsync-register",0},{"vi-queued-frame",0},
- {"vi-history-count",0},{"nvn-acquire",0},{"nvn-present",0},{"ipc-system-seconds",1},{"ipc-steady-seconds",1}
+ {"vi-history-count",0},{"nvn-acquire",0},{"nvn-present-interval",0},{"ipc-system-seconds",1},{"ipc-steady-seconds",1},
+ {"nvn-host-ns",1000000000},{"nvn-counter-ns",1000000000}
 };
 __attribute__((constructor)) static void time_probe_init(void) { fc26_time_probe_on=getenv("FC26_TIME_PROFILE")!=NULL; }
 void fc26_time_probe_note(unsigned source,uint64_t value) {

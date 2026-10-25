@@ -1,4 +1,5 @@
 #include <mach/mach_time.h>
+#include "../../../../runtime/time_probe.h"
 // TOTK: NVN entry points beyond the donor implementation that only report stored object state,
 // attach debugging metadata, or convert timestamps. None of them changes rendering results.
 #include "../../host/hle.h"
@@ -35,10 +36,10 @@ NVN(nvnDeviceIsExternalDebuggerAttached, NVNboolean, const NVNdevice *d) { (void
 
 // ---------- Timestamps: counters are written in Tegra 19.2 MHz ticks (gpu_ticks in nvn_mtl.m) ----------
 NVN(nvnDeviceGetCurrentTimestampInNanoseconds, uint64_t, const NVNdevice *d) {
-    (void)d; mach_timebase_info_data_t tb; mach_timebase_info(&tb); return (uint64_t)((__uint128_t)mach_absolute_time() * tb.numer / tb.denom);   // TOTK: GetSystemTick's base (mach_absolute_time, no sleep), see gpu_ticks
+    (void)d; mach_timebase_info_data_t tb; mach_timebase_info(&tb); uint64_t ns=(uint64_t)((__uint128_t)mach_absolute_time() * tb.numer / tb.denom); fc26_clock_note(FC_CLOCK_NVN_HOST_NS,ns); return ns;   // TOTK: GetSystemTick's base (mach_absolute_time, no sleep), see gpu_ticks
 }
 NVN(nvnDeviceGetTimestampInNanoseconds, uint64_t, const NVNdevice *d, const NVNcounterData *c) {
-    (void)d; return c->timestamp / 12 * 625 + c->timestamp % 12 * 625 / 12;
+    (void)d; uint64_t ns=c->timestamp / 12 * 625 + c->timestamp % 12 * 625 / 12; fc26_clock_note(FC_CLOCK_NVN_COUNTER_NS,ns); return ns;
 }
 
 // ---------- Memory pools and buffers: unified memory, CPU and GPU views are coherent ----------

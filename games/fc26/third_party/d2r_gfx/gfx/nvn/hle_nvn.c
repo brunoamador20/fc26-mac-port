@@ -2915,7 +2915,7 @@ static void present_exec(win_t *o, int idx, double period, const int crop[4], ui
     gfx_leave();
 }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
-    fc26_clock_note(FC_CLOCK_NVN_PRESENT,1);
+    if(&fc26_time_probe_on && fc26_time_probe_on) fc26_clock_note(FC_CLOCK_NVN_PRESENT,w?((win_t *)w)->interval:0);
     NVN_BLOCKING();
     (void)q; win_t *o = (win_t *)w; o->presents++;
     front_frame_queued();
