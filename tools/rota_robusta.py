@@ -88,7 +88,10 @@ class Route:
     def confirm(self,path,rows,label,pattern,box=None):
         if not re.search(pattern,norm(' '.join(r['text'] for r in rows))): return False
         if box is None and label=='lado': box=(.44,.47,.56,.51)
-        if box is None and label=='entrada_em_campo': box=(.27,.38,.40,.66)
+        if box is None and label=='entrada_em_campo':
+            title=next((r for r in rows if norm(r['text']).strip()=='arouca' and .2<r['box'][0]<.5 and .3<r['box'][1]<.7),None)
+            if title is None: return False
+            x,y,w,h=title['box']; box=(x,y,x+w,y+h)
         if box is None:
             hit=next((r for r in rows if re.search(pattern,norm(r['text']))),None)
             if hit:
@@ -96,7 +99,7 @@ class Route:
         if box:
             im=Image.open(path).convert('RGB'); w,h=im.size
             crop=im.crop(tuple(int(v*d) for v,d in zip(box,(w,h,w,h)))).resize((400,100))
-            ref=self.refs/f'{label}.png'
+            ref=self.refs/(f'{label}_titulo.png' if label=='entrada_em_campo' else f'{label}.png')
             if ref.exists():
                 diff=sum(ImageStat.Stat(ImageChops.difference(crop,Image.open(ref).convert('RGB'))).mean)/3/255
                 self.record('referencia',label=label,difference=diff)

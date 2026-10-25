@@ -68,6 +68,18 @@ class Safety(unittest.TestCase):
         self.assertIsNone(re.search(rota.EA_PATTERN,'prime para reconectar ultimate team pontape de saida'))
         self.assertIsNotNone(re.search(rota.EA_PATTERN,'deves ter sessao iniciada nos servidores ea de modo a aceder'))
 
+    def test_intro_reference_follows_the_title_not_the_animation_background(self):
+        r=self.route()
+        with tempfile.TemporaryDirectory() as d:
+            r.refs=Path(d)
+            for shift in (0,13):
+                image=rota.Image.new('RGB',(1000,1000),'white')
+                image.paste((0,0,0),(280,450+shift,380,470+shift))
+                photo=Path(d)/f'frame{shift}.png'; image.save(photo)
+                rows=[dict(text='AROUCA',box=[.28,(450+shift)/1000,.1,.02]),
+                      dict(text='vs RIO AVE FC',box=[.28,.65,.1,.02])]
+                self.assertTrue(r.confirm(photo,rows,'entrada_em_campo',r'arouca.*vs.*rio ave'))
+
     def test_invalid_clock_seconds_are_rejected(self):
         r=self.route()
         self.assertIsNone(r.clock([dict(text='05:99',box=[.08,.10,.04,.02])]))
