@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Turn the player's exefs patches (IPSwitch .pchtxt, from mods/<display_version>/<name>/exefs/) into checked patch tables.
 
-The mechanism only: FC 26 has no patch of its own yet, so the folder is empty and the runtime applies none
-(runtime/game_patches.c, FC26_PATCHES unset). Each patch must name main's build ID (pinned in
+Also generates the built-in fps60-render table from the pinned local image (FC26_FPS60=1).
+With that preference off and FC26_PATCHES unset, the runtime applies none. Each patch must name main's build ID (pinned in
 assets/expected-v<version>.json) and touch only bytes the Apple-silicon rewrite left as they were (a rewritten word
 would be a branch into a rewrite block). Offsets are main image offsets (a file's `@flag offset_shift 0x100` is for the
 IPS container). Writes <work>/patches/<slug>.tsv ("offset new-bytes original-bytes" in hex) and <work>/patches/index.tsv;
@@ -10,6 +10,7 @@ the runtime checks the original bytes again before writing. No game bytes come f
 words they already hold.
 """
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -54,6 +55,21 @@ def parse(path, build_id):
     return patches
 
 
+# Only replacement words we authored. Original bytes stay in the local work table.
+FPS60_OFFSET = 0x58ab0e4
+FPS60_REPLACEMENT = bytes.fromhex('007940bd297d43f9c809e8d2010d084e2181803c2140621e')
+
+
+def fps60_table(original, rewritten):
+    off, new = FPS60_OFFSET, FPS60_REPLACEMENT
+    end = off + len(new)
+    if end > len(original) or end > len(rewritten):
+        raise ValueError('60 fps: image too short')
+    if original[off:end] != rewritten[off:end]:
+        raise ValueError('60 fps: rewrite changed target instructions')
+    return f'# Render target 60; simulation unchanged\n{off:#x}\t{new.hex()}\t{original[off:end].hex()}\n'
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('mods', type=Path, nargs='?', default=HERE / f'mods/{DISPLAY}', help='folder of <name>/exefs/*.pchtxt')
@@ -62,9 +78,13 @@ def main():
     work = args.work.resolve()
     if not EXPECTED.get('main_build_id'):
         sys.exit(f'main\'s build ID is not pinned yet in {game_config.EXPECTED_PATH.name} (scripts/prepare_runtime.py --record)')
-    original = nsoimg.load(work / f'extracted/{VERSION}/exefs/main')
+    source = work / f'extracted/{VERSION}/exefs/main'
+    if hashlib.sha256(source.read_bytes()).hexdigest() != EXPECTED['exefs_sha256']['main']:
+        raise ValueError('60 fps: original main does not match pinned game version')
+    original = nsoimg.load(source)
     rewritten = (work / f'rewritten/{VERSION}/main.patched.bin').read_bytes()
     out = work / 'patches'; out.mkdir(exist_ok=True)
+    (out / "fps60-render.tsv").write_text(fps60_table(original, rewritten))
     index = []
     for f in sorted(args.mods.glob('*/exefs/*.pchtxt')):
         name = f.parents[1].name

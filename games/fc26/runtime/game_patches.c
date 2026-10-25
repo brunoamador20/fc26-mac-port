@@ -5,8 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Game-code patches for main, applied after relocation and before its text is sealed. The mechanism only: FC 26 has no
-   patch yet, so nothing is applied unless FC26_PATCHES names one. scripts/prepare_patches.py turns each .pchtxt into
+/* Game-code patches for main, applied after relocation and before its text is sealed. FC26_FPS60=1 applies the checked render-target table; otherwise only FC26_PATCHES selects patches. scripts/prepare_patches.py turns each .pchtxt into
    patches/<slug>.tsv ("offset new orig", hex), already checked against the original image and the rewrite; here every
    site is checked again against the loaded bytes, and a mismatch stops the start (a wrong version or a rewritten word
    must never be patched). FC26_PATCHES=<slug>,<slug>,... picks them (unset or empty: none). */
@@ -38,6 +37,8 @@ static void apply_file(Module *m, const char *slug) {
     fprintf(stderr, "[fc26] game patch %s: %u sites\n", slug, applied);
 }
 void runtime_game_patches(Module *main_module) {
+    const char *fps60 = getenv("FC26_FPS60");
+    if (fps60 && !strcmp(fps60, "1")) apply_file(main_module, "fps60-render");
     const char *list = getenv("FC26_PATCHES");
     if (!list || !*list) { fprintf(stderr, "[fc26] game patches: none (FC26_PATCHES)\n"); return; }
     char buf[1024]; snprintf(buf, sizeof buf, "%s", list);

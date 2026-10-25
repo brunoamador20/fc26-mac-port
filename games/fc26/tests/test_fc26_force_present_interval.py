@@ -20,16 +20,15 @@ class ForcePresentIntervalTest(unittest.TestCase):
                 capture_output=True, text=True)
             self.assertEqual(build.returncode, 0, build.stderr)
 
-            env = dict(os.environ)
-            env.pop('FC26_FORCE_PRESENT_INTERVAL', None)
-            self.assertEqual(
-                subprocess.run([str(exe)], capture_output=True, text=True,
-                               env=env, timeout=10).returncode, 0)
-
-            env['FC26_FORCE_PRESENT_INTERVAL'] = '1'
-            self.assertEqual(
-                subprocess.run([str(exe)], capture_output=True, text=True,
-                               env=env, timeout=10).returncode, 0)
+            for value in (None, '', '0', 'true', '1'):
+                env = dict(os.environ)
+                env.pop('FC26_FORCE_PRESENT_INTERVAL', None)
+                env.pop('FC26_FPS60', None)
+                if value is not None:
+                    env['FC26_FPS60'] = value
+                run = subprocess.run([str(exe)] + (['enabled'] if value == '1' else []),
+                                     capture_output=True, text=True, env=env, timeout=10)
+                self.assertEqual(run.returncode, 0, (value, run.stderr))
 
 
 if __name__ == '__main__':

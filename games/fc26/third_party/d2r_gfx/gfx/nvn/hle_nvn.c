@@ -2838,17 +2838,16 @@ static unsigned present_ticks(const win_t *o) {   /* display ticks per game fram
        second display tick (50 + 50 on a 100 Hz display); 30+30: hz / 30 ticks (2 at 60 Hz; at 100 Hz the own clock paces,
        mfx_own_clock). Held here and not only by the game's controller, because the code carries the 60 FPS patch (the
        controller may choose 1); the real-time frame step keeps game speed right. Uncapped interpolation paces as uncapped. */
+    if (fc26_force_present_interval_enabled()) {
+        static int logged;
+        if (!logged) { logged = 1; LOG("[fc26] present override: one vblank per frame (FC26_FPS60 / diagnostic)"); }
+        return 1u;
+    }
     int m = mfx_enabled();
     if (m == MFX_HALF) return 2;
     if (m == MFX_30) { int hz = g_paced_hz > 0 ? g_paced_hz : 60; return (unsigned)(hz >= 45 ? (hz + 15) / 30 : 1); }
     if (g_display_mode || (uncapped_now() && !dm_detclock_enabled() && uncapped_interval_on()))
         return 1u;
-    static int logged;
-    if (!logged) {
-        logged = 1;
-        if (fc26_force_present_interval_enabled())
-            LOG("[nvn] FC26_FORCE_PRESENT_INTERVAL=1：按每个节拍一帧 pacing，游戏请求的间隔 %d 保留在诊断里", o->interval);
-    }
     return fc26_effective_present_interval(o->interval);
 }
 static uint64_t present_period(const win_t *o) {
