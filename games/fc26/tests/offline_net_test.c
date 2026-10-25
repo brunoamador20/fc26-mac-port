@@ -15,6 +15,7 @@
 #include <time.h>
 
 pthread_key_t runtime_keys[8];
+uint64_t runtime_now_ns(void) { return 0; } /* profiler disabled in this IPC fixture */
 static void *objects[64];
 static int kinds[64];
 static unsigned nobjects;

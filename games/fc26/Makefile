@@ -223,3 +223,6 @@ install: app
 
 clean:
 	rm -rf "$(OUT)/obj" "$(OUT)/$(BINARY)"
+
+# hle_nvn includes the optional runtime clock probe outside GFX_HEADERS.
+$(OUT)/obj/third_party/d2r_gfx/gfx/nvn/hle_nvn.c.o: runtime/time_probe.h

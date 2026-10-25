@@ -22,7 +22,7 @@ class UnknownIpc(unittest.TestCase):
         cls.exe = Path(cls.folder.name) / 'ipc_unknown'
         flags = ['-std=c11', '-Wall', '-Wextra', '-Werror'] + ([] if platform.system() == 'Darwin' else ['-D_GNU_SOURCE'])
         build = subprocess.run([compiler, *flags, f'-I{HERE / "runtime"}', str(HERE / 'tests/ipc_unknown.c'),
-                                str(HERE / 'runtime/ipc.c'), str(HERE / 'runtime/system_services.c'),
+                                str(HERE / 'runtime/ipc.c'), str(HERE / 'runtime/system_services.c'), str(HERE / 'runtime/time_probe.c'),
                                 str(HERE / 'runtime/missing.c'), '-lpthread',
                                 '-o', str(cls.exe)], capture_output=True, text=True)
         if build.returncode:

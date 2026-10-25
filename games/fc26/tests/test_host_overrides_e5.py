@@ -118,7 +118,7 @@ class TestHostOverridesE5(unittest.TestCase):
                    str(HERE / 'runtime/account.c'),
                    str(HERE / 'runtime/input.c'),
                    str(HERE / 'runtime/fs_host.c'),
-                   str(HERE / 'runtime/system_services.c'),
+                   str(HERE / 'runtime/system_services.c'), str(HERE / 'runtime/time_probe.c'),
                    str(HERE / 'runtime/ipc.c'),
                    str(HERE / 'runtime/missing.c'),
                    '-lpthread',

@@ -13,7 +13,7 @@ import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parents[1]
-SOURCES = ['tests/offline_net_test.c', 'runtime/ipc.c', 'runtime/missing.c', 'runtime/system_services.c',
+SOURCES = ['tests/offline_net_test.c', 'runtime/ipc.c', 'runtime/missing.c', 'runtime/system_services.c', 'runtime/time_probe.c',
            'runtime/offline_applets.c']
 
 

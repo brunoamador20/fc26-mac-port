@@ -35,17 +35,17 @@ static int64_t steady_seconds(void) {
     mach_timebase_info_data_t tb; mach_timebase_info(&tb);
     return (int64_t)((__uint128_t)mach_continuous_time() * tb.numer / tb.denom / 1000000000u);
 }
-static SteadyClockTimePoint steady_now(void) { pthread_once(&once, make_source); SteadyClockTimePoint p = {steady_seconds(), {0}}; memcpy(p.source, source_id, 16); return p; }
+static SteadyClockTimePoint steady_now(void) { pthread_once(&once, make_source); SteadyClockTimePoint p = {steady_seconds(), {0}}; memcpy(p.source, source_id, 16); fc26_clock_note(FC_CLOCK_STEADY_SEC,(uint64_t)p.value); return p; }
 static long clock_offset(void) {
     static long off = -1; if (off < 0) { const char *e = getenv("TOTK_TIME_OFFSET"); off = e ? atol(e) : 0; if (off < 0) off = 0; }   /* diagnostic: shift the clock the game sees (seconds) */
     return off;
 }
-static int64_t posix_now(void) { return (int64_t)time(NULL) + clock_offset(); }
+static int64_t posix_now(void) { int64_t v=(int64_t)time(NULL)+clock_offset();fc26_clock_note(FC_CLOCK_POSIX_SEC,(uint64_t)v);return v; }
 
 static unsigned initialize(void) { initialized = 1; pthread_once(&once, make_source); return 0; }
 static unsigned finalize(void) { initialized = 0; return 0; }
 static unsigned char is_initialized(void) { return (unsigned char)initialized; }
-static unsigned user_time(int64_t *out) { if (!out) return R_INVALID; *out = posix_now(); fc26_clock_note(FC_CLOCK_POSIX_SEC,(uint64_t)*out); return 0; }
+static unsigned user_time(int64_t *out) { if (!out) return R_INVALID; *out = posix_now(); return 0; }
 /* The sdk's musl takes CLOCK_REALTIME (clock_gettime, and gettimeofday/time through it) from a pointer at sdk+0xb87018:
    sdk+0x91154 stores there this function or the adjustable one, read from their import slots (sdk+0xb73e38/0xb73e40),
    in place of its tick-based default. The sdk's own versions need the time client that nn::time::Initialize opens,
@@ -60,7 +60,7 @@ static unsigned user_timespec(struct timespec *ts) {
 }
 /* StandardSteadyClock::now() returns the chrono-style time_point: the int64 seconds value only, 0 without a source
    (sdk+0x3d1d88 returns it in x0; returning the 0x18-byte struct made the host write through the caller's stale x8). */
-static int64_t steady_clock_now(void) { int64_t v=steady_now().value;fc26_clock_note(FC_CLOCK_STEADY_SEC,(uint64_t)v);return v; }
+static int64_t steady_clock_now(void) { return steady_now().value; }
 
 static void fill_calendar(CalendarTime *c, CalendarAdditionalInfo *info, int64_t posix, int local) {
     time_t t = (time_t)posix; struct tm tm;

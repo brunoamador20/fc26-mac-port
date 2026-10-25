@@ -4,6 +4,7 @@
    nifm, time, ...); whether it calls each of these is to be seen at boot. Command numbers and layouts follow the public
    switchbrew descriptions. Unknown services and commands still stop the runtime with their name and id (ipc.c). */
 #include "runtime.h"
+#include "time_probe.h"
 #include "ipc.h"
 #include <stdio.h>
 #include <string.h>
@@ -173,7 +174,7 @@ static void timezone_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *r
 
 static void clock_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
     switch (rq->cmd) {
-    case 0: { int64_t now = (int64_t)time(NULL); IPC_OUT(rs, now); return; }   /* GetCurrentTime */
+    case 0: { int64_t now = (int64_t)time(NULL); fc26_clock_note(FC_CLOCK_IPC_SYSTEM_SEC,(uint64_t)now); IPC_OUT(rs, now); return; }   /* GetCurrentTime */
     case 1: return;                                                             /* SetCurrentTime */
     case 2: {                                                                   /* GetSystemClockContext */
         struct { int64_t offset; struct { int64_t val; uint8_t src[16]; } pt; } ctx;
@@ -190,6 +191,7 @@ static void steady_clock_handler(IpcSession *s, const IpcRequest *rq, IpcRespons
     case 0: {                                                                   /* GetCurrentTimePoint */
         struct { int64_t val; uint8_t src[16]; } pt;
         memset(&pt, 0, sizeof pt); pt.val = (int64_t)time(NULL); pt.src[0] = 1;
+        fc26_clock_note(FC_CLOCK_IPC_STEADY_SEC,(uint64_t)pt.val);
         IPC_OUT(rs, pt); return;
     }
     default: ipc_unimplemented(s, rq);
