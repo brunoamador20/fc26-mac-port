@@ -213,6 +213,11 @@ static void *input_file(void *arg) {
         } else if (!strncmp(line, "framestep ", 10)) {   /* "framestep <ms>": pin the real-time frame step, 0 = back to real time */
             char *end; double ms = strtod(line + 10, &end); if (end == line + 10 || ms < 0 || ms > 100) runtime_fail("framestep takes milliseconds (0 = real time)");
             runtime_frame_step_pin(ms);
+        } else if (!strncmp(line, "gameplay set ", 13)) {
+            char field[160], value[80], extra;
+            if (sscanf(line+13,"%159s %79s %c",field,value,&extra)!=2)
+                fprintf(stderr,"[fc26-gameplay] REFUSED: gameplay set <name> <value>\n");
+            else fc26_gameplay_set(runtime_module_base("main"),stderr,field,value);
         } else if (!strcmp(line, "gameplay\n")) {
             if (!fc26_gameplay_read(runtime_module_base("main"), stderr)) fprintf(stderr, "[fc26-gameplay] FAILED\n");
         } else if (!strcmp(line, "threads\n")) {   /* every guest thread's wait state and guest return chain, now (a hang: what is each thread waiting for) */

@@ -13,6 +13,30 @@ int main(void) {
         uint64_t row[4]={(uint64_t)name,0,0x40+i,(uint64_t)base+0xcb8c6d0};
         memcpy(base+0xb7c3558+32*i,row,sizeof row); obj[0x40+i]=(i%2);
     }
+    FILE *writes=tmpfile(); assert(writes);
+    assert(fc26_gameplay_set(base,writes,"SyntheticFlag","1"));
+    assert(obj[0x40]==1 && obj[0x41]==1);
+    const char *bad[]={"2","1.0","-1","true","1junk",""};
+    for(unsigned i=0;i<sizeof bad/sizeof *bad;i++)
+        assert(!fc26_gameplay_set(base,writes,"SyntheticFlag",bad[i]));
+    assert(!fc26_gameplay_set(base,writes,"Missing","1"));
+    assert(!fc26_gameplay_set(base,writes,"DeltaTicks","1"));
+    assert(!fc26_gameplay_set(base,writes,"Gen","1"));
+    uint64_t *row=(uint64_t *)(base+0xb7c3558);
+    row[3]=(uint64_t)base+0xcb889a0; row[2]=0x30;
+    assert(fc26_gameplay_set(base,writes,"SyntheticFlag","42"));
+    uint32_t integer=0; memcpy(&integer,obj+0x30,4); assert(integer==42);
+    assert(!fc26_gameplay_set(base,writes,"SyntheticFlag","4294967296"));
+    row[3]=(uint64_t)base+0xcb8c6b0;
+    assert(fc26_gameplay_set(base,writes,"SyntheticFlag","1.25"));
+    float number=0; memcpy(&number,obj+0x30,4); assert(number==1.25f);
+    assert(!fc26_gameplay_set(base,writes,"SyntheticFlag","nan"));
+    assert(!fc26_gameplay_set(base,writes,"SyntheticFlag","inf"));
+    assert(!fc26_gameplay_set(base,writes,"SyntheticFlag","1e100"));
+    row[3]=(uint64_t)base+0x1234;
+    assert(!fc26_gameplay_set(base,writes,"SyntheticFlag","1"));
+    row[3]=(uint64_t)base+0xcb8c6d0; row[2]=0x40;
+    fclose(writes);
     float sim=30,render=30; memcpy(regulator+0x20,&sim,4);memcpy(regulator+0x24,&render,4);
     memcpy(before,obj,sizeof obj);
     FILE *out=tmpfile(); assert(out);
