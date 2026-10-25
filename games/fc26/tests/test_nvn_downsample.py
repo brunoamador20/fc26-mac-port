@@ -244,6 +244,8 @@ static void rp_end(void) {}
 static void blit_close(void) {}
 static void rs_sync(void) {}
 static void pt_mark(id cb, char k, id d) { (void)cb; (void)k; (void)d; }
+/* These copy-only tests keep timing disabled, as in the default runtime. */
+static void gp_begin(id e, char kind, id d) { (void)e; (void)kind; (void)d; }
 static void es_reset(void) {}
 static void m4_end(id e) { [e endEncoding]; }
 static void args_dirty_all(void) {}

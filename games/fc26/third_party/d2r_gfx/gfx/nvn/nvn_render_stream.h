@@ -20,6 +20,7 @@
 #include <dispatch/dispatch.h>
 
 enum {
+    RS_GPU_TIMESTAMP, /* retained heap; index; 0 vertex / 1 fragment */
     RS_PSO, RS_DSS, RS_VIEWPORT, RS_SCISSOR, RS_CULL, RS_WINDING, RS_FILL,
     RS_BIAS, RS_CLIP, RS_STENCIL, RS_BLEND, RS_VISIBILITY, RS_ADDRESS,
     RS_DRAW, RS_INSTANCED, RS_INDEXED, RS_STORE,
@@ -60,6 +61,11 @@ static void rs_apply(id<MTL4RenderCommandEncoder> *enc, id<MTL4ArgumentTable> *v
     if (g_rs_probe_negative && (p->op == RS_DRAW || p->op == RS_INSTANCED || p->op == RS_INDEXED || p->op == RS_INDIRECT || p->op == RS_INDEXED_INDIRECT)) return;
     if (p->op != RS_BEGIN && !e) MDIE("render stream packet %llu without an encoder", (unsigned long long)p->op);
     switch (p->op) {
+        case RS_GPU_TIMESTAMP: {
+            id<MTL4CounterHeap> heap = (__bridge id<MTL4CounterHeap>)(void *)(uintptr_t)u[0];
+            gp_stamp(e, 'R', heap, (int)u[1], (int)u[2]);
+            CFRelease((CFTypeRef)(uintptr_t)u[0]); break;
+        }
         case RS_BEGIN: {
             if (e) MDIE("render stream: pass begun while the previous one is open");
             MTL4RenderPassDescriptor *d = (__bridge MTL4RenderPassDescriptor *)(void *)(uintptr_t)u[0];
@@ -221,4 +227,11 @@ static void rs_sub_end(void) {
         last_busy = busy; last_full = g_rs_full_ns; last_packets = g_rs_packets; last_sync = g_rs_sync_ns;
         g_rs_sync_max_ns = 0;
     }
+}
+
+/* nxnative GPUPROF (c) 2026 seedds, MIT (../../LICENSE.nxnative), adapted
+ * for our FIFO: the real encoder and its heap live on B. */
+static void rs_gp_stamp(id<MTL4CounterHeap> heap, int index, int end) {
+    rs_put((nvn_encode_packet){.op=RS_GPU_TIMESTAMP,
+        .u={(uint64_t)(uintptr_t)CFBridgingRetain(heap), (uint64_t)index, (uint64_t)end}}, 0);
 }
