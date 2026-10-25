@@ -81,21 +81,28 @@ static uint8_t *reserve_fixed(uint64_t at,uint64_t size){
 }
 #if TARGET_OS_IPHONE
 #define GUEST_ALIGN (2ULL<<20)
-/* Reserve size bytes in the lowest free gap of this process's map above 4 GiB (2 MiB aligned). The end of the map is
+#else
+#define GUEST_ALIGN (64ULL<<20)
+#endif
+/* Reserve size bytes in a real free gap below the guest limit (iOS: 2 MiB aligned; macOS: 64 MiB). The end of the map is
    not reported, so the last gap is only tried; FIXED fails there with KERN_NO_SPACE when it reaches past the end. */
 static uint8_t *reserve_in_gap(uint64_t size,int log){
- uint64_t prev=1ULL<<32;
- for(;;){
+ uint64_t prev=LOW_SEARCH_FROM;
+#if TARGET_OS_IPHONE
+ prev=1ULL<<32;
+#endif
+ for(;prev<GUEST_ADDRESS_LIMIT;){
   mach_vm_address_t r=prev;mach_vm_size_t rsize=0;vm_region_basic_info_data_64_t info;mach_msg_type_number_t n=VM_REGION_BASIC_INFO_COUNT_64;mach_port_t obj=MACH_PORT_NULL;
   int more=mach_vm_region(mach_task_self(),&r,&rsize,VM_REGION_BASIC_INFO_64,(vm_region_info_t)&info,&n,&obj)==KERN_SUCCESS;
-  uint64_t start=(prev+GUEST_ALIGN-1)&~(GUEST_ALIGN-1),end=more?r:GUEST_ADDRESS_LIMIT;
+  if(obj!=MACH_PORT_NULL)mach_port_deallocate(mach_task_self(),obj);
+  uint64_t start=(prev+GUEST_ALIGN-1)&~(GUEST_ALIGN-1),end=more&&r<GUEST_ADDRESS_LIMIT?r:GUEST_ADDRESS_LIMIT;
   if(end>start&&end-start>=(256ULL<<20)&&log)fprintf(stderr,"[totk-mem] free %#llx..%s%#llx\n",(unsigned long long)start,more?"":"(end of map, at most) ",(unsigned long long)end);
   if(end>start&&end-start>=size){uint8_t *p=reserve_fixed(start,size);if(p)return p;}
-  if(!more)return NULL;
+  if(!more||r>=GUEST_ADDRESS_LIMIT||r+rsize<=prev)return NULL;
   prev=r+rsize;
  }
+ return NULL;
 }
-#endif
 static void memory_init(void) {
  if(alias_space)return;
 #if TARGET_OS_IPHONE
@@ -116,11 +123,11 @@ static void memory_init(void) {
   if(alias_space)mach_vm_deallocate(mach_task_self(),(mach_vm_address_t)(uintptr_t)alias_space,ALIAS_SIZE);
   uint64_t want=alias_requested(),least=getenv("TOTK_ALIAS_GIB")?want:(8ULL<<30);
   for(uint64_t g=want;!low_space;g-=4ULL<<30){
-   for(uint64_t at=LOW_SEARCH_FROM;at+LOW_SIZE+g<=GUEST_ADDRESS_LIMIT&&!low_space;at+=1ULL<<30)
-    if((low_space=reserve_fixed(at,LOW_SIZE+g)))alias_len=g;
+   /* Search actual free gaps: a 14-GiB hole can fit between the old 1-GiB steps. */
+   if((low_space=reserve_in_gap(LOW_SIZE+g,0)))alias_len=g;
    if(g<least+(4ULL<<30))break;
   }
-  if(!low_space)runtime_fail(getenv("TOTK_ALIAS_GIB")?"reserve guest stack, heap and the TOTK_ALIAS_GIB alias region below 2^39":"reserve guest stack, heap and alias regions below 2^39");
+  if(!low_space){reserve_in_gap(UINT64_MAX,1);runtime_fail(getenv("TOTK_ALIAS_GIB")?"reserve guest stack, heap and the TOTK_ALIAS_GIB alias region below 2^39":"reserve guest stack, heap and alias regions below 2^39");}
   alias_space=low_space+LOW_SIZE;
  }
 #endif
