@@ -1,5 +1,6 @@
 /* Native ARM64 module loader. Guest images and generated metadata stay local. */
 #include "runtime.h"
+#include "gameplay_apply.h"
 #include "time_probe.h"
 #include "module_offset.h"
 #include "totk_ui_lang.h"
@@ -508,7 +509,7 @@ static void module_finis(void) { runtime_fail("guest exited: module finalizers n
 static void boot(void) {
  fprintf(stderr,"[totk] game version %s\n", TOTK_GAME_VERSION);
  runtime_boot_status(TOTK_UI("启动游戏运行环境","Starting the game runtime"),TOTK_UI("连接游戏代码与 macOS 系统服务","Connecting the game code to macOS system services"));
- runtime_thread_init();uint32_t main_handle=svc_thread_main_init();
+ runtime_thread_init();fc26_gameplay_apply_start();uint32_t main_handle=svc_thread_main_init();
  void *start=required("_ZN2nn4init5StartEmmPFvvES2_S2_");char where[96];runtime_describe_address((uintptr_t)start,where,sizeof where);
  fprintf(stderr,"[totk] ENTER original nn::init::Start %s\n",where);
  ((void(*)(uint64_t,uint64_t,void(*)(void),void(*)(void),void(*)(void)))start)(main_handle,0,loader_ready,module_inits,module_finis);

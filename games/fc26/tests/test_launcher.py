@@ -142,6 +142,29 @@ class Launcher(unittest.TestCase):
                 lines.remove("export FC26_FPS60='1'")
             self.assertEqual(lines, base.stdout.splitlines())
 
+    def test_smartai_only_when_chosen(self):
+        fresh = self.plan()
+        self.assertNotIn('FC26_GAMEPLAY_SET', fresh['set'])
+        chosen = self.plan('smartai=1')
+        self.assertEqual(chosen['set'].pop('FC26_GAMEPLAY_SET'),
+                         'EnableHighPrequencyPerceptionUpdate=1,'
+                         'EnableExtraPassEvaluations=1,'
+                         'EnablePPCriticalReducedEvaluation=0')
+        self.assertEqual(chosen, fresh)
+        self.assertEqual(self.plan('smartai=0'), fresh)
+
+    def test_dry_run_smartai_adds_only_requested_line(self):
+        base = self.dry_run(['-smartai', 'NO'], {'FC26_LAUNCHER_DRYRUN': '1'})
+        self.assertEqual(base.returncode, 0, base.stderr)
+        r = self.dry_run(['-smartai', 'YES'], {'FC26_LAUNCHER_DRYRUN': '1'})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.splitlines()
+        self.assertIn("export FC26_GAMEPLAY_SET='EnableHighPrequencyPerceptionUpdate=1,"
+                      "EnableExtraPassEvaluations=1,EnablePPCriticalReducedEvaluation=0'", lines)
+        lines.remove("export FC26_GAMEPLAY_SET='EnableHighPrequencyPerceptionUpdate=1,"
+                      "EnableExtraPassEvaluations=1,EnablePPCriticalReducedEvaluation=0'")
+        self.assertEqual(lines, base.stdout.splitlines())
+
     def test_metalfx_only_when_chosen(self):
         # the boots that reached the game's screens ran without MetalFX (boot_all1.log: "[mfx-up] ... off")
         fresh = self.plan()

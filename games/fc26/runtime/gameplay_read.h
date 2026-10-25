@@ -18,7 +18,7 @@ static int fc26_live_copy(uint64_t address, void *out, size_t size) {
 }
 /* Opt-in diagnostic only. Caller must establish the pre-match menu window;
  * kernel-checked memory access does not establish guest thread quiescence. */
-static int fc26_gameplay_set(uint8_t *base, FILE *out, const char *field, const char *text) {
+static int __attribute__((unused)) fc26_gameplay_set(uint8_t *base, FILE *out, const char *field, const char *text) {
     uint64_t obj=0;
     if (!strcmp(field,"DeltaTicks") || !strcmp(field,"Gen")) goto refused;
     if (!base || !fc26_live_copy((uint64_t)base+0xc665768,&obj,8) || !obj) goto refused;
@@ -66,7 +66,7 @@ refused:
     fprintf(out,"[fc26-gameplay] REFUSED set %s\n",field);
     return 0;
 }
-static int fc26_gameplay_read(uint8_t *base, FILE *out) {
+static int __attribute__((unused)) fc26_gameplay_read(uint8_t *base, FILE *out) {
     uint64_t obj = 0, regulator = 0;
     if (!base || !fc26_live_copy((uint64_t)base + 0xc665768, &obj, 8) || !obj) {
         fprintf(out, "[fc26-gameplay] FAILED: settings not available\n"); return 0;
