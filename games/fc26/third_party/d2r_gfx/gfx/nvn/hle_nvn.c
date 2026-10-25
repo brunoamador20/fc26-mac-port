@@ -124,6 +124,7 @@ HLE_FORCE("nvnBootstrapLoader", "NVN 图形接口整块换成宿主空设备（�
 #define B(x) ((x) & 0xff)
 
 #include "nvn_obj.h"
+#include "fc26_force_present_interval.h"
 #include "totk_timeline.h"
 void mtl_args_stats(uint64_t *enc, uint64_t *reuse);
 
@@ -2840,7 +2841,15 @@ static unsigned present_ticks(const win_t *o) {   /* display ticks per game fram
     int m = mfx_enabled();
     if (m == MFX_HALF) return 2;
     if (m == MFX_30) { int hz = g_paced_hz > 0 ? g_paced_hz : 60; return (unsigned)(hz >= 45 ? (hz + 15) / 30 : 1); }
-    return g_display_mode || (uncapped_now() && !dm_detclock_enabled() && uncapped_interval_on()) || o->interval <= 0 ? 1u : (unsigned)o->interval;
+    if (g_display_mode || (uncapped_now() && !dm_detclock_enabled() && uncapped_interval_on()))
+        return 1u;
+    static int logged;
+    if (!logged) {
+        logged = 1;
+        if (fc26_force_present_interval_enabled())
+            LOG("[nvn] FC26_FORCE_PRESENT_INTERVAL=1：按每个节拍一帧 pacing，游戏请求的间隔 %d 保留在诊断里", o->interval);
+    }
+    return fc26_effective_present_interval(o->interval);
 }
 static uint64_t present_period(const win_t *o) {
     unsigned itv = present_ticks(o); int m = mfx_enabled(), hz = g_uncapped && !uncapped_now() ? g_paced_hz : g_hz;
