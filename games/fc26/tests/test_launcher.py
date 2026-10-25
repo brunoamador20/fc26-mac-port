@@ -118,6 +118,30 @@ class Launcher(unittest.TestCase):
         self.assertEqual(chosen, fresh)
         self.assertEqual(self.plan('FPS60=0'), fresh)
 
+    def test_handheld_only_when_chosen(self):
+        fresh = self.plan()
+        self.assertNotIn('TOTK_OPERATION_MODE', fresh['set'])
+        chosen = self.plan('handheld=1')
+        self.assertEqual(chosen['set'].pop('TOTK_OPERATION_MODE'), 'handheld')
+        self.assertEqual(chosen, fresh)
+        self.assertEqual(self.plan('handheld=0'), fresh)
+        combined = self.plan('handheld=1', 'FPS60=1')
+        self.assertEqual(combined['set'].pop('TOTK_OPERATION_MODE'), 'handheld')
+        self.assertEqual(combined['set'].pop('FC26_FPS60'), '1')
+        self.assertEqual(combined, fresh)
+
+    def test_dry_run_handheld_adds_only_requested_lines(self):
+        base = self.dry_run(['-handheld', 'NO', '-FPS60', 'NO'], {'FC26_LAUNCHER_DRYRUN': '1'})
+        self.assertEqual(base.returncode, 0, base.stderr)
+        for fps in ('NO', 'YES'):
+            r = self.dry_run(['-handheld', 'YES', '-FPS60', fps], {'FC26_LAUNCHER_DRYRUN': '1'})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            lines = r.stdout.splitlines()
+            lines.remove("export TOTK_OPERATION_MODE='handheld'")
+            if fps == 'YES':
+                lines.remove("export FC26_FPS60='1'")
+            self.assertEqual(lines, base.stdout.splitlines())
+
     def test_metalfx_only_when_chosen(self):
         # the boots that reached the game's screens ran without MetalFX (boot_all1.log: "[mfx-up] ... off")
         fresh = self.plan()

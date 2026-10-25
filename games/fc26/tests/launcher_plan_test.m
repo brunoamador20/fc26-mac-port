@@ -14,7 +14,7 @@ int main(int argc, char **argv) {
         for (int i = 3; i < argc; i++) {
             NSArray<NSString *> *kv = [@(argv[i]) componentsSeparatedByString:@"="];
             if (kv.count != 2) return 2;
-            settings[kv[0]] = [@[@"fullscreen", @"metalfx", @"hud", @"FPS60"] containsObject:kv[0]] ? @(kv[1].intValue != 0) : @(kv[1].integerValue);
+            settings[kv[0]] = [@[@"fullscreen", @"metalfx", @"hud", @"FPS60", @"handheld"] containsObject:kv[0]] ? @(kv[1].intValue != 0) : @(kv[1].integerValue);
         }
         [d registerDefaults:settings];
         LaunchPlan *p = launch_plan(d, @(argv[1]), @(argv[2]), NSScreen.screens, NSScreen.mainScreen);

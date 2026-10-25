@@ -54,7 +54,7 @@ static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
 @property NSWindow *window;
 @property NSPopUpButton *size, *monitor, *output;
 @property NSSegmentedControl *display, *scaler;
-@property NSButton *hud, *fps60, *play; @property NSTextField *note;
+@property NSButton *hud, *fps60, *handheld, *play; @property NSTextField *note;
 @property BOOL launch;
 @end
 
@@ -80,6 +80,7 @@ static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
     self.scaler = [self segments:@[T("MetalFX (mais nítido)", "MetalFX (sharper)"), T("Normal", "Plain")]];
     self.hud = [NSButton checkboxWithTitle:T("Mostrar FPS e resolução (a tecla 1 esconde)", "Show FPS and resolution (key 1 hides it)") target:self action:@selector(changed:)];
     self.fps60 = [NSButton checkboxWithTitle:T("60 fps (aumenta o calor e o consumo)", "60 fps (increases heat and power use)") target:self action:@selector(changed:)];
+    self.handheld = [NSButton checkboxWithTitle:T("Modo economia: portátil do Switch, 720p, menos calor (imagem menos nítida)", "Economy mode: Switch handheld, 720p, less heat (less sharp image)") target:self action:@selector(changed:)];
     self.note = [NSTextField wrappingLabelWithString:@""]; self.note.textColor = NSColor.secondaryLabelColor; self.note.font = [NSFont systemFontOfSize:11];
     self.play = [NSButton buttonWithTitle:T("Jogar", "Play") target:self action:@selector(start:)]; self.play.keyEquivalent = @"\r";
     NSButton *quit = [NSButton buttonWithTitle:T("Sair", "Quit") target:NSApp action:@selector(terminate:)]; quit.keyEquivalent = @"\033";
@@ -92,13 +93,14 @@ static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
         @[[self label:T("Escala", "Scaling")], self.scaler],
         @[[self label:T("Informação", "Info")], self.hud],
         @[[self label:T("Fluidez", "Smoothness")], self.fps60],
+        @[[self label:T("Economia", "Economy")], self.handheld],
     ]];
     grid.rowSpacing = 10; grid.columnSpacing = 12; [grid columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
     NSStackView *buttons = [NSStackView stackViewWithViews:@[quit, self.play]];
     NSStackView *stack = [NSStackView stackViewWithViews:@[grid, self.note, buttons]];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical; stack.alignment = NSLayoutAttributeTrailing; stack.spacing = 16;
     stack.edgeInsets = NSEdgeInsetsMake(20, 20, 20, 20);
-    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 600, 320) styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 780, 360) styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                                                 backing:NSBackingStoreBuffered defer:NO];
     self.window.title = @"FC 26"; self.window.contentView = stack; self.window.delegate = self;
     [self.note.widthAnchor constraintEqualToConstant:520].active = YES;
@@ -130,6 +132,7 @@ static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
     self.scaler.selectedSegment = [d boolForKey:@"metalfx"] ? 0 : 1;   // plain unless MetalFX was chosen (launch_plan)
     [self fillOutputs:(int)[d integerForKey:@"output"]];
     self.fps60.state = [d boolForKey:@"FPS60"];
+    self.handheld.state = [d boolForKey:@"handheld"];
     self.hud.state = [d objectForKey:@"hud"] ? [d boolForKey:@"hud"] : YES;
 }
 /* Every change is saved at once (and written to disk), so the next start shows the same choices. */
@@ -151,6 +154,7 @@ static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
     [d setInteger:self.output.selectedItem.tag forKey:@"output"]; [d setBool:self.scaler.selectedSegment == 0 forKey:@"metalfx"];
     [d setObject:screen_name(self.chosenScreen) forKey:@"monitor"]; [d setBool:self.hud.state forKey:@"hud"];
     [d setBool:self.fps60.state forKey:@"FPS60"];
+    [d setBool:self.handheld.state forKey:@"handheld"];
     CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);   // persist before launching the separate game app
 }
 - (void)start:(id)sender { (void)sender; [self save]; self.launch = YES; [NSApp stop:nil]; [self.window orderOut:nil];
@@ -197,6 +201,7 @@ static LaunchPlan *launch_plan(NSUserDefaults *d, NSString *work, NSString *home
     p.unset = unset;
 
     if ([d boolForKey:@"FPS60"]) e[@"FC26_FPS60"] = @"1";
+    if ([d boolForKey:@"handheld"]) e[@"TOTK_OPERATION_MODE"] = @"handheld";
     e[@"DM_PRESENT_HZ"] = @"60";
     NSUInteger mi = [all indexOfObject:main_screen]; if (mi == NSNotFound) mi = 0;
     for (NSUInteger i = 0; i < all.count; i++) if ([screen_name(all[i]) isEqualToString:[d stringForKey:@"monitor"]]) mi = i;
