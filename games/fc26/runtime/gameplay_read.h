@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <math.h>
-/* Explicit read-only diagnostic. Kernel-checked copy also handles absent settings. */
+/* Kernel-checked diagnostic reads also handle absent settings. */
 static int fc26_live_copy(uint64_t address, void *out, size_t size) {
     mach_vm_size_t read = 0;
     kern_return_t kr = mach_vm_read_overwrite(mach_task_self(), address, size,
@@ -34,10 +34,12 @@ static int fc26_gameplay_set(uint8_t *base, FILE *out, const char *field, const 
             if (strcmp(text,"0") && strcmp(text,"1")) goto refused;
             width=1; value=(uint32_t)(text[0]-'0');
         } else if (type==0xcb889a0) {
-            if (!*text || strspn(text,"0123456789")!=strlen(text)) goto refused;
-            unsigned long long n=strtoull(text,&end,10);
-            if (errno || *end || n>UINT32_MAX) goto refused;
-            value=(uint32_t)n;
+            /* Registration at main+0x6e986c binds this descriptor to Int32. */
+            const char *digits=text+(*text=='-');
+            if (!*digits || strspn(digits,"0123456789")!=strlen(digits)) goto refused;
+            long long n=strtoll(text,&end,10);
+            if (errno || *end || n<INT32_MIN || n>INT32_MAX) goto refused;
+            int32_t signed_value=(int32_t)n; memcpy(&value,&signed_value,4);
         } else if (type==0xcb8c6b0) {
             float f=strtof(text,&end);
             if (end==text || *end || errno || !isfinite(f)) goto refused;
@@ -52,7 +54,9 @@ static int fc26_gameplay_set(uint8_t *base, FILE *out, const char *field, const 
         if (type==0xcb8c6b0) {
             float old; memcpy(&old,&before,4);
             fprintf(out,"[fc26-gameplay] set %s before=%g requested=%s (float)\n",field,old,text);
-        } else fprintf(out,"[fc26-gameplay] set %s before=%u requested=%u (%s)\n",field,before,value,width==1?"bool":"uint32");
+        } else if (type==0xcb889a0)
+            fprintf(out,"[fc26-gameplay] set %s before=%d requested=%d (int32)\n",field,(int32_t)before,(int32_t)value);
+        else fprintf(out,"[fc26-gameplay] set %s before=%u requested=%u (bool)\n",field,before,value);
         kern_return_t kr=mach_vm_write(mach_task_self(),obj+row[2],(vm_offset_t)&value,(mach_msg_type_number_t)width);
         if (kr!=KERN_SUCCESS || !fc26_live_copy(obj+row[2],&after,width)) goto refused;
         fprintf(out,"[fc26-gameplay] set %s after_bits=%#x %s\n",field,after,after==value?"OK":"FAILED");
