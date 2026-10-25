@@ -24,6 +24,7 @@
 #include "thread_compat.h"
 #include "ipc.h"
 #include <errno.h>
+#include <stdatomic.h>
 #include <sched.h>
 #include <signal.h>
 #include <sys/mman.h>
@@ -153,12 +154,31 @@ static int wait_queue_get(thr_t *t) {
     t->wait_queue=fd>=0?fd+1:-1;
     return fd;
 }
+/* Diagnostic only: compare coalescing long waits without touching short job/input timers.
+ * A zero command restores the production policy (all finite timers critical). */
+static _Atomic uint64_t timer_critical_limit = UINT64_MAX;
+static _Atomic uint64_t timer_arms[4],timer_noncritical;
+int runtime_timer_diagnostic_limit(uint64_t max_ns) {
+    pthread_once(&profile_once,profile_init);
+    if(!thread_profile_on)return 0;
+    atomic_store_explicit(&timer_critical_limit,max_ns?max_ns:UINT64_MAX,memory_order_relaxed);
+    fprintf(stderr,"[timer-profile] critical_limit_ns=%llu\n",(unsigned long long)max_ns);
+    return 1;
+}
+static unsigned timer_wait_flags(uint64_t remaining) {
+    if(!thread_profile_on)return NOTE_NSECONDS|NOTE_CRITICAL;
+    unsigned bin=remaining<=1000000?0:remaining<=16000000?1:remaining<=100000000?2:3;
+    atomic_fetch_add_explicit(&timer_arms[bin],1,memory_order_relaxed);
+    int critical=remaining<=atomic_load_explicit(&timer_critical_limit,memory_order_relaxed);
+    if(!critical)atomic_fetch_add_explicit(&timer_noncritical,1,memory_order_relaxed);
+    return NOTE_NSECONDS|(critical?NOTE_CRITICAL:0);
+}
 static int profile_critical_wait(thr_t *t,uint64_t deadline,const struct timespec *fallback) {
     int fd=wait_queue_get(t);
     if(fd<0) return profile_cond(&t->cv,fallback);
     uint64_t now=now_ns(); if(now>=deadline) return ETIMEDOUT;
     struct kevent timer,events[2];
-    EV_SET(&timer,1,EVFILT_TIMER,EV_ADD|EV_ONESHOT,NOTE_NSECONDS|NOTE_CRITICAL,(intptr_t)(deadline-now),NULL);
+    EV_SET(&timer,1,EVFILT_TIMER,EV_ADD|EV_ONESHOT,timer_wait_flags(deadline-now),(intptr_t)(deadline-now),NULL);
     profile_unlock();
     int n=kevent(fd,&timer,1,events,2,NULL), error=errno;
     profile_lock();
@@ -186,6 +206,10 @@ static void profile_thread_name(uint64_t arg,char name[64]) {
 void dm_thread_profile_frame(uint64_t frame) {
     pthread_once(&profile_once,profile_init);
     if (!thread_profile_on || frame % 300) return;
+    fprintf(stderr,"[timer-profile] frame=%llu arms_le1ms=%llu arms_le16ms=%llu arms_le100ms=%llu arms_gt100ms=%llu noncritical=%llu\n",
+        (unsigned long long)frame,(unsigned long long)atomic_exchange(&timer_arms[0],0),
+        (unsigned long long)atomic_exchange(&timer_arms[1],0),(unsigned long long)atomic_exchange(&timer_arms[2],0),
+        (unsigned long long)atomic_exchange(&timer_arms[3],0),(unsigned long long)atomic_exchange(&timer_noncritical,0));
     struct sample { uint32_t h; int prio,core,svc,kind; uint64_t entry,arg,addr,p[32]; } rows[256];
     unsigned n=0;
     profile_lock();
@@ -306,7 +330,7 @@ static void host_sleep_ns(int64_t ns) {
         uint64_t remaining=deadline-now;
         if(fd>=0) {
             struct kevent event;
-            EV_SET(&event,1,EVFILT_TIMER,EV_ADD|EV_ONESHOT,NOTE_NSECONDS|NOTE_CRITICAL,(intptr_t)remaining,NULL);
+            EV_SET(&event,1,EVFILT_TIMER,EV_ADD|EV_ONESHOT,timer_wait_flags(remaining),(intptr_t)remaining,NULL);
             int n=kevent(fd,&event,1,&event,1,NULL);
             if(n==1 && !(event.flags&EV_ERROR)) continue;
             if(n<0 && errno==EINTR) continue;

@@ -48,5 +48,16 @@ int main(void) {
     assert(last_queue != main_queue);
     errno = 0; assert(fcntl(last_queue, F_GETFD) == -1 && errno == EBADF);
     assert(fcntl(main_queue, F_GETFD) >= 0);
+    /* The diagnostic is inert without profiling; production keeps all timers critical. */
+    assert(!runtime_timer_diagnostic_limit(16000000));
+    thread_profile_on=1;
+    assert(runtime_timer_diagnostic_limit(16000000));
+    assert(timer_wait_flags(1000000)&NOTE_CRITICAL);
+    assert(timer_wait_flags(16000000)&NOTE_CRITICAL);
+    assert(!(timer_wait_flags(100000000)&NOTE_CRITICAL));
+    assert(atomic_load(&timer_noncritical)==1);
+    assert(runtime_timer_diagnostic_limit(0));
+    assert(timer_wait_flags(100000000)&NOTE_CRITICAL);
+    thread_profile_on=0;
     return 0;
 }

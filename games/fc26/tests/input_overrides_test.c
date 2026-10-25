@@ -45,6 +45,7 @@ void runtime_swkbd_selftest(void) {}
 void runtime_front_text_test(const char *o, const char *t) { (void)o; (void)t; }
 void runtime_hle_trace_set(int m) { (void)m; }
 void runtime_frame_step_pin(double m) { (void)m; }
+int runtime_timer_diagnostic_limit(uint64_t ns) {(void)ns;return 0;}
 void runtime_dump_threads(void) {}
 int runtime_survey_command(const char *l) { (void)l; return 0; }
 

@@ -165,6 +165,8 @@ static void *input_file(void *arg) {
         } else if (sscanf(line, "key %u %u %n", &code, &ms, &used) == 2 && used && !line[used] && code < 128 && ms > 0 && ms <= 5000) {
             fprintf(stderr, "[totk-input] file: key %u for %u ms\n", code, ms);
             runtime_input_key_synthetic(code, 1); usleep(ms * 1000); runtime_input_key_synthetic(code, 0);
+        } else if (sscanf(line,"timercritical %u %n",&ms,&used)==1 && used && !line[used] && ms<=1000) {
+            if(!runtime_timer_diagnostic_limit((uint64_t)ms*1000000)) fprintf(stderr,"[timer-profile] enable FC26_THREAD_PROFILE first\n");
         } else if (sscanf(line, "passdump %u %n", &code, &used) == 1 && used && !line[used] && code > 0 && code < 16) {
             extern void dm_gfx_passdump_next(long n); dm_gfx_passdump_next((long)code);
         } else if (!strncmp(line, "gpucapture ", 11) && line[11]) {   /* "gpucapture <path>.gputrace": a Metal capture of the next frame (needs MTL_CAPTURE_ENABLED=1) */

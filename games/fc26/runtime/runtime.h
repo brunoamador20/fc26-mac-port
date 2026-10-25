@@ -38,6 +38,7 @@ void *runtime_applet_override(const char *name);
 void *runtime_swkbd_override(const char *name);   /* runtime/swkbd_host.c: nn::swkbd text entry with the Mac keyboard */
 void runtime_swkbd_probe(void);
 void runtime_swkbd_selftest(void);
+int runtime_timer_diagnostic_limit(uint64_t max_ns); /* FC26_THREAD_PROFILE only; 0 restores all-critical timers */
 void runtime_dump_threads(void);   /* threads.c: every guest thread's wait state and guest return chain (TOTK_INPUT_FILE "threads") */   /* diagnostic "kbtest": show the text entry bar from a thread of its own */
 void runtime_frame_step_pin(double ms);                  /* game_patches.c: pin the real-time frame step (diagnostics), 0 = real time */
 void runtime_frame_step_update(uint64_t now_ns);
