@@ -62,6 +62,8 @@ void dm_gfx_gpucapture_next(void) {}
 void dm_gfx_passdump_next(void) {}
 void dm_gfx_querylog_next(void) {}
 void dm_gfx_set_flag(int flag, int value) { (void)flag; (void)value; }
+void dm_gfx_frame_burst(unsigned n, const char *p) { (void)n; (void)p; abort(); }
+uint8_t *runtime_module_base(const char *name) { (void)name; return NULL; }
 void dm_gfx_shot_at(uint64_t frame, const char *name) { (void)frame; (void)name; }
 void dm_gfx_texdump_next(void) {}
 void dm_gfx_window_shot(const char *name) { (void)name; }

@@ -33,6 +33,8 @@ void runtime_rumble_set(unsigned side, float al, float fl, float ah, float fh) {
 
 int runtime_motion_read(RuntimeMotionState *m, int max) { (void)m; (void)max; return 0; }
 void runtime_motion_start(void) {}
+void dm_gfx_frame_burst(unsigned n, const char *p) { (void)n; (void)p; abort(); }
+uint8_t *runtime_module_base(const char *name) { (void)name; return NULL; }
 void dm_gfx_shot_at(long f, const char *p) { (void)f; (void)p; }
 void runtime_front_request_close(void) {}
 void dm_gfx_passdump_next(long n) { (void)n; }

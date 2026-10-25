@@ -11846,7 +11846,18 @@ void dm_gfx_shot_at(long k, const char *path) {
 /* TOTK: frame-keyed screenshots taken at the game's present call (nvnQueuePresentTexture), independent of the display
    link / drawable pacing (an asleep or locked display stalls presents; the game keeps running). DM_NVN_SHOT_FRAME=1 with
    DM_NVN_SHOT=frame,...:path. */
+#include "fc26_frame_burst.h"
+void dm_gfx_frame_burst(unsigned n, const char *path) {
+    if (!fc26_burst_request(n, path)) MLOG("[fc26-burst] FAILED: busy or invalid request");
+}
 void mtl_shot_at_present(const tex_t *t) {
+    if (fc26_burst_active()) {
+        mtl_finish_gpu();
+        id<MTLCommandBuffer> cb = q_cb();
+        fc26_burst_capture(tex_mtl(t), cb, atomic_load(&g_cur_frame), clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW));
+        cb_commit(cb);
+    }
+
     static long shots[16]; static int nshot = -1; static const char *shot_path; static char done[16]; static int by_frame;
     if (nshot < 0) {
         nshot = 0; const char *e = getenv("DM_NVN_SHOT"), *c = e ? strchr(e, ':') : NULL; const char *bf = getenv("DM_NVN_SHOT_FRAME"); by_frame = bf && atoi(bf);

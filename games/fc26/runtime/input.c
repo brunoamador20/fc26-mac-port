@@ -151,6 +151,7 @@ __attribute__((constructor)) static void input_script_start(void) {
    kbtest / kbtype <text> / kbenter / kbesc / kbshot <path> (the text entry bar), threads (dump every guest thread's wait), hletrace <0|1|2> (host calls the game makes), framestep <ms> (pin the frame step), close. */
 extern void dm_gfx_shot_at(long frames, const char *path);
 extern void runtime_front_request_close(void);
+#include "gameplay_read.h"
 static void *input_file(void *arg) {
     FILE *f = fopen((const char *)arg, "r"); if (!f) runtime_fail("cannot open TOTK_INPUT_FILE");
     char line[1200];
@@ -184,6 +185,10 @@ static void *input_file(void *arg) {
             extern void dm_gfx_texdump_next(const char *path);
             line[strcspn(line, "\r\n")] = 0; if (!line[8] || !strstr(line + 8, "%d")) runtime_fail("diagnostic texdump path needs %d");
             dm_gfx_texdump_next(line + 8);
+        } else if (sscanf(line, "frameburst %u %n", &code, &used) == 1 && used) {
+            line[strcspn(line, "\r\n")] = 0;
+            extern void dm_gfx_frame_burst(unsigned n, const char *path);
+            dm_gfx_frame_burst(code, line + used);
         } else if (sscanf(line, "shotn %u %n", &code, &used) == 1 && used && code > 0 && code <= 60) {
             /* "shotn <n> <path with %d>": screenshots of n consecutive game frames (frame flicker); %d = 0..n-1 */
             line[strcspn(line, "\r\n")] = 0; const char *fmt = line + used;
@@ -208,6 +213,8 @@ static void *input_file(void *arg) {
         } else if (!strncmp(line, "framestep ", 10)) {   /* "framestep <ms>": pin the real-time frame step, 0 = back to real time */
             char *end; double ms = strtod(line + 10, &end); if (end == line + 10 || ms < 0 || ms > 100) runtime_fail("framestep takes milliseconds (0 = real time)");
             runtime_frame_step_pin(ms);
+        } else if (!strcmp(line, "gameplay\n")) {
+            if (!fc26_gameplay_read(runtime_module_base("main"), stderr)) fprintf(stderr, "[fc26-gameplay] FAILED\n");
         } else if (!strcmp(line, "threads\n")) {   /* every guest thread's wait state and guest return chain, now (a hang: what is each thread waiting for) */
             runtime_dump_threads();
         } else if (!strcmp(line, "close\n")) { runtime_front_request_close(); break; }
