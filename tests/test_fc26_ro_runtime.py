@@ -67,7 +67,7 @@ def runtime_tree(directory):
     ro_module.c's default image folder is rewritten/<TOTK_GAME_DIR>)."""
     tree = directory / 'rt/runtime'
     shutil.copytree(RO, tree / 'ro')
-    for header in ('runtime.h', 'ipc.h'):
+    for header in ('runtime.h', 'ipc.h', 'time_probe.h'):
         own = ROOT / 'games/fc26/runtime' / header
         shutil.copy(own if own.exists() else ROOT / 'games/by3/runtime' / header, tree / header)
     (tree / 'game_version.h').write_text(f'#pragma once\n#define GAME_TITLE_ID {synth.FC26_PROGRAM_ID:#x}ULL\n'
@@ -111,7 +111,7 @@ class Service(unittest.TestCase):
         write_fixture(cls.dir)
         tree = runtime_tree(cls.dir)
         cls.exe = cls.dir / 'service'
-        sources = [ROOT / 'tests/fc26_ro_service_test.c'] + [tree / 'ro' / f for f in ('ro_core.c', 'ro_sha256.c', 'ro_module.c', 'ro_service.c')]
+        sources = [ROOT / 'tests/fc26_ro_service_test.c', ROOT / 'games/fc26/runtime/time_probe.c'] + [tree / 'ro' / f for f in ('ro_core.c', 'ro_sha256.c', 'ro_module.c', 'ro_service.c')]
         made = build(cls.compiler, sources, cls.exe, [tree])
         if made.returncode: raise AssertionError(made.stdout + made.stderr)
 

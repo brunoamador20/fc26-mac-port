@@ -121,6 +121,7 @@ class TestViOverrides(unittest.TestCase):
                 f'-I{HERE / "third_party/d2r_gfx/gfx/nvn/include"}',
                 str(HERE / 'tests/vi_overrides_test.c'),
                 str(HERE / 'runtime/frontend.m'),
+                str(HERE / 'runtime/time_probe.c'),
                 str(HERE / 'runtime/missing.c'),
                 '-framework', 'Cocoa',
                 '-framework', 'Metal',
