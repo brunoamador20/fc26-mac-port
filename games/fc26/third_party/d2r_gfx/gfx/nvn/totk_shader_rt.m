@@ -11,7 +11,7 @@
 #include "dmsh_chain.h"
 #include "../../host/hle.h"
 #include <CommonCrypto/CommonDigest.h>
-#include <mach-o/dyld.h>
+#include "runtime_executable.h"
 #include <pthread.h>
 #include <spawn.h>
 #include <stdio.h>
@@ -50,7 +50,7 @@ static _Atomic int64_t g_cached_variants = -1;
 static NSString *root_dir(void) {   // native-port/ (the executable lives in native-port/build/)
     if (g_root) return g_root;
     char path[4096]; uint32_t n = sizeof path;
-    if (_NSGetExecutablePath(path, &n)) die("executable path too long");
+    if (fc26_runtime_executable(path, &n)) die("executable path too long");
     g_root = [[[@(path) stringByResolvingSymlinksInPath] stringByDeletingLastPathComponent] stringByDeletingLastPathComponent];
     return g_root;
 }

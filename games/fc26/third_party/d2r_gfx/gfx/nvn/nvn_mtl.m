@@ -50,7 +50,7 @@ static uint64_t g_gen_shown;            // interpolated frames handed to the scr
 #include <stdarg.h>
 #include <setjmp.h>
 extern __thread sigjmp_buf *runtime_fault_guard;   // runtime/loader.c: a guarded read of guest memory survives a fault
-#include <mach-o/dyld.h>
+#include "runtime_executable.h"
 #include <libgen.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -4705,7 +4705,7 @@ static NSMutableDictionary<NSString *, NSString *> *g_shassets;
 static NSString *g_shmap_path, *g_msl_dir;
 static NSString *exe_rel(const char *rel) {
     char buf[4096]; uint32_t n = sizeof buf;
-    if (_NSGetExecutablePath(buf, &n)) return nil;
+    if (fc26_runtime_executable(buf, &n)) return nil;
     char *dir = dirname(buf);
     return [NSString stringWithFormat:@"%@/%@", @(dir), @(rel)];   // %s decodes with the system C-string encoding, not UTF-8: a non-ASCII install path (e.g. /Volumes/游戏) came out empty
 }

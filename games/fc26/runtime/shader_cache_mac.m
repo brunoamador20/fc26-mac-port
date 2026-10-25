@@ -9,7 +9,7 @@
 #include "runtime.h"
 #include "shader_cache.h"
 #include <limits.h>
-#include <mach-o/dyld.h>
+#include "../third_party/d2r_gfx/gfx/nvn/runtime_executable.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,7 +36,7 @@ static uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 /* The work folder: the executable is <work>/build/fc26-native (totk_shader_rt.m root_dir, the same rule). */
 static NSString *root_dir(void) {
     char path[PATH_MAX]; uint32_t n = sizeof path;
-    if (_NSGetExecutablePath(path, &n)) return nil;
+    if (fc26_runtime_executable(path, &n)) return nil;
     return [[@(path) stringByResolvingSymlinksInPath].stringByDeletingLastPathComponent stringByDeletingLastPathComponent];
 }
 /* The translator the kit's service_start will run (same choice: TOTK_SHADER_XLATE, TOTK_SHADER_SERVICE=python, else the

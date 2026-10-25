@@ -45,6 +45,8 @@ with (logs/'modojogo_gamepolicy.log').open('w') as stream:
         assert data['args']==['rewritten/v1638400','boot'], data['args']
         actual = data['environment']
         assert actual == json.loads((work/'mock-expected.json').read_text()), 'full environment differs'
+        assert data['constructorInput'] == actual['TOTK_INPUT_FILE']
+        assert data['constructorRuntime'] == actual['FC26_RUNTIME_EXECUTABLE']
         assert actual['KEEP']=='sentinel' and actual['DM_PRESENT_HZ']=='60'
         assert not any(k in actual for k in ('FC26_AUDIO','TOTK_HEADLESS','TOTK_AUDIO_OFF','FC26_APP_BOOTSTRAP'))
         input_file=home/'Library/Application Support/MacNativeGames/FC26/input.txt'

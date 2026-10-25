@@ -239,6 +239,7 @@ static NSDictionary *game_environment(LaunchPlan *p, NSDictionary *inherited) {
     [env removeObjectForKey:@"FC26_APP_BOOTSTRAP"];
     for (NSString *key in p.unset) [env removeObjectForKey:key];
     [env addEntriesFromDictionary:p.set];
+    env[@"FC26_RUNTIME_EXECUTABLE"] = p.args[0];
     return env;
 }
 static NSURL *prepare_game_app(LaunchPlan *p, NSError **error) {
