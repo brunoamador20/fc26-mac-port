@@ -520,7 +520,9 @@ static void abort_report(int num) {
  (void)num;void *frames[64];int n=backtrace(frames,64);write(2,"[totk] host abort, call stack:\n",31);backtrace_symbols_fd(frames,n,2);
  signal(SIGABRT,SIG_DFL);raise(SIGABRT);
 }
+extern int runtime_app_bootstrap(void);
 int main(int argc,char **argv) {
+ if(runtime_app_bootstrap()){fprintf(stderr,"[launcher] app bootstrap failed\n");return 1;}
  need(argc==3,"usage: fc26-native rewritten-dir probe|boot");ro_module_set_dir(argv[1]);   /* NRO images sit next to main's */
  /* One game or GPU probe at a time (memory, GPU time): wait for the slot before anything is loaded. */
  if(!strcmp(argv[2],"boot")||!strncmp(argv[2],"probe-gpu",9))runtime_game_slot_acquire(argv[2]);
