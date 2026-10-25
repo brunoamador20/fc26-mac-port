@@ -66,6 +66,7 @@ void dm_gfx_shot_at(uint64_t frame, const char *name) { (void)frame; (void)name;
 void dm_gfx_texdump_next(void) {}
 void dm_gfx_window_shot(const char *name) { (void)name; }
 int runtime_aspect_toggle(void) { return 0; }
+int runtime_timer_diagnostic_limit(uint64_t ns) {(void)ns;return 0;}
 void runtime_dump_threads(void) {}
 void runtime_frame_step_pin(double ms) { (void)ms; }
 void runtime_front_request_close(void) {}
