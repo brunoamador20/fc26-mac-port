@@ -19,6 +19,7 @@ from PIL import Image, ImageChops, ImageStat, ImageOps
 ROOT = next(p for p in Path(__file__).resolve().parents if (p/'work').is_dir())
 WORK = ROOT/'work'; LOGS = WORK/'logs'
 EA_PATTERN = r'servidores.*\bea\b|\bea\b.*(servidores|indisponiv)|nao.*possivel.*(ligar|conectar|estabelecer)'
+START_PATTERN = r'(prime|pressione|press).*qualquer.*(botao|button)'
 def norm(s):
     return ''.join(c for c in unicodedata.normalize('NFD', s.lower()) if not unicodedata.combining(c))
 def processes():
@@ -85,8 +86,23 @@ class Route:
         if re.fullmatch(r'\d{1,2}:\d{2}',clock_text): rows.insert(0,dict(text=clock_text,box=[.083,.104,.043,.022]))
         path.with_suffix('.ocr.json').write_text(json.dumps(rows,ensure_ascii=False))
         return path,rows
+    def start_prompt(self,path,rows):
+        """Lê só a legenda estável; o cenário animado não é referência."""
+        if re.search(START_PATTERN,norm(' '.join(r['text'] for r in rows))): return rows
+        with Image.open(path) as source:
+            w,h=source.size
+            crop=source.crop((int(.045*w),int(.91*h),int(.28*w),int(.95*h)))
+            crop=ImageOps.invert(ImageOps.grayscale(crop)).resize((940,160))
+            out=io.BytesIO(); crop.save(out,format='PNG')
+        text=subprocess.check_output(['tesseract','stdin','stdout','--psm','7','-l','eng'],
+            input=out.getvalue(),stderr=subprocess.DEVNULL,timeout=10).decode().strip()
+        if re.search(START_PATTERN,norm(text)):
+            self.record('legenda_canto_lida',photo=str(path),text=text)
+            return rows+[dict(text=text,box=[.05,.922,.12,.022])]
+        return rows
     def confirm(self,path,rows,label,pattern,box=None):
         if not re.search(pattern,norm(' '.join(r['text'] for r in rows))): return False
+        if box is None and label=='inicio_botao': box=(.05,.922,.16,.942)
         if box is None and label=='lado': box=(.44,.47,.56,.51)
         if box is None and label=='entrada_em_campo':
             title=next((r for r in rows if norm(r['text']).strip()=='arouca' and .2<r['box'][0]<.5 and .3<r['box'][1]<.7),None)
@@ -147,7 +163,7 @@ class Route:
         # Reconhece cada tela antes de enviar a ação correspondente. Máximo 120 fotos.
         counts={}; clock_prev=None
         for _ in range(120):
-            path,rows=self.shot(); text=norm(' '.join(r['text'] for r in rows)); clock=self.clock(rows)
+            path,rows=self.shot(); rows=self.start_prompt(path,rows); text=norm(' '.join(r['text'] for r in rows)); clock=self.clock(rows)
             if clock is not None:
                 if clock_prev and 0<clock-clock_prev[0]<180:
                     elapsed=time.monotonic()-clock_prev[1]
@@ -179,7 +195,7 @@ class Route:
                     target=next((r['box'][1] for r in rows if 'pontape de saida' in norm(r['text']) and r['box'][0]<.3),None)
                     action=13 if target is not None and best[2]>target else 1
             else:
-                stages=[('inicio',r'(prime|pression|press).*(iniciar|continuar|start)|jogar offline|vamos jogar'),
+                stages=[('inicio_botao',START_PATTERN),('inicio',r'(prime|pression|press).*(iniciar|continuar|start)|jogar offline|vamos jogar'),
                     ('perfil',r'(definicoes pessoais|configuracoes pessoais|carregar perfil)'),
                     ('dificuldade',r'neste primeiro|nivel.*dificuldade|dificuldade.*ajustado'),
                     ('lado',r'(escolher lado|selecionar lado|selecionar lados)'),

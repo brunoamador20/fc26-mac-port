@@ -80,6 +80,21 @@ class Safety(unittest.TestCase):
                       dict(text='vs RIO AVE FC',box=[.28,.65,.1,.02])]
                 self.assertTrue(r.confirm(photo,rows,'entrada_em_campo',r'arouca.*vs.*rio ave'))
 
+    def test_locker_room_prompt_from_real_failed_capture(self):
+        photo=rota.LOGS/'integ_ia30_step_068.png'
+        if not photo.exists(): self.skipTest('Captura local fora do git')
+        r=self.route()
+        with tempfile.TemporaryDirectory() as d:
+            r.refs=Path(d)
+            rows=r.start_prompt(photo,[])
+            self.assertTrue(r.confirm(photo,rows,'inicio_botao',rota.START_PATTERN))
+            self.assertTrue((r.refs/'inicio_botao.png').exists())
+            # A segunda leitura precisa conferir a referência já guardada.
+            self.assertTrue(r.confirm(photo,r.start_prompt(photo,[]),'inicio_botao',rota.START_PATTERN))
+            blank=Path(d)/'blank.png'
+            rota.Image.new('RGB',(1920,1080),'black').save(blank)
+            self.assertEqual(r.start_prompt(blank,[]),[])
+
     def test_invalid_clock_seconds_are_rejected(self):
         r=self.route()
         self.assertIsNone(r.clock([dict(text='05:99',box=[.08,.10,.04,.02])]))
