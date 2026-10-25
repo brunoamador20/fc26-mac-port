@@ -6,6 +6,7 @@
 #include <stdatomic.h>
 #include <math.h>
 #include "runtime.h"
+#include "time_probe.h"
 #include "game_version.h"
 #include "totk_ui_lang.h"
 #include "../third_party/d2r_gfx/gfx/nvn/totk_mfx_mode.h"
@@ -94,8 +95,10 @@ static int assume_focus(void){static int v=-1;if(v<0){const char *e=getenv("TOTK
 /* Keep the guest active when the macOS window loses key status. Native input is still cleared
    in windowDidResignKey so a held key cannot remain stuck while another app has focus. */
 int runtime_front_focus(void){return 1;}
+static _Atomic uint64_t profile_vblanks;
 static CVReturn vsync_callback(CVDisplayLinkRef link,const CVTimeStamp *now,const CVTimeStamp *output,CVOptionFlags flags,CVOptionFlags *out,void *ctx){
  (void)link;(void)now;(void)output;(void)flags;(void)out;(void)ctx;
+ if(&fc26_time_probe_on && fc26_time_probe_on)fc26_clock_note(FC_CLOCK_VBLANK,atomic_fetch_add(&profile_vblanks,1)+1);
  pthread_mutex_lock(&vsyncLock);for(unsigned i=0;i<vsyncCount;i++)hle_signal_system_event(vsyncEvents[i]);pthread_mutex_unlock(&vsyncLock);return kCVReturnSuccess;
 }
 @interface TOTKInputView:NSView
@@ -383,13 +386,13 @@ static uint32_t vi_get_latest_frame_number(uint64_t *out,const void *layer){
  if(!out||layer!=&layerIdentity)return 0xf601;
  uint64_t current=atomic_load_explicit(&queuedFrames,memory_order_relaxed);
  if(current==0)return 0x1672;
- *out=current;
+ *out=current;fc26_clock_note(FC_CLOCK_VI_FRAME,current);
  return 0;
 }
 /* sdk+0x43df10 returns the compositor's frame history. The host has no compositor history (presented times exist only with GPU
    submission on), so it reports no entries; PlatformNvn+0x77054 skips its frame-timing update when the count is below 1. */
 static int vi_list_frame_history(void *out,int count,const void *layer){
- (void)out;(void)count;(void)layer;
+ (void)out;(void)count;(void)layer;fc26_clock_note(FC_CLOCK_VI_HISTORY,0);
  static int once; if(!once++)fprintf(stderr,"[totk] nn::vi::ListFrameHistory: no compositor frame history on the host, 0 entries\n");
  return 0;
 }
@@ -410,7 +413,7 @@ static void vi_close_display(void *display){(void)display;}
 static void vi_finalize(void){layerCreated=0;viReady=0;}
 static uint32_t vi_window(void **out,void *layer){if(!out||layer!=&layerIdentity)return 0xf601;*out=front_metal_layer();return 0;}
 static uint32_t vi_vsync(void *ev,void *display){
- if(!ev||display!=&displayIdentity)return 0xf601;hle_bind_system_event(ev,1);
+ if(!ev||display!=&displayIdentity)return 0xf601;fc26_clock_note(FC_CLOCK_VSYNC_REGISTER,1);hle_bind_system_event(ev,1);
  pthread_mutex_lock(&vsyncLock);if(vsyncCount>=16)runtime_fail("VI display event limit");vsyncEvents[vsyncCount++]=ev;pthread_mutex_unlock(&vsyncLock);return 0;
 }
 void *runtime_front_override(const char *name){

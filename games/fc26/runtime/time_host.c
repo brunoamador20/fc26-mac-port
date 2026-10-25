@@ -3,6 +3,7 @@
    counts seconds of host continuous time with one source id per process. ClockSnapshot uses the public
    0xD0-byte layout because game code may read its fields through inline accessors. */
 #include "runtime.h"
+#include "time_probe.h"
 #include <mach/mach_time.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -44,7 +45,7 @@ static int64_t posix_now(void) { return (int64_t)time(NULL) + clock_offset(); }
 static unsigned initialize(void) { initialized = 1; pthread_once(&once, make_source); return 0; }
 static unsigned finalize(void) { initialized = 0; return 0; }
 static unsigned char is_initialized(void) { return (unsigned char)initialized; }
-static unsigned user_time(int64_t *out) { if (!out) return R_INVALID; *out = posix_now(); return 0; }
+static unsigned user_time(int64_t *out) { if (!out) return R_INVALID; *out = posix_now(); fc26_clock_note(FC_CLOCK_POSIX_SEC,(uint64_t)*out); return 0; }
 /* The sdk's musl takes CLOCK_REALTIME (clock_gettime, and gettimeofday/time through it) from a pointer at sdk+0xb87018:
    sdk+0x91154 stores there this function or the adjustable one, read from their import slots (sdk+0xb73e38/0xb73e40),
    in place of its tick-based default. The sdk's own versions need the time client that nn::time::Initialize opens,
@@ -54,11 +55,12 @@ static unsigned user_timespec(struct timespec *ts) {
     if (!ts) return R_INVALID;
     if (clock_gettime(CLOCK_REALTIME, ts)) runtime_fail("host CLOCK_REALTIME");
     ts->tv_sec += clock_offset();
+    fc26_clock_note(FC_CLOCK_REALTIME_NS,(uint64_t)ts->tv_sec*1000000000+(uint64_t)ts->tv_nsec);
     return 0;
 }
 /* StandardSteadyClock::now() returns the chrono-style time_point: the int64 seconds value only, 0 without a source
    (sdk+0x3d1d88 returns it in x0; returning the 0x18-byte struct made the host write through the caller's stale x8). */
-static int64_t steady_clock_now(void) { return steady_now().value; }
+static int64_t steady_clock_now(void) { int64_t v=steady_now().value;fc26_clock_note(FC_CLOCK_STEADY_SEC,(uint64_t)v);return v; }
 
 static void fill_calendar(CalendarTime *c, CalendarAdditionalInfo *info, int64_t posix, int local) {
     time_t t = (time_t)posix; struct tm tm;
@@ -108,6 +110,8 @@ static int64_t user_difference(const ClockSnapshot *a, const ClockSnapshot *b) {
 }
 
 void *runtime_time_override(const char *name) {
+    extern void *runtime_time_probe_override(const char *) __attribute__((weak_import));
+    if(runtime_time_probe_override) { void *fn=runtime_time_probe_override(name);if(fn)return fn; }
     static const struct { const char *name; void *fn; } map[] = {
         {"_ZN2nn4time10InitializeEv", initialize}, {"_ZN2nn4time8FinalizeEv", finalize}, {"_ZN2nn4time13IsInitializedEv", is_initialized},
         {"_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", user_time},

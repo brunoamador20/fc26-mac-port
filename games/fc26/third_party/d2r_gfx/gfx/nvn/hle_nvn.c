@@ -1,3 +1,4 @@
+#include "../../../../runtime/time_probe.h"
 #include <malloc/malloc.h>
 // NVN 接口层：接管 main 导入的 nvnBootstrapLoader，sdk 里的 NVN 驱动整块不执行。
 // 523 个 NVN 名字一律返回计数跳板（nvn_thunks.S），跳板再转到这里的实现：
@@ -2496,6 +2497,7 @@ static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // 取图里节拍等待 / 等出
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // 宿主进程起点（main.c；UIMSG 时间戳同基） | Host process start point (main.c; same base as the UIMSG timestamps)
 NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
+    fc26_clock_note(FC_CLOCK_NVN_ACQUIRE,1);
     NVN_BLOCKING();
     totk_tl(TL_ACQ_IN, 0, 0);
     win_t *o = (win_t *)w;
@@ -2617,6 +2619,7 @@ void nvn_gpu_recent(double *avg, double *p95, unsigned *n) {
 }
 static int dcmp(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
 __attribute__((weak)) void dm_thread_profile_frame(uint64_t frame) { (void)frame; }
+__attribute__((weak)) void dm_time_profile_frame(uint64_t frame) { (void)frame; }
 static void tsummary(uint64_t frame) {
     dm_thread_profile_frame(frame);
     char line[1024]; size_t o = 0;
@@ -2912,6 +2915,7 @@ static void present_exec(win_t *o, int idx, double period, const int crop[4], ui
     gfx_leave();
 }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
+    fc26_clock_note(FC_CLOCK_NVN_PRESENT,1);
     NVN_BLOCKING();
     (void)q; win_t *o = (win_t *)w; o->presents++;
     front_frame_queued();
@@ -3029,6 +3033,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
     prev_in = t0; prev_pass = ps; prev_draw = dr;
     dump_frame();
+    dm_time_profile_frame(g_frame);
     if (g_frame % TWIN == 0) tsummary(g_frame);
     if (call_stats_on() && g_frame % 300 == 0) {
         static uint64_t pd; uint64_t ps2, dr2; mtl_stats(&ps2, &dr2); uint64_t all = dr2 - pd; pd = dr2;

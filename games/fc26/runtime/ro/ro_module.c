@@ -1,3 +1,4 @@
+#include "../time_probe.h"
 /* See ro_module.h. Mapping follows loader.c's map_module / seal for the Mac (not the iOS embedding path). */
 #include "ro_module.h"
 #include "ro_sha256.h"
@@ -323,6 +324,7 @@ int ro_module_dispatch(uint64_t ret, uint64_t *regs) {
     if (g.timer) {   /* the Switch counter runs at 19.2 MHz: ns * 12 / 625, as loader.c */
         if (g.arg >= 31 || g.arg == 18) runtime_fail("timer target register");
         regs[g.arg] = (uint64_t)((__uint128_t)runtime_now_ns() * 12 / 625);
+        fc26_clock_note(FC_CLOCK_RO_TICK,regs[g.arg]);
         return 1;
     }
     runtime_svc(g.arg, regs, name, g.original);

@@ -1,5 +1,6 @@
 /* Native ARM64 module loader. Guest images and generated metadata stay local. */
 #include "runtime.h"
+#include "time_probe.h"
 #include "module_offset.h"
 #include "totk_ui_lang.h"
 #include <TargetConditionals.h>
@@ -372,7 +373,7 @@ void runtime_dispatch(uint64_t ret,uint64_t *regs) {
  for(unsigned i=0;i<NM;i++)for(unsigned j=0;j<modules[i].ngate;j++) {
   const Gate *g=&modules[i].gates[j];if((uintptr_t)modules[i].base+g->ret!=ret)continue;
   if(g->timer){mach_timebase_info_data_t tb;mach_timebase_info(&tb);__uint128_t ns=(__uint128_t)mach_absolute_time()*tb.numer/tb.denom;
-   need(g->arg<31&&g->arg!=18,"timer target register");regs[g->arg]=(uint64_t)(ns*12/625);__atomic_fetch_add(&timer_calls,1,__ATOMIC_RELAXED);return;}
+   need(g->arg<31&&g->arg!=18,"timer target register");regs[g->arg]=(uint64_t)(ns*12/625);fc26_clock_note(FC_CLOCK_MAIN_TICK,regs[g->arg]);if(!strcmp(modules[i].name,"sdk") && g->original==1300896)fc26_clock_note(FC_CLOCK_SYSTEM_TICK,regs[g->arg]);__atomic_fetch_add(&timer_calls,1,__ATOMIC_RELAXED);return;}
   __atomic_fetch_add(&svc_calls,1,__ATOMIC_RELAXED);runtime_svc(g->arg,regs,modules[i].name,g->original);return;
  }
  if(ro_module_dispatch(ret,regs))return;   /* a gate of a module loaded through nn::ro */
