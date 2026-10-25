@@ -8,6 +8,7 @@ from pathlib import Path
 import json
 import os
 import platform
+import plistlib
 import re
 import shlex
 import shutil
@@ -150,14 +151,49 @@ class Launcher(unittest.TestCase):
             self.assertIn('unset ' + ' '.join(sorted(CLEARED)), lines)
             self.assertNotIn("export TOTK_AUDIO_OFF='1'", lines)
             self.assertIn(f"export TOTK_SHADER_CACHE='{self.work}/{SHADER_CACHE}'", lines)
-            self.assertTrue(any(line.startswith(f"exec '{self.work}/{RUNTIME}/fc26-native' rewritten/v1638400 boot 2> '")
-                                and line.endswith("/Library/Logs/MacNativeGames/fc26.log'") for line in lines), r.stdout)
+            self.assertTrue(any(line.startswith(f"exec '{self.work}/{RUNTIME}/fc26-native' rewritten/v1638400 boot > '")
+                                and line.endswith("/Library/Logs/MacNativeGames/fc26.log' 2>&1") for line in lines), r.stdout)
 
     def test_dry_run_says_when_the_game_is_missing(self):
         r = self.dry_run(['--dry-run'], {'FC26_WORK': str(self.dir / 'nowhere')})
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn(f'nowhere/{RUNTIME}/fc26-native', r.stderr)
         self.assertFalse(self.marker.exists())
+
+@unittest.skipUnless(platform.system() == 'Darwin', 'macOS')
+class AppLaunch(unittest.TestCase):
+    def test_regular_executable_refresh_and_exact_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build = compile_objc([HERE / 'tests/launcher_app_test.m'], root / 'test', ['-Wno-unused-function'])
+            self.assertEqual(build.returncode, 0, build.stderr)
+            source = root / 'work/build/fc26-native'
+            source.parent.mkdir(parents=True)
+            source.write_bytes(Path('/usr/bin/true').read_bytes())
+            source.chmod(0o755)
+            def prepare(fps="0"):
+                r = subprocess.run([str(root / 'test'), str(root / 'work'), str(root), fps], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                return json.loads(r.stdout)
+            p = prepare()
+            binary = Path(p['app']) / 'Contents/MacOS/FC 26'
+            self.assertFalse(binary.is_symlink())
+            info = plistlib.loads((Path(p['app']) / 'Contents/Info.plist').read_bytes())
+            self.assertEqual(info['CFBundleIdentifier'], 'org.macnativegames.fc26.game')
+            self.assertEqual(info['LSApplicationCategoryType'], 'public.app-category.sports-games')
+            signature = subprocess.run(['codesign', '--verify', '--strict', p['app']], capture_output=True, text=True)
+            self.assertEqual(signature.returncode, 0, signature.stderr)
+            self.assertEqual(subprocess.run([str(binary)]).returncode, 0)
+            self.assertNotIn('FC26_AUDIO', p['environment'])
+            self.assertNotIn('TOTK_HEADLESS', p['environment'])
+            self.assertEqual(p['environment']['KEEP'], 'ok')
+            self.assertEqual(p['environment']['FC26_FPS60'], 'inherited')
+            source.write_bytes(Path('/usr/bin/false').read_bytes())
+            newer = prepare("1")
+            expected = dict(p["environment"], FC26_FPS60="1")
+            self.assertEqual(newer["environment"], expected)
+            self.assertEqual(subprocess.run([str(Path(newer['app']) / 'Contents/MacOS/FC 26')]).returncode, 1)
+
 
 
 if __name__ == '__main__':

@@ -19,6 +19,8 @@
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stdio.h>
+#include <crt_externs.h>
 
 #ifndef FC26_BINARY
 #define FC26_BINARY "fc26-native"
@@ -149,7 +151,7 @@ static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
     [d setInteger:self.output.selectedItem.tag forKey:@"output"]; [d setBool:self.scaler.selectedSegment == 0 forKey:@"metalfx"];
     [d setObject:screen_name(self.chosenScreen) forKey:@"monitor"]; [d setBool:self.hud.state forKey:@"hud"];
     [d setBool:self.fps60.state forKey:@"FPS60"];
-    CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);   // the launcher then replaces itself with the game (exec)
+    CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);   // persist before launching the separate game app
 }
 - (void)start:(id)sender { (void)sender; [self save]; self.launch = YES; [NSApp stop:nil]; [self.window orderOut:nil];
     NSEvent *e = [NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:0 data1:0 data2:0];
@@ -222,13 +224,98 @@ static LaunchPlan *launch_plan(NSUserDefaults *d, NSString *work, NSString *home
     return p;
 }
 
+/* A fresh regular-file copy per launch: atomic replacement builds cannot leave an old inode here.
+   Build and sign beside the destination, then replace it atomically. */
+static NSDictionary *inherited_environment(void) {
+    NSMutableDictionary *env = [NSMutableDictionary dictionary];
+    for (char **e = *_NSGetEnviron(); *e; ++e) {
+        NSString *entry = @(*e); NSRange equal = [entry rangeOfString:@"="];
+        if (equal.location != NSNotFound) env[[entry substringToIndex:equal.location]] = [entry substringFromIndex:equal.location + 1];
+    }
+    return env;
+}
+static NSDictionary *game_environment(LaunchPlan *p, NSDictionary *inherited) {
+    NSMutableDictionary *env = [inherited mutableCopy];
+    [env removeObjectForKey:@"FC26_APP_BOOTSTRAP"];
+    for (NSString *key in p.unset) [env removeObjectForKey:key];
+    [env addEntriesFromDictionary:p.set];
+    return env;
+}
+static NSURL *prepare_game_app(LaunchPlan *p, NSError **error) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *root = [p.work stringByAppendingPathComponent:@"launcher-apps"];
+    if (![fm createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:error]) return nil;
+    /* Stage without touching the previous signed bundle. */
+    NSString *app = [root stringByAppendingPathComponent:[NSString stringWithFormat:@"%@/FC 26.app", NSUUID.UUID.UUIDString]];
+    NSString *contents = [app stringByAppendingPathComponent:@"Contents"];
+    NSString *mac = [contents stringByAppendingPathComponent:@"MacOS"];
+    if (![fm createDirectoryAtPath:mac withIntermediateDirectories:YES attributes:nil error:error] ||
+        ![fm copyItemAtPath:p.args[0] toPath:[mac stringByAppendingPathComponent:@"FC 26"] error:error]) return nil;
+    NSDictionary *info = @{@"CFBundleExecutable": @"FC 26", @"CFBundleIdentifier": @"org.macnativegames.fc26.game",
+        @"CFBundleName": @"FC 26", @"CFBundlePackageType": @"APPL", @"CFBundleVersion": @"1",
+        @"LSApplicationCategoryType": @"public.app-category.sports-games", @"NSHighResolutionCapable": @YES,
+        @"CFBundleIconFile": @"AppIcon"};
+    NSData *plist = [NSPropertyListSerialization dataWithPropertyList:info format:NSPropertyListXMLFormat_v1_0 options:0 error:error];
+    if (!plist || ![plist writeToFile:[contents stringByAppendingPathComponent:@"Info.plist"] options:NSDataWritingAtomic error:error]) return nil;
+    NSString *icon = [NSBundle.mainBundle pathForResource:@"AppIcon" ofType:@"icns"];
+    if (icon) {
+        NSString *resources = [contents stringByAppendingPathComponent:@"Resources"];
+        if (![fm createDirectoryAtPath:resources withIntermediateDirectories:YES attributes:nil error:error] ||
+            ![fm copyItemAtPath:icon toPath:[resources stringByAppendingPathComponent:@"AppIcon.icns"] error:error]) return nil;
+    }
+    NSTask *sign = [NSTask new]; sign.executableURL = [NSURL fileURLWithPath:@"/usr/bin/codesign"];
+    sign.arguments = @[@"--force", @"--sign", @"-", app];
+    if (![sign launchAndReturnError:error]) return nil;
+    [sign waitUntilExit];
+    if (sign.terminationStatus) { if (error) *error = [NSError errorWithDomain:@"FC26Signing" code:sign.terminationStatus userInfo:nil]; return nil; }
+    NSString *destination = [root stringByAppendingPathComponent:@"FC 26.app"];
+    if ([fm fileExistsAtPath:destination]) {
+        if (renamex_np(app.fileSystemRepresentation, destination.fileSystemRepresentation, RENAME_SWAP)) {
+            if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
+            return nil;
+        }
+        [fm removeItemAtPath:[app stringByDeletingLastPathComponent] error:nil];
+    } else {
+        if (![fm moveItemAtPath:app toPath:destination error:error]) return nil;
+        [fm removeItemAtPath:[app stringByDeletingLastPathComponent] error:nil];
+    }
+    return [NSURL fileURLWithPath:destination];
+}
+static BOOL open_game(LaunchPlan *p, NSError **error) {
+    if (!make_dir(p.profile) || !make_dir(p.slot) || !make_dir(p.logs)) return NO;
+    /* Empty commands before opening; fail visibly instead of replaying stale commands. */
+    if (![@"" writeToFile:p.input atomically:YES encoding:NSUTF8StringEncoding error:error]) return NO;
+    NSURL *app = prepare_game_app(p, error); if (!app) return NO;
+    NSDictionary *payload = @{@"environment":game_environment(p, inherited_environment()),
+        @"work":p.work, @"log":p.log, @"previousLog":p.previousLog};
+    NSData *data = [NSJSONSerialization dataWithJSONObject:payload options:0 error:error]; if (!data) return NO;
+    NSWorkspaceOpenConfiguration *config = [NSWorkspaceOpenConfiguration configuration];
+    config.createsNewApplicationInstance = YES;
+    config.arguments = [p.args subarrayWithRange:NSMakeRange(1, p.args.count - 1)];
+    config.environment = @{@"FC26_APP_BOOTSTRAP": [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]};
+    __block BOOL done = NO, ok = NO; __block NSError *launchError = nil;
+    [NSWorkspace.sharedWorkspace openApplicationAtURL:app configuration:config completionHandler:^(NSRunningApplication *running, NSError *e) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ok = running != nil && e == nil; launchError = e; done = YES;
+        });
+    }];
+    while (!done) [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    if (!ok && error) *error = launchError;
+    return ok;
+}
+
 static NSString *quoted(NSString *s) { return [NSString stringWithFormat:@"'%@'", [s stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]]; }
 /* The dry run: the plan as shell lines on stdout; 3 when the game is not in the work folder. */
 static int dry_run(LaunchPlan *p) {
-    printf("# FC 26 launcher, dry run: nothing is started\ncd %s\nunset %s\n", quoted(p.work).UTF8String,
+    printf("# FC 26 launcher, dry run: nothing is started\n# Equivalent runtime plan; actual opening uses LaunchServices (no exec).\ncd %s\nunset %s\n", quoted(p.work).UTF8String,
            [[p.unset sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@" "].UTF8String);
     for (NSString *k in [p.set.allKeys sortedArrayUsingSelector:@selector(compare:)]) printf("export %s=%s\n", k.UTF8String, quoted(p.set[k]).UTF8String);
-    printf("exec %s %s %s 2> %s\n", quoted(p.args[0]).UTF8String, p.args[1].UTF8String, p.args[2].UTF8String, quoted(p.log).UTF8String);
+    printf("# Commands are emptied before opening; the runtime rotates the log before loading the game.\n");
+    printf("mkdir -p %s %s %s\n: > %s\n", quoted(p.profile).UTF8String, quoted(p.slot).UTF8String,
+           quoted(p.logs).UTF8String, quoted(p.input).UTF8String);
+    printf("rm -f %s\n[ ! -f %s ] || mv %s %s\n", quoted(p.previousLog).UTF8String, quoted(p.log).UTF8String,
+           quoted(p.log).UTF8String, quoted(p.previousLog).UTF8String);
+    printf("exec %s %s %s > %s 2>&1\n", quoted(p.args[0]).UTF8String, p.args[1].UTF8String, p.args[2].UTF8String, quoted(p.log).UTF8String);
     if (![NSFileManager.defaultManager isExecutableFileAtPath:p.args[0]]) { fprintf(stderr, "the game is not built: %s\n", p.args[0].UTF8String); return 3; }
     return 0;
 }
@@ -245,21 +332,9 @@ int main(int argc, char **argv) {
         [NSApp run];
         if (!l.launch) return 0;
         LaunchPlan *p = launch_plan(NSUserDefaults.standardUserDefaults, work_folder(), NSHomeDirectory(), NSScreen.screens, NSScreen.mainScreen);
-        if (!make_dir(p.profile) || !make_dir(p.slot) || !make_dir(p.logs)) { fail([NSString stringWithFormat:@"%@", p.data]); return 1; }
-        if (chdir(p.work.fileSystemRepresentation)) { fail(p.work); return 1; }   // the runtime reads extracted/ and rewritten/ relative to it
-        for (NSString *k in p.unset) unsetenv(k.UTF8String);
-        for (NSString *k in p.set) setenv(k.UTF8String, p.set[k].UTF8String, 1);
-        { FILE *cf = fopen(p.input.fileSystemRepresentation, "w"); if (cf) fclose(cf); }
-
-        [NSFileManager.defaultManager removeItemAtPath:p.previousLog error:nil]; [NSFileManager.defaultManager moveItemAtPath:p.log toPath:p.previousLog error:nil];
-        FILE *lf = fopen(p.log.fileSystemRepresentation, "w"); if (lf) { dup2(fileno(lf), STDOUT_FILENO); dup2(fileno(lf), STDERR_FILENO); fclose(lf); }
-        fprintf(stderr, "[launcher] work %s, present %s Hz, display %s, fullscreen %s, window %s, drawable scale %s, MetalFX %s, sound on\n",
-                p.work.UTF8String, getenv("DM_PRESENT_HZ"), getenv("FC26_DISPLAY"), getenv("FC26_FULLSCREEN") ? "yes" : "no", getenv("TOTK_WINDOW_SIZE"),
-                getenv("TOTK_DRAWABLE_SCALE") ?: "1", getenv("TOTK_MFX_OUTPUT") ? "on" : "off");
-        char *const args[] = {(char *)p.args[0].fileSystemRepresentation, (char *)p.args[1].UTF8String, (char *)p.args[2].UTF8String, NULL};
-        execv(args[0], args);
-        fprintf(stderr, "[launcher] execv failed: %s\n", strerror(errno));
-        fail([NSString stringWithFormat:T("Não foi possível iniciar o jogo. Veja %@.", "Starting the game failed. See %@."), p.log]);
+        NSError *error = nil;
+        if (open_game(p, &error)) return 0;
+        fail(error.localizedDescription ?: @"Não foi possível preparar o app do jogo.");
         return 1;
     }
 }
