@@ -6,13 +6,16 @@
 /* Explicit read-only diagnostic. Kernel-checked copy also handles absent settings. */
 static int fc26_live_copy(uint64_t address, void *out, size_t size) {
     mach_vm_size_t read = 0;
-    return mach_vm_read_overwrite(mach_task_self(), address, size,
-        (mach_vm_address_t)out, &read) == KERN_SUCCESS && read == size;
+    kern_return_t kr = mach_vm_read_overwrite(mach_task_self(), address, size,
+        (mach_vm_address_t)out, &read);
+    if (kr != KERN_SUCCESS || read != size)
+        fprintf(stderr, "[fc26-gameplay] read failed at %#llx: kernel=%d size=%llu/%zu\n",
+                (unsigned long long)address, kr, (unsigned long long)read, size);
+    return kr == KERN_SUCCESS && read == size;
 }
 static int fc26_gameplay_read(uint8_t *base, FILE *out) {
     uint64_t obj = 0, regulator = 0;
-    if (!base || !fc26_live_copy((uint64_t)base + 0xc665768, &obj, 8) || !obj ||
-        !fc26_live_copy((uint64_t)base + 0xc712880, &regulator, 8) || !regulator) {
+    if (!base || !fc26_live_copy((uint64_t)base + 0xc665768, &obj, 8) || !obj) {
         fprintf(out, "[fc26-gameplay] FAILED: settings not available\n"); return 0;
     }
     fprintf(out, "[fc26-gameplay] read-only snapshot\n");
@@ -29,6 +32,10 @@ static int fc26_gameplay_read(uint8_t *base, FILE *out) {
             float f; memcpy(&f, &value, 4);
             fprintf(out,"[fc26-gameplay] %s +%#llx = %g (float)\n",name,(unsigned long long)row[2],f);
         } else fprintf(out,"[fc26-gameplay] %s +%#llx = %u (%s, type main+%#llx)\n",name,(unsigned long long)row[2],value,width==1?"bool":"integer",(unsigned long long)type);
+    }
+    if (!fc26_live_copy((uint64_t)base + 0xc712880, &regulator, 8) || !regulator) {
+        fprintf(out, "[fc26-gameplay] FAILED: ThreeLaneTimeRegulatorSettings unavailable (GameplayFeatures above read independently)\n");
+        return 0;
     }
     float sim, render;
     if (!fc26_live_copy(regulator+0x20,&sim,4) || !fc26_live_copy(regulator+0x24,&render,4)) return 0;

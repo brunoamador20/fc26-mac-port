@@ -19,6 +19,12 @@ int main(void) {
     assert(fc26_gameplay_read(base,out)); assert(!memcmp(before,obj,sizeof obj));
     rewind(out); char line[512];unsigned n=0; while(fgets(line,sizeof line,out))n++;
     assert(n==80);
+    fclose(out); out=tmpfile(); assert(out);
+    ptr=0; memcpy(base+0xc712880,&ptr,8);
+    assert(!fc26_gameplay_read(base,out));
+    rewind(out); n=0; while(fgets(line,sizeof line,out))n++;
+    /* A missing regulator must not suppress the 78 independent gameplay reads. */
+    assert(n==80);
     ptr=1; memcpy(base+0xc665768,&ptr,8); assert(!fc26_gameplay_read(base,out));
     assert(!fc26_gameplay_read(NULL,out)); fclose(out); munmap(base,size);
     return 0;
