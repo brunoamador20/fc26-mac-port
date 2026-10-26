@@ -81,3 +81,10 @@ Essas consultas são observações separadas, não uma trava do mapeamento;
 igualdade nos três momentos não exclui uma mudança temporária entre eles.
 O diagnóstico acrescenta cópias e pode mudar o tempo da reprodução.
 Sem a variável, não há essas cópias nem consultas adicionais.
+
+As texturas acompanhadas por hash usam uma cópia estável da origem durante o
+envio. Nesse caso, `cpu` e `cpu_done` descrevem essa cópia, e a ausência dela
+na tabela de pools (`same_begin=0`, `same_buffer=0`) é esperada. Para investigar
+uma escrita temporária na memória original, use também o binário anterior
+preservado e o teste real `probe-gpu-upload-batch`; só os resumos da cópia
+estável não observam essa escrita.
