@@ -68,3 +68,28 @@ venv/bin/python rev/nxport/tools/rank_nxport_gpu.py work/logs/prova_30.tsv
 Os tempos de etapas podem se sobrepor. A soma deles não mede ocupação total
 nem economia garantida. A letra D mistura cálculo pedido pelo jogo e cópias
 associadas; a separação precisa de inspeção adicional antes de otimizar.
+
+
+Carreira e observação dos defeitos (branch fc26-defeitos):
+
+```sh
+venv/bin/python rev/defeitos/tools/rota_carreira.py NOME
+venv/bin/python rev/defeitos/tools/rota_carreira.py NOME --verify 12/8/2025
+venv/bin/python rev/defeitos/tools/rota_carreira.py NOME --verify 12/8/2025 --inspect
+venv/bin/python rev/defeitos/tools/defeitos_entrada.py NOME --bin work/build-defeitos/fc26-native --wait-idle
+```
+
+Esses roteiros usam `user-data-defeitos-carr` e o cache de `build-defeitos`.
+`PARAR_defeitos` encerra com limpeza; na consulta `--inspect`, `NOME_FECHAR`
+termina as fotos e fecha. A prova de partida inteira desta rodada foi feita
+com `observar_carreira.py` e ações conferidas por foto. A reabertura e a data
+do save foram verificadas automaticamente por `rota_carreira.py`; os estados
+de partida e gravação desse roteiro foram derivados das telas observadas,
+mas ainda não passaram juntos por outra partida inteira automática. Não
+confundir a prova manual completa com validação integral dessa automação.
+
+Em `defeitos_entrada.py`, `FC26_KITS_TODOS=1` fotografa as duas opções de
+cada equipe e restaura a seleção inicial. `FC26_RODA_SALTAR=1` salta a
+abertura segurando confirmar; `FC26_RODA_PULSOS=1` usa dois toques curtos
+a cada 20 segundos durante a observação. As opções são diagnósticas.
+Sem elas, observa a apresentação sem saltar. Imagens ficam fora do git.
