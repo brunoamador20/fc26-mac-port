@@ -3651,6 +3651,9 @@ static id<MTLTexture> tex_mtl(const tex_t *ct) {
         TILELOG(t, "first upload from the pool bytes");
         NvPkg *npk = [NvPkg new]; pk = npk;
         pk->lo = (uintptr_t)t->mem; pk->hi = pk->lo + t->L.size;
+        /* Hash before the upload snapshots its source, as on re-upload above. A CPU write or
+           virtual-pool remap during upload must not certify the old GPU copy as the new bytes. */
+        if ((pk->hashed = pkg_hashed(t))) { pk->chash = pkg_hash(t->mem, t->L.size); pk->csub = g_sub_serial; }
         pk->tex = pkg_upload(t, &pk->stamp, &pk->key, pk);
         if (!pk->tex) return nil;
         /* TOTK (#90): seen = the upload's stamp, not "now": a write that faulted during the copy moved "now" on, and the
@@ -3658,7 +3661,6 @@ static id<MTLTexture> tex_mtl(const tex_t *ct) {
         pk->seen = pk->stamp; g_pkg_uploads++; if (dirtycheck()) pk->hash = full_hash(t->mem, t->L.size);
         serial_put(t->serial, pk);
         pk->owned = gpu_owned(t->serial);   // after it is in the table: a later mark finds it there (pkg_owned_locked)
-        if ((pk->hashed = pkg_hashed(t))) { pk->chash = pkg_hash(t->mem, t->L.size); pk->csub = g_sub_serial; }
         if (serial_is_dead(t->serial)) dead_put_note(t->serial);
         return pk->tex;
     }
