@@ -3116,6 +3116,7 @@ static NSHashTable *g_up_lost; static os_unfair_lock g_up_lost_lk = OS_UNFAIR_LO
 static int up_lost_take(id tex) {   // 这张贴图的上传被丢过：从记录里取走并返回 1 | This texture's upload was dropped: take it out of the record and return 1
     if (!tex) return 0; os_unfair_lock_lock(&g_up_lost_lk); int hit = [g_up_lost containsObject:tex]; if (hit) { [g_up_lost removeObject:tex]; atomic_store(&g_up_lost_n, (int)g_up_lost.allObjects.count); atomic_fetch_add(&g_up_lost_redo, 1); } os_unfair_lock_unlock(&g_up_lost_lk); return hit;
 }
+static NSMutableArray<dispatch_block_t> *g_up_checks; // optional source-readback diagnostics
 static void up_diag(void);
 static void up_flush(void) {
     up_owner_check("up_flush");
@@ -3161,6 +3162,7 @@ static void up_flush(void) {
     if (g_up_block && !g_up_block_pooled) [staging addObject:g_up_block];
     if (g_up_sblock && !g_up_sblock_pooled) [staging addObject:g_up_sblock];
     uint32_t pool_mask = g_up_batch_pool, spool_mask = g_up_batch_spool;
+    NSArray<dispatch_block_t> *checks = [g_up_checks copy]; [g_up_checks removeAllObjects];
     atomic_fetch_add(&g_up_pending, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
         if (f.error) MLOG("【红】上传命令缓冲执行出错：%s", f.error.description.UTF8String);
@@ -3169,6 +3171,7 @@ static void up_flush(void) {
             ser_bump(0);   // 让各贴图号的视图缓存走一次慢路（缓存命中时不会经过 tex_mtl，看不到这份记录） | Make the view cache of every texture ID take the slow path once (on a cache hit tex_mtl is not passed through and this record is not seen)
             MLOG("%s上传命令缓冲被丢：这一批 %lu 张贴图记为内容未写，下次取用时重传（待重传共 %d 张）", fake_lost ? "DM_TEST_UP_LOST：" : "", (unsigned long)dsts.count, n);
         }
+        for (dispatch_block_t check in checks) check();
         double d = f.GPUEndTime - f.GPUStartTime;
         if (d > 0) atomic_fetch_add(&g_upload_gpu_ns, (uint64_t)(d * 1e9));
         for (id obj in staging) res_remove(obj);
@@ -3471,6 +3474,30 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, reup_key *key
         size_t stg_off;
         id<MTLBuffer> stg = up_alloc(gdec ? ctotal : total ? total : 16, &stg_off);
         size_t ast_off = 0, aoff = 0; id<MTLBuffer> ast = gtca ? up_alloc(atotal ? atotal : 16, &ast_off) : tck ? up_alloc(xtotal ? xtotal : 16, &ast_off) : nil;   // a block switch keeps the earlier block alive (g_up_keep)
+        /* Optional readback of the exact buffer the deswizzler will read; no game bytes in the log. */
+        { static int enabled = -1; static unsigned cw, ch;
+          if (enabled < 0) { const char *e = getenv("DM_NVN_UPCHECK"); enabled = e && sscanf(e, "%ux%u", &cw, &ch) == 2; }
+          if (enabled && t->d.width == cw && t->d.height == ch && g_up_ce) {
+            NSUInteger n = t->L.size; id<MTLBuffer> check = [g_dev newBufferWithLength:n options:MTLResourceStorageModeShared];
+            if (check) { res_add(check); uint64_t expected = pkg_hash(t->mem, n), serial = t->serial, frame = atomic_load(&g_cur_frame);
+              uintptr_t address = (uintptr_t)t->mem;
+              pthread_mutex_lock(&g_mu);
+              const pidx_ent *at_encode = pidx_find(&g_pools, address, n);
+              int same_begin = at_encode && at_encode->buf == mb;
+              pthread_mutex_unlock(&g_mu);
+              id<MTLBuffer> source = (__bridge id<MTLBuffer>)mb;
+              enc_b_copy_buffer(g_up_ce, (__bridge id<MTLBuffer>)mb, mo, check, 0, n);
+              if (!g_up_checks) g_up_checks = [NSMutableArray array];
+              [g_up_checks addObject:^{ uint64_t actual = pkg_hash(check.contents, n);
+                uint64_t current = pkg_hash((const uint8_t *)source.contents + mo, n);
+                pthread_mutex_lock(&g_mu);
+                const pidx_ent *now = pidx_find(&g_pools, address, n);
+                int same = now && now->buf == (__bridge void *)source;
+                pthread_mutex_unlock(&g_mu);
+                MLOG("[upcheck] frame=%llu ser=%llu bytes=%lu cpu=%016llx gpu=%016llx equal=%d cpu_done=%016llx same_buffer=%d same_begin=%d", frame, serial, (unsigned long)n, expected, actual, expected == actual, current, same, same_begin); res_remove(check); }];
+            }
+          }
+        }
         size_t off = 0; int enc_ok = g_up_ce != nil, nb0 = g_nup_blits, nd0 = g_nup_decs, nt0 = g_nup_tcas, nx0 = g_nup_tcxs;
         for (unsigned l = drop; enc_ok && l < d.mipmapLevelCount + drop; l++) {
             uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
@@ -13772,10 +13799,42 @@ int mtl_probe_ds_clear(void) {
     for (id o in @[color, depth, rc, rd, rs]) defer_obj_release(o); return checked;
 }
 
+#include "totk_vpool.h"
+/* Read streamed physical CPU writes through a virtual buffer on the real upload queue. */
+static int probe_upload_cpu_alias(void) {
+    enum { SZ = 1 << 20 }; int checked = 0;
+    void *mem = NULL; if (posix_memalign(&mem, 16384, SZ) || !mem) MDIE("upload CPU alias allocation");
+    memset(mem, 0, SZ);
+    pool_t p = {.magic=MAGIC('P','O','O','L'), .flags=0x104, .mem=mem, .size=SZ};
+    pool_t v = {.magic=MAGIC('P','O','O','L'), .flags=0x221, .size=SZ};
+    if (!totk_vpool_init(&p) || !totk_vpool_init(&v)) MDIE("upload CPU alias pools");
+    totk_mapping_request mapping = {.physical_pool=(const NVNmemoryPool *)&p, .size=SZ};
+    if (!totk_vpool_map(&v, 1, &mapping)) MDIE("upload CPU alias mapping");
+    void *vb = NULL; uint64_t vo = 0;
+    if (!mtl_addr((uintptr_t)v.mem, SZ, &vb, &vo)) MDIE("upload CPU alias lookup");
+    id<MTLBuffer> source = (__bridge id<MTLBuffer>)vb, result = probe_buf(SZ);
+    for (int run=0; run<32; run++) {
+        /* Prime GPU caches, then change the bytes through the other CPU mapping. */
+        up_begin(); enc_b_copy_buffer(g_up_ce, source, vo, result, 0, SZ);
+        up_flush(); while (atomic_load(&g_up_pending)) usleep(1000);
+        memset(mem, (uint8_t)(run+1), SZ);
+        if (memcmp(mem, v.mem, SZ)) MDIE("upload CPU alias CPU disagreement");
+        up_begin(); enc_b_copy_buffer(g_up_ce, source, vo, result, 0, SZ);
+        up_flush(); while (atomic_load(&g_up_pending)) usleep(1000);
+        const uint8_t *actual = result.contents;
+        for (int j=0; j<SZ; j++) {
+            if (actual[j] != (uint8_t)(run+1)) MDIE("upload CPU alias mismatch run%d byte%d: %u != %d", run,j,actual[j],run+1);
+            checked++;
+        }
+    }
+    nvn_dirty_remove_range(v.mem); mtl_pool_del(v.mem); totk_vpool_fini(&v);
+    res_remove(result); free(mem); return checked;
+}
+
 /* Keep a game submission open while more than one staging batch is uploaded. Check both payload
    ordering and bounded batch memory, including retirement before the game fence is committed. */
 int mtl_probe_upload_batch(void) {
-    mtl_init(); const int N = 12; const size_t cap = 2u * UP_BLOCK_SIZE; int checked = 0;
+    mtl_init(); int alias_checked = probe_upload_cpu_alias(); const int N = 12; const size_t cap = 2u * UP_BLOCK_SIZE; int checked = 0;
     g_up_batch_limit = getenv("TOTK_PROBE_NEGATIVE") ? SIZE_MAX : cap;
     id<MTLBuffer> src = [g_dev newBufferWithLength:N * 256 options:MTLResourceStorageModeShared]; res_add(src);
     id<MTLBuffer> result = [g_dev newBufferWithLength:N * 256 options:MTLResourceStorageModeShared]; res_add(result);
@@ -13805,7 +13864,7 @@ int mtl_probe_upload_batch(void) {
         checked++;
     }
     for (int i = 0; i < N; i++) res_remove(dst[i]); res_remove(src); res_remove(result);
-    return checked;
+    return checked + alias_checked;
 }
 
 /* A sampling descriptor gains image/format-view usage while another render pass is open. The

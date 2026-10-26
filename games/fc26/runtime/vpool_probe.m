@@ -48,6 +48,28 @@ static void gpu_checks(NVNmemoryPool *v1,NVNmemoryPool *v2){
  expect(all(scratch.contents,0x3a,PAGE),"GPU read through virtual pool 2 sees CPU write through virtual pool 1");
 }
 
+/* Keep previous Metal mappings alive, as happens while submissions are in flight. */
+static void gpu_remap_checks(NVNmemoryPool *v, NVNmemoryPool *p){
+ NSMutableArray *old=[NSMutableArray array];
+ id<MTLDevice> dev=MTLCreateSystemDefaultDevice();id<MTLCommandQueue> q=[dev newCommandQueue];
+ id<MTLBuffer> scratch=[dev newBufferWithLength:PAGE options:MTLResourceStorageModeShared];
+ for(int i=0;i<32;i++){@autoreleasepool{
+  expect(map(v,p,(i%PAGES)*PAGE,0,PAGE),"remap existing virtual pool");
+  memset(mem(v),(uint8_t)(i+1),PAGE);
+  void *b=NULL;uint64_t off=0;
+  expect(mtl_addr((uintptr_t)mem(v),PAGE,&b,&off),"remapped pool Metal buffer");
+  [old addObject:(__bridge id<MTLBuffer>)b];
+  /* The game writes the physical CPU alias after the virtual Metal buffer exists. */
+  memset(mem(p)+(i%PAGES)*PAGE,(uint8_t)(i+65),PAGE);
+  expect(all(mem(v),(uint8_t)(i+65),PAGE),"virtual CPU view sees later physical write");
+  id<MTLCommandBuffer> cb=[q commandBuffer];id<MTLBlitCommandEncoder> e=[cb blitCommandEncoder];
+  [e copyFromBuffer:(__bridge id<MTLBuffer>)b sourceOffset:off toBuffer:scratch destinationOffset:0 size:PAGE];
+  [e endEncoding];[cb commit];[cb waitUntilCompleted];
+  expect(cb.status==MTLCommandBufferStatusCompleted,"remap GPU copy completed");
+  expect(all(scratch.contents,(uint8_t)(i+65),PAGE),"GPU sees physical CPU write after virtual buffer creation");
+ }}
+}
+
 void runtime_vpool_probe(void){
  lookup=runtime_gfx_override("nvnBootstrapLoader");if(!lookup)runtime_fail("bootstrap override");
  mtl_init();
@@ -82,7 +104,12 @@ void runtime_vpool_probe(void){
  expect(map(&v1,NULL,0,0,PAGE),"unmap virtual page");
  expect(all(mem(&v1),0,PAGE),"unmapped virtual page reads zero");
  expect(all(mem(&v2)+PAGE,0x3a,PAGE),"physical data survives unmap of another alias");
+ gpu_remap_checks(&v1,&phys);
  CALL(nvnMemoryPoolFinalize,&v1);CALL(nvnMemoryPoolFinalize,&v2);CALL(nvnMemoryPoolFinalize,&phys);
+ // CPU-visible physical pool, as used for streamed texture inputs.
+ pool_init(&phys,raw,size,0x104,1);pool_init(&v1,NULL,size,0x221,1);
+ gpu_remap_checks(&v1,&phys);
+ CALL(nvnMemoryPoolFinalize,&v1);CALL(nvnMemoryPoolFinalize,&phys);
  free(raw);
- printf("{\"status\":\"pass\",\"checks\":%d,\"request_bytes\":%zu,\"page_bytes\":%llu,\"scope\":\"NVNmappingRequest layout from runtime dump; CPU and Metal GPU aliasing between two virtual pools of one physical pool; unmap; 6 negative controls; no drawing\"}\n",checks,sizeof(totk_mapping_request),(unsigned long long)PAGE);
+ printf("{\"status\":\"pass\",\"checks\":%d,\"request_bytes\":%zu,\"page_bytes\":%llu,\"scope\":\"NVNmappingRequest layout from runtime dump; CPU and Metal GPU aliasing between two virtual pools of one physical pool; unmap; 32 remaps retaining old buffers per physical-pool mode; CPU writes through the physical alias after virtual-buffer creation; 6 negative controls; no drawing\"}\n",checks,sizeof(totk_mapping_request),(unsigned long long)PAGE);
 }

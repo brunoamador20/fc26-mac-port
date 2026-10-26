@@ -69,3 +69,15 @@ comandos continuam funcionando junto com ele. Isso permite capturar uma
 etapa curta durante o carregamento sem registrar todos os menus. Como o
 registro completo altera o caminho de diagnóstico, essas execuções não
 servem como referência de velocidade. O filtro fica desligado por padrão.
+
+Para comparar os bytes de origem de uma textura no caminho de envio com
+reorganização pela GPU, use `DM_NVN_UPCHECK=512x1024`. O tamanho filtra as
+texturas de origem. Cada linha `[upcheck]` contém apenas resumos numéricos:
+`cpu` ao gravar a cópia, `gpu` dos bytes copiados pela GPU e `cpu_done` da
+mesma faixa quando o envio termina. `same_begin` indica se o buffer escolhido
+continua cadastrado para a faixa ao gravar a cópia; `same_buffer` faz essa
+consulta ao terminar. Uma troca de buffer pode preservar todos os bytes.
+Essas consultas são observações separadas, não uma trava do mapeamento;
+igualdade nos três momentos não exclui uma mudança temporária entre eles.
+O diagnóstico acrescenta cópias e pode mudar o tempo da reprodução.
+Sem a variável, não há essas cópias nem consultas adicionais.
