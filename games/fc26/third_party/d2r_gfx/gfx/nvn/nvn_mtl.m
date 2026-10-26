@@ -3337,11 +3337,12 @@ static int pkg_edge_clean(const tex_t *t, NvPkg *pk) {   // 1: only the shared p
         MLOG("贴图首尾共享页被写、贴图内容没变，不重传：累计 %llu 次（例 ser=%llu %ux%u）", (unsigned long long)g_pkg_edge_same, (unsigned long long)t->serial, t->d.width, t->d.height);
     return 1;
 }
-static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, reup_key *key, NvPkg *pk, id<MTLBuffer> frozen);
+static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, reup_key *key, NvPkg *pk, id<MTLBuffer> frozen, uintptr_t source_addr);
 static id<MTLTexture> pkg_upload(const tex_t *t, uint64_t *stamp, reup_key *key, NvPkg *pk) {
     struct timespec a, b; clock_gettime(CLOCK_MONOTONIC, &a);
     /* The hash certifies these owned bytes, not memory the CPU may temporarily rewrite
        while the deferred GPU read is waiting. Use the same snapshot for every mip. */
+    uintptr_t source_addr = (uintptr_t)t->mem;
     id<MTLBuffer> frozen = nil; tex_t captured;
     if (pkg_hashed(t)) {
         frozen = [g_dev newBufferWithBytes:t->mem length:t->L.size options:MTLResourceStorageModeShared];
@@ -3349,7 +3350,7 @@ static id<MTLTexture> pkg_upload(const tex_t *t, uint64_t *stamp, reup_key *key,
         captured = *t; captured.mem = frozen.contents; t = &captured;
     }
     uint64_t captured_hash = frozen && pk ? pkg_hash(t->mem, t->L.size) : 0;
-    id<MTLTexture> r = pkg_upload_(t, stamp, key, pk, frozen);
+    id<MTLTexture> r = pkg_upload_(t, stamp, key, pk, frozen, source_addr);
     if (r && frozen && pk) pk->chash = captured_hash;
     clock_gettime(CLOCK_MONOTONIC, &b); uint64_t d_ = (uint64_t)((b.tv_sec - a.tv_sec) * 1000000000ll + b.tv_nsec - a.tv_nsec);
     atomic_fetch_add(&g_upload_ns, d_); g_up_total_ns += d_;
@@ -3422,7 +3423,7 @@ static unsigned mip_drop_of(const tex_t *t) {
     if (!(g == 1 || g == 4 || g == 7 || g == 8 || g == 9) || t->d.levels < 2 || t->d.width < minside || t->d.height < minside) return 0;
     return 1;
 }
-static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, reup_key *key, NvPkg *pk, id<MTLBuffer> frozen) {
+static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, reup_key *key, NvPkg *pk, id<MTLBuffer> frozen, uintptr_t source_addr) {
     MTLTextureDescriptor *d = tex_desc(t, t->has_layout);   // TOTK: default-layout mirrored textures keep render-target usage
     if (!d) return nil;
     unsigned drop = mip_drop_of(t);   // TOTK (iPhone): the copy starts at the game's level `drop` (see mip_drop_of)
@@ -3465,7 +3466,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, reup_key *key
         if (g_bp_up_bytes - last > (256u << 20)) { last = g_bp_up_bytes; char line[2048]; size_t o = 0;
           for (int k = 0; k < 256; k++) if (by[k] >> 20) o += (size_t)snprintf(line + o, sizeof line - o, " %#x:%llu张/%lluMB", k, (unsigned long long)n[k], (unsigned long long)(by[k] >> 20));
           MLOG("[fmtstats] 上传累计%s", line); } } }
-    void *mb = (__bridge void *)frozen; uint64_t mo = 0;
+    void *mb; uint64_t mo;
     int gdec = unp && t->d.target != 2 && bcd_fmt(t->d.format) && bcd_pso();   // 无 BC 的 BC1–5：GPU 解排布 + GPU 解压 | BC1–5 without BC: GPU deswizzle + GPU decompression
     size_t ctotal = 0;   // 压缩块的暂存大小（GPU 解压时暂存区放的是压缩块） | Staging size of the compressed blocks (with GPU decompression the staging area holds compressed blocks)
     if (gdec) for (unsigned l = drop; l < d.mipmapLevelCount + drop; l++) { uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u); ctotal += (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * layers; }
@@ -3475,9 +3476,10 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, reup_key *key
     if (tca) g_bp_up_bytes += atotal - total;
     size_t xtotal = 0;   // output of the BC2/3/4/5/7 transcoder
     if (tck) for (unsigned l = drop; l < d.mipmapLevelCount + drop; l++) { uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u); xtotal += (size_t)((w + 3) / 4) * tco * ((h + 3) / 4) * layers; }
-    int use_gpu = (!unp || gdec) && (!tca || gtca) && g_nvn_deswz_gpu && !nvn_tex_is_linear(&t->d) && (frozen || mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo));   // TOTK: linear textures take the CPU row copy
+    int use_gpu = (!unp || gdec) && (!tca || gtca) && g_nvn_deswz_gpu && !nvn_tex_is_linear(&t->d) && mtl_addr(source_addr, t->L.size, &mb, &mo);   // TOTK: linear textures take the CPU row copy
     if (g_nvn_deswz_gpu && !use_gpu && !unp) RED_ONCE(40, "预排布贴图存储不在内存池里，回退 CPU");
     if (use_gpu) {
+        if (frozen) { mb = (__bridge void *)frozen; mo = 0; }
         // Hashed textures read the owned snapshot; tracked textures retain their pool-backed path.
         up_begin();
         if (frozen) up_reserve(frozen.length);
@@ -13815,10 +13817,11 @@ int mtl_probe_ds_clear(void) {
    A subsequent real cache lookup must not accept different GPU bytes as that original content. */
 static int probe_upload_hashed_race(void) {
     int checked = 0;
-    for (int mode=0; mode<3; mode++) {
+    for (int mode=0; mode<4; mode++) {
         tex_t t = {0}; t.serial=0xffffe000u+mode;
         t.d=(nvn_texdesc){.width=512,.height=1024,.depth=1,.levels=11,.target=1,
                          .format=mode==0 ? 0x25 : mode==1 ? 0x4b : 0x4d};
+        if (mode==3) t.d=(nvn_texdesc){.width=4,.height=4,.depth=1,.levels=1,.target=1,.format=0x25};
         nvn_tex_layout(&t.d,&t.L);
         size_t size=(t.L.size+TOTK_VPOOL_PAGE-1)&~(size_t)(TOTK_VPOOL_PAGE-1);
         void *mem=NULL; if (posix_memalign(&mem, 65536, size) || !mem) MDIE("hashed upload race allocation");
@@ -13828,7 +13831,7 @@ static int probe_upload_hashed_race(void) {
         if(!totk_vpool_init(&p)||!totk_vpool_init(&v)) MDIE("hashed upload race pools");
         totk_mapping_request mapping={.physical_pool=(const NVNmemoryPool *)&p,.size=size};
         if(!totk_vpool_map(&v,1,&mapping)) MDIE("hashed upload race map");
-        t.mem=v.mem;t.pool=&v;
+        t.mem=mode==3 ? mem : v.mem;t.pool=mode==3 ? &p : &v;
         op_hdr end={OP_END,8};mtl_sub_begin();mtl_exec((const uint8_t *)&end);
         id<MTLTexture> tex=tex_mtl(&t);if(!tex)MDIE("hashed upload race texture");
         /* GPU import has been encoded, but not submitted. Change and restore the physical alias. */
@@ -13838,7 +13841,7 @@ static int probe_upload_hashed_race(void) {
         int bw,bh;int bpb=nvn_fmt_bpb(t.d.format,&bw,&bh);
         size_t row=((t.d.width+bw-1)/bw)*bpb,n=row*((t.d.height+bh-1)/bh);
         id<MTLBuffer> result=probe_buf(n);
-        enc_b_copy_texture_buffer(blit(),tex,0,0,MTLOriginMake(0,0,0),MTLSizeMake(512,1024,1),result,0,row,n);
+        enc_b_copy_texture_buffer(blit(),tex,0,0,MTLOriginMake(0,0,0),MTLSizeMake(t.d.width,t.d.height,1),result,0,row,n);
         mtl_sub_commit();mtl_finish();
         const uint8_t *got=result.contents;
         for(size_t j=0;j<n;j++){
