@@ -1,5 +1,16 @@
 # MacNativeGames
 
+> [!IMPORTANT]
+> **Este fork: EA SPORTS FC 26 (Nintendo Switch) nativo no Mac.** Você precisa ter **o seu próprio Nintendo Switch**,
+> as **chaves dele** (`prod.keys`) e **a sua cópia do FC 26** (jogo base 1.0.0 + atualização 1.89.6e65), tudo extraído
+> do seu console. Este repositório não tem nada do jogo e nenhuma chave. Requisitos, o que funciona e como montar:
+> [games/fc26/README.md](games/fc26/README.md).
+>
+> **This fork: EA SPORTS FC 26 (Nintendo Switch) native on Mac.** You need **your own Nintendo Switch**, **its keys**
+> (`prod.keys`) and **your own copy of FC 26** (base game 1.0.0 + update 1.89.6e65), all dumped from your console. This
+> repository contains no game content and no keys. Requirements, what works and how to build:
+> [games/fc26/README.md](games/fc26/README.md).
+
 # English
 
 **Breath of the Wild 1.6.0 and 1.9.0 are now officially supported on Mac!** (Mac only for now: no iPhone or iPad build yet.)
