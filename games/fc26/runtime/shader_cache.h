@@ -60,9 +60,11 @@ const char *fc26_sc_identity_diff(const fc26_sc_identity *a, const fc26_sc_ident
    the warm lists (pso_collected.tsv) stay (they name variants, and a variant's name does not depend on the translator).
    Returns the number of files removed, -1 when the folder cannot be read. */
 long fc26_sc_discard(const char *cache_dir);
-/* Older chains' folders next to the current one (rt-<chain>): removed when this layer stamped them (they hold
-   FC26_SC_ID_FILE) and no run holds their lock; anything else there is left alone. Returns the number removed. */
-int fc26_sc_remove_old_chains(const char *parent, const char *current_name);
+/* Older chains' folders next to the current one (rt-<chain>): removed when this layer stamped them with a readable
+   identity of ANOTHER chain and no run holds their lock; anything else there is left alone, in particular a folder of
+   the same chain under another name (a parallel cache: an agent's TOTK_SHADER_CACHE next to the player's). Returns the
+   number removed. */
+int fc26_sc_remove_old_chains(const char *parent, const char *current_name, const char *current_chain);
 
 /* The journal: <journal>/<key>.shader = "FC26SHD1", u32 format 1, u32 stage, u32 control length (0x880), u32 code
    length, the control section, the code ([0, u32 at control+0x704): what the kit hashes and translates). */

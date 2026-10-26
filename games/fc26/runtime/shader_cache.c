@@ -234,7 +234,7 @@ static int try_lock_path(const char *dir) {
     if (flock(fd, LOCK_EX | LOCK_NB)) { close(fd); return -1; }
     return fd;
 }
-int fc26_sc_remove_old_chains(const char *parent, const char *current_name) {
+int fc26_sc_remove_old_chains(const char *parent, const char *current_name, const char *current_chain) {
     DIR *d = opendir(parent);
     if (!d) return 0;
     int removed = 0; struct dirent *e; char dir[PATH_MAX], path[PATH_MAX]; struct stat st;
@@ -242,6 +242,8 @@ int fc26_sc_remove_old_chains(const char *parent, const char *current_name) {
         if (strncmp(e->d_name, "rt-", 3) || !strcmp(e->d_name, current_name)) continue;
         if (join(dir, parent, e->d_name) || lstat(dir, &st) || !S_ISDIR(st.st_mode)) continue;
         if (join(path, dir, FC26_SC_ID_FILE) || !regular(path, &st)) continue;   /* not ours: left alone */
+        fc26_sc_identity other;   /* only another chain is older; the same chain under another name is a parallel cache */
+        if (fc26_sc_identity_read(path, &other) || !current_chain || !strcmp(other.chain, current_chain)) continue;
         int fd = try_lock_path(dir);
         if (fd < 0) continue;   /* a run is using it */
         fc26_sc_discard(dir);

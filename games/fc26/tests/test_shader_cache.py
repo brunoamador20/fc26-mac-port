@@ -216,21 +216,33 @@ class ShaderCache(unittest.TestCase):
         self.assertFalse(metal2.exists())
 
     def test_old_chains_go_only_when_stamped_and_free(self):
-        for name in ['rt-current', 'rt-old', 'rt-foreign', 'rt-busy']:
+        def identity(chain):
+            return (f'fc26-shader-cache-identity 1\nchain {chain}\ntranslator {"a" * 64}\nspirv_cross {"b" * 64}\n'
+                    'request kit-1\ndebug_mode default\ndepth_minus_w 0\n').encode()
+        for name in ['rt-current', 'rt-old', 'rt-foreign', 'rt-busy', 'rt-sibling', 'rt-stamp']:
             self.cache_files(name, 'c' * 64)
             self.write(f'{name}/pso_collected.tsv', b'S\tx\t0\n')
-        for name in ['rt-current', 'rt-old', 'rt-busy']:
-            self.write(f'{name}/fc26-cache.id', b'stamp')
+        for name in ['rt-current', 'rt-sibling']:
+            self.write(f'{name}/fc26-cache.id', identity('cur-chain'))
+        for name in ['rt-old', 'rt-busy']:
+            self.write(f'{name}/fc26-cache.id', identity('older-chain'))
+        self.write('rt-stamp/fc26-cache.id', b'stamp')
         self.write('rt-old-file', b'not a folder')
         holder = subprocess.Popen([str(self.exe), 'lock', str(self.dir / 'rt-busy')], stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, text=True)
         try:
             self.assertEqual(holder.stdout.readline().strip(), 'locked')
-            self.assertEqual(self.run_check('old-chains', self.dir, 'rt-current').strip(), '1')
+            # Only a folder stamped with another chain goes. A folder of the same chain under another name (an agent's
+            # route with its own TOTK_SHADER_CACHE next to the player's) is a parallel cache, never an older one: on
+            # 25/10 such a sibling (rt-carreira) removed the player's rt-update.
+            self.assertEqual(self.run_check('old-chains', self.dir, 'rt-current', 'cur-chain').strip(), '1')
         finally:
             holder.stdin.close()
             holder.wait(timeout=30)
-        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ['rt-busy', 'rt-current', 'rt-foreign', 'rt-old-file'])
+        self.assertFalse((self.dir / 'rt-old').exists())
+        for name in ['rt-current', 'rt-sibling', 'rt-stamp', 'rt-foreign', 'rt-busy']:
+            self.assertTrue((self.dir / name).is_dir(), name)
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ['rt-busy', 'rt-current', 'rt-foreign', 'rt-old-file', 'rt-sibling', 'rt-stamp'])
         self.assertTrue((self.dir / 'rt-foreign/pso_collected.tsv').exists())
 
     # ---------- journal ----------

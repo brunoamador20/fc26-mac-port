@@ -100,7 +100,7 @@ void fc26_shader_cache_open(NSString *dir, const char *chain) {
         long rekeyed = fc26_sc_journal_rekey(g_journal, nt && !strcmp(nt, "1") ? NULL : g_cache);
         if (rekeyed < 0) SCLOG("cannot read the journal %s to move old keys", g_journal);
         else if (rekeyed) SCLOG("journal: %ld shader(s) moved to the key without control+0x7d0..0x7e7 (shader_cache.h); their variants are translated again", rekeyed);
-        int old_chains = fc26_sc_remove_old_chains(dir.stringByDeletingLastPathComponent.fileSystemRepresentation, dir.lastPathComponent.UTF8String);
+        int old_chains = fc26_sc_remove_old_chains(dir.stringByDeletingLastPathComponent.fileSystemRepresentation, dir.lastPathComponent.UTF8String, g_id.chain);
         if (old_chains) SCLOG("removed %d folder(s) of older translation chains", old_chains);
 
         int bad; uint64_t limit = fc26_sc_limit_bytes(getenv("FC26_SHADER_CACHE_MAX_MIB"), &bad);

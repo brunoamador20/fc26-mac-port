@@ -96,7 +96,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (!strcmp(c, "discard") && argc == 3) { printf("%ld\n", fc26_sc_discard(argv[2])); return 0; }
-    if (!strcmp(c, "old-chains") && argc == 4) { printf("%d\n", fc26_sc_remove_old_chains(argv[2], argv[3])); return 0; }
+    if (!strcmp(c, "old-chains") && argc == 5) { printf("%d\n", fc26_sc_remove_old_chains(argv[2], argv[3], argv[4])); return 0; }
     if (!strcmp(c, "put") && argc == 7) {   /* put <journal> <key> <stage> <control> <code> */
         size_t nc, nd; uint8_t *ctl = load(argv[5], &nc), *code = load(argv[6], &nd);
         printf("%d\n", fc26_sc_journal_put_shader(argv[2], argv[3], atoi(argv[4]), ctl, code));
