@@ -9,7 +9,7 @@ It checks only what a program can check without the STE dictionary:
   - passive voice: a form of "be" before a past participle (rule 3.2);
   - "-ing" words that are not technical names (rule 3.6);
   - contractions and common words that STE does not approve (rule 1.1), with the approved word.
-Code (``` blocks, `inline`), tables, headings, links and commands are not checked. In .md files only the English part is
+Code (``` blocks, `inline`), headings, links and commands are not checked; each table cell is checked as a unit. In .md files only the English part is
 checked: text from a heading "English" (or the file start, when there is no Portuguese part) to a heading "Português".
 In .sh files only the English strings of the bilingual messages (the second argument of `step`, `die`, `say`) are checked.
 The vocabulary list here is short. A full vocabulary check needs the ASD-STE100 dictionary.
@@ -61,6 +61,11 @@ def english_blocks(path):
             elif name.startswith('portugu'):
                 english = False
             out.append((n, '')); continue
+        if english and not in_code and line.lstrip().startswith('|') and not re.match(r'^\s*\|[\s:|-]+\|?\s*$', line):
+            for cell in line.strip().strip('|').split('|'):   # each table cell is its own unit
+                if re.search(r'[A-Za-z]{3}', re.sub(r'`[^`]*`', '', cell)):
+                    yield n, cell.strip()
+            out.append((n, '')); continue
         if in_code or not english or line.lstrip().startswith(('|', '<', '>', '[!')):
             out.append((n, '')); continue
         out.append((n, line))
@@ -78,6 +83,7 @@ def english_blocks(path):
 
 def clean(s):
     s = re.sub(r'`[^`]*`', 'CODE', s)
+    s = re.sub(r'"[^"]*"', 'QUOTE', s)   # quoted UI labels and program messages are not our sentences
     s = re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', s)
     s = re.sub(r'https?://\S+', 'URL', s)
     return re.sub(r'[*_]', '', s)

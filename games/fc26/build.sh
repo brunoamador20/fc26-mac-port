@@ -246,6 +246,12 @@ else
 		make -C "$FC26_DIR" nro "${MAKE_VARS[@]}"
 fi
 
+# --- 6b. tabela da opção 60 fps / table of the 60 fps option ---
+# A opção "60 fps" do app lê <work>/patches/fps60-render.tsv; sem ela o jogo para ao abrir com a opção ligada.
+step patches "Etapa 6b: tabela da opção 60 fps (make patches, segundos)" \
+	"Step 6b: the table of the 60 fps option (make patches, some seconds)" \
+	make -C "$FC26_DIR" patches "${MAKE_VARS[@]}"
+
 # --- 7. prepare + runtime ---
 # prepare_runtime.py apaga os cabeçalhos e escreve romfs_config.h por último: ele mais novo que as entradas = pronto.
 fresh=1
@@ -271,9 +277,9 @@ step app "Etapa 8: montando o app (na primeira vez baixa e compila o SPIRV-Cross
 	"Step 8: the app (make app). The first time, this step downloads and compiles SPIRV-Cross." \
 	make -C "$FC26_DIR" app "${MAKE_VARS[@]}" APP="$APP" GAME="$BASE" KEYS="$KEYS"
 
-for f in build/shader-service/totk_xlate build/spirv-cross/spirv-cross; do   # o runtime procura os dois aqui / the runtime looks here
-	[ -x "$WORK/$f" ] || die "falta $WORK/$f: sem ele o jogo fecha no primeiro shader." \
-		"$WORK/$f is not there. Without it, the game stops at its first shader."
+for f in build/shader-service/totk_xlate build/spirv-cross/spirv-cross patches/fps60-render.tsv; do   # o runtime procura estes aqui / the runtime looks here
+	[ -s "$WORK/$f" ] || die "falta $WORK/$f: sem ele o jogo fecha ao abrir (shader ou opção 60 fps)." \
+		"$WORK/$f is not there. Without it, the game stops (at its first shader, or with the 60 fps option)."
 done
 
 say "Pronto: $APP" "Complete: $APP"

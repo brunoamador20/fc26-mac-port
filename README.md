@@ -108,20 +108,20 @@ os seus próprios arquivos.
 
 ### O que cada etapa faz, quanto demora e quanto ocupa
 
-Os tempos são **estimativas aproximadas** para um Mac M1 com SSD interno; variam com o Mac e o disco. O espaço é o que
-fica na pasta de trabalho.
+Um build completo levou **38 minutos** num Mac M1 com 8 GB de RAM e SSD interno (medido em 27/10/2026). O espaço é o que fica na pasta de trabalho.
 
-| Etapa | O que faz | Tempo aproximado | Espaço |
-|---|---|---|---|
-| 1. Conferências | Mac, macOS, ferramentas, espaço livre, memória | segundos | — |
-| 2. Ambiente Python | cria `<work>/venv` e instala `requirements.txt` | 1 a 3 min | ~0,3 GB |
-| 3. Código da atualização | `extract_exefs.py --update`: o ExeFS da 1.89.6e65 | menos de 1 min | < 1 GB |
-| 4. Dados do jogo | `merge_update_romfs.py`: a RomFS do jogo base com a da atualização, conferida bloco a bloco | 30 min a 1 h 30 | ~38 GB |
-| 5. Reescrita | `make rewrite`: o código do jogo (main e sdk) reescrito para o Apple silicon; usa 4 a 5 GB de RAM | 1 a 3 h (a mais longa) | alguns GB |
-| 6. Módulo de vídeo | `make nro`: tira o `Engine.Render.Core2.PlatformNvn.nro` da RomFS e o reescreve | 5 a 20 min | < 1 GB |
-| 7. Runtime | `make prepare` confere tudo contra os valores esperados e gera as tabelas; `make runtime` compila | 10 a 30 min | alguns GB |
-| 8. App | `make app`: lançador, tradutor de shaders, SPIRV-Cross e o `FC 26.app` | 3 a 10 min na primeira vez | pequeno |
-| Primeira abertura | o jogo confere os dados e cria o cache de shaders | alguns minutos | o cache cresce com o uso |
+| Etapa | O que faz | Espaço |
+|---|---|---|
+| 1. Conferências | Mac, macOS, ferramentas, espaço livre, memória | — |
+| 2. Ambiente Python | cria `<work>/venv` e instala `requirements.txt` | ~0,3 GB |
+| 3. Código da atualização | `extract_exefs.py --update`: o ExeFS da 1.89.6e65 | < 1 GB |
+| 4. Dados do jogo | `merge_update_romfs.py`: a RomFS do jogo base com a da atualização, conferida bloco a bloco | ~38 GB |
+| 5. Reescrita | `make rewrite`: o código do jogo (main e sdk) reescrito para o Apple silicon; usa 4 a 5 GB de RAM | alguns GB |
+| 6. Módulo de vídeo | `make nro`: tira o `Engine.Render.Core2.PlatformNvn.nro` da RomFS e o reescreve | < 1 GB |
+| 6b. Tabela de 60 fps | `make patches`: gera a tabela que a opção 60 fps do app lê | Pequeno |
+| 7. Runtime | `make prepare` confere tudo contra os valores esperados e gera as tabelas; `make runtime` compila | alguns GB |
+| 8. App | `make app`: lançador, tradutor de shaders, SPIRV-Cross e o `FC 26.app` | pequeno |
+| Primeira abertura | o jogo confere os dados e cria o cache de shaders | o cache cresce com o uso |
 
 ## Onde ficam as coisas
 
@@ -322,20 +322,20 @@ You must still give your own files.
 
 ### What each step does, its time and its disk space
 
-The times are approximate values for an M1 Mac with its internal SSD. They change with the Mac and the disk. The space
-is the space that stays in the work folder.
+One full build took **38 minutes** on an M1 Mac with 8 GB of RAM and an internal SSD (measured on 2026-10-27). The space is the space that stays in the work folder.
 
-| Step | What it does | Approximate time | Space |
-|---|---|---|---|
-| 1. Checks | Examines the Mac, macOS, the tools, the free space and the memory | Seconds | — |
-| 2. Python environment | Makes `<work>/venv` and installs `requirements.txt` | 1 to 3 min | ~0.3 GB |
-| 3. Update code | `extract_exefs.py --update` extracts the 1.89.6e65 ExeFS | Less than 1 min | Less than 1 GB |
-| 4. Game data | `merge_update_romfs.py` merges the base game RomFS and the update RomFS, and checks each block | 30 min to 1.5 h | ~38 GB |
-| 5. Rewrite | `make rewrite` rewrites the game code (main and sdk) for Apple silicon. It uses 4 to 5 GB of RAM. | 1 to 3 h (the longest step) | A few GB |
-| 6. Video module | `make nro` extracts `Engine.Render.Core2.PlatformNvn.nro` from the RomFS and rewrites it | 5 to 20 min | Less than 1 GB |
-| 7. Runtime | `make prepare` compares all files with the expected values and makes the tables. `make runtime` compiles the runtime. | 10 to 30 min | A few GB |
-| 8. App | `make app` builds the launcher, the shader translator, SPIRV-Cross and `FC 26.app` | 3 to 10 min the first time | Small |
-| First start | The game checks its data and makes the shader cache | A few minutes | The cache becomes larger as you play |
+| Step | What it does | Space |
+|---|---|---|
+| 1. Checks | Examines the Mac, macOS, the tools, the free space and the memory | — |
+| 2. Python environment | Makes `<work>/venv` and installs `requirements.txt` | ~0.3 GB |
+| 3. Update code | `extract_exefs.py --update` extracts the 1.89.6e65 ExeFS | Less than 1 GB |
+| 4. Game data | `merge_update_romfs.py` merges the base game RomFS and the update RomFS, and checks each block | ~38 GB |
+| 5. Rewrite | `make rewrite` rewrites the game code (main and sdk) for Apple silicon. It uses 4 to 5 GB of RAM. | A few GB |
+| 6. Video module | `make nro` extracts `Engine.Render.Core2.PlatformNvn.nro` from the RomFS and rewrites it | Less than 1 GB |
+| 6b. 60 fps table | `make patches` makes the table that the 60 fps option of the app reads | Small |
+| 7. Runtime | `make prepare` compares all files with the expected values and makes the tables. `make runtime` compiles the runtime. | A few GB |
+| 8. App | `make app` builds the launcher, the shader translator, SPIRV-Cross and `FC 26.app` | Small |
+| First start | The game checks its data and makes the shader cache | The cache becomes larger as you play |
 
 ## Where the files are
 
@@ -355,15 +355,15 @@ is the space that stays in the work folder.
 
 | Message or symptom | What to do |
 |---|---|
-| "the Xcode Command Line Tools are not installed" | Run `xcode-select --install`. Then run the build again. |
+| "the Mac does not have the Xcode Command Line Tools" | Run `xcode-select --install`. Then run the build again. |
 | "/opt/homebrew/opt/opus... not found" or "...libvpx..." | Install Homebrew ([brew.sh](https://brew.sh)). Then run `brew install opus libvpx`. |
 | "you must have Python 3.10 or newer", or the package installation fails | Run `brew install python` and run the build again. You can also give a different Python with `--python /path/python3`. If the problem continues, delete `<work>/venv` and run the build again. |
 | "the Terminal runs under Rosetta" | Quit Terminal. In Finder, open the Get Info window of Terminal and clear "Open using Rosetta". Open Terminal again. |
-| "not sufficient disk space" | Make disk space free, or use a work folder on a different disk (APFS, no spaces in the path). |
+| "not enough disk space" | Make disk space free, or use a work folder on a different disk (APFS, no spaces in the path). |
 | "--work must not contain spaces" | Use a path with no spaces, for example `~/FC26-work`. |
 | Step 3 or 4 fails (keys, title, hash) | Make sure that the files are the FC 26 **1.0.0** base game and the **1.89.6e65** update. Make sure that `prod.keys` is from your console and is current. |
-| `make prepare` tells you that a size or a SHA-256 is different | The files are not the expected files. They are a different version, or the dump is damaged. Dump them again from your console. |
-| The rewrite (step 5) stops, or the Mac becomes very slow | The Mac does not have sufficient memory. Close other apps and run the same command again. The build does only the missing work again. |
+| `make prepare` tells you that a size or a SHA-256 is different | The files are not the expected files. They are a different version, or the dump has damage. Dump them again from your console. |
+| The rewrite (step 5) stops, or the Mac becomes very slow | The Mac does not have enough memory. Close other apps and run the same command again. The build does again only the work that is not complete. |
 | Step 8 fails during the SPIRV-Cross download | Step 8 needs internet access. Connect the Mac and run the build again. |
 | The app opens and then closes | Read the end of `~/Library/Logs/MacNativeGames/fc26.log`. The work folder must be at the same path as during the build. |
 | Small stops in the first matches | The game translates new shaders the first time. The stops go away when the shader cache is full. |
