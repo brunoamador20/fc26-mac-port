@@ -99,6 +99,13 @@ comandos no app **Terminal** (Aplicativos › Utilitários › Terminal).
 > **Não apague nem mova a pasta de trabalho.** O app é pequeno e lê o jogo de lá. Se mover a pasta, rode o build de
 > novo com o novo `--work` (as etapas já feitas não são aproveitadas numa pasta nova).
 
+### Com um assistente de IA
+
+Se você usa um assistente de IA no Terminal (Claude Code, Codex etc.), abra-o na pasta do repositório e peça para ele
+instalar o FC 26. O guia dele é o [AGENTS.md](AGENTS.md): o que pedir a você, as conferências, o comando, os erros comuns
+e as regras (ele nunca baixa jogo nem chaves e nunca mostra o conteúdo do `prod.keys`). Você continua tendo que fornecer
+os seus próprios arquivos.
+
 ### O que cada etapa faz, quanto demora e quanto ocupa
 
 Os tempos são **estimativas aproximadas** para um Mac M1 com SSD interno; variam com o Mac e o disco. O espaço é o que
@@ -178,8 +185,8 @@ O build.sh só confere, ordena e retoma os alvos do [games/fc26/Makefile](games/
 cd games/fc26 && make test PY=python3
 ```
 
-Mais detalhes em [games/fc26/README.md](games/fc26/README.md) e em [games/fc26/docs](games/fc26/docs). As outras pastas
-de `games/`, o `build_app.py` e o `docs/` da raiz vêm do projeto de origem e não fazem parte do build do FC 26.
+Mais detalhes em [games/fc26/README.md](games/fc26/README.md), em [games/fc26/docs](games/fc26/docs) e em
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Créditos
 
@@ -202,76 +209,81 @@ Licenças e arquivos de cada um: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md
 
 ## What it is
 
-This project runs the **Nintendo Switch version of EA SPORTS FC 26** **natively** on an Apple silicon Mac, with no
-emulator. The game's ARM code is rewritten once for the Mac, a small host answers for the Switch's system services and
-the game's NVN graphics are rebuilt on Metal. The result is an app, `FC 26.app`, that you build yourself on your Mac
-from your own files with a single command: `games/fc26/build.sh`.
+This project makes the **Nintendo Switch version of EA SPORTS FC 26** run **natively** on an Apple silicon Mac. It does
+not use an emulator.
 
-The port runs **offline**: no EA servers and no online modes.
+The build rewrites the ARM code of the game one time for the Mac. A small host answers the Switch system services. The
+NVN graphics of the game operate on Metal.
 
-## Legal
+The result is an app, `FC 26.app`. You build it on your Mac from your own files with one command:
+`games/fc26/build.sh`.
 
-> **This repository contains no game content and no keys**: no program, art, text, audio, shaders, NSP/NCA or
-> `prod.keys`. Everything the game needs is made on your computer from files **you** dump from **your** console.
+The port operates **offline**. It does not connect to EA servers and it has no online modes.
 
-- Use it only with **your own Nintendo Switch**, **its keys** and **a copy of FC 26 you bought**, all dumped from your
-  console.
-- Do not ask for, share or download games or keys from anyone else. Do not distribute the app or the work folder the
-  build makes: they contain the game and are for your own use only.
-- A non-commercial fan project, **not affiliated** with Electronic Arts, Nintendo or Apple. EA SPORTS FC is a trademark
-  of Electronic Arts; Nintendo Switch is a trademark of Nintendo; Mac and macOS are trademarks of Apple.
+## Legal notice
+
+> **This repository contains no game content and no keys.** It contains no game code, art, text, audio, shaders,
+> NSP/NCA files or `prod.keys`. Your computer makes all the game files from files that **you** dump from **your**
+> console.
+
+- Use the port only with **your own Nintendo Switch**, **its keys** and **a copy of FC 26 that you bought**. Dump all
+  of them from your console.
+- Do not ask for games or keys from other persons. Do not share or download games or keys.
+- Do not distribute the app or the work folder of the build. They contain the game and are for your own use only.
+- This is a non-commercial fan project. It is **not affiliated** with Electronic Arts, Nintendo or Apple.
+- EA SPORTS FC is a trademark of Electronic Arts. Nintendo Switch is a trademark of Nintendo. Mac and macOS are
+  trademarks of Apple.
 
 ## Requirements
 
-1. **From your Nintendo Switch:**
+1. **Files from your Nintendo Switch:**
    - the **console keys** (`prod.keys`), dumped from your own Switch;
    - the EA SPORTS FC 26 **1.0.0 base game** (Title ID `01004FF021942000`), as an NSP dumped from your console;
-   - the **1.89.6e65 update** (v1638400), as an NSP dumped from your console. The port runs on that version;
-   - no DLC is needed.
-2. **An Apple silicon Mac** (M1 or newer) with **macOS 26 or newer**. Tested on an 8 GB 13" M1 MacBook Pro with
-   macOS 27.
-3. **Memory:** 8 GB works. Below 16 GB the build warns you: the rewrite step uses 4 to 5 GB, so close other apps while
-   it runs.
-4. **Disk:** about **75 GB free** on the work folder's disk (the NSPs can be on another disk).
-5. **Tools** (the build checks them all and says what is missing):
-   - **Xcode Command Line Tools:** `xcode-select --install`;
-   - **Homebrew** ([brew.sh](https://brew.sh)) with `opus` and `libvpx`: `brew install opus libvpx`;
-   - **Python 3.10 or newer** (`brew install python`). The packages in
-     [games/fc26/requirements.txt](games/fc26/requirements.txt) are installed automatically into their own environment
-     (`<work folder>/venv`);
-   - **internet** during the build, only for the Python packages and to download and compile SPIRV-Cross (the shader
-     translator, at a pinned version). Nothing from the game is downloaded.
+   - the **1.89.6e65 update** (v1638400), as an NSP dumped from your console. The port operates only on this version.
+   - You do not need DLC.
+2. **An Apple silicon Mac** (M1 or newer) with **macOS 26 or newer**. We tested the port on an 8 GB 13" M1 MacBook Pro
+   with macOS 27.
+3. **Memory:** 8 GB is sufficient. Below 16 GB, the build shows a warning. The rewrite step uses 4 to 5 GB. Close other
+   apps during this step.
+4. **Disk:** approximately **75 GB free** on the disk of the work folder. The NSP files can be on a different disk.
+5. **Tools.** The build checks all the tools and tells you which tool is not installed.
+   - **Xcode Command Line Tools:** `xcode-select --install`.
+   - **Homebrew** ([brew.sh](https://brew.sh)) with `opus` and `libvpx`: `brew install opus libvpx`.
+   - **Python 3.10 or newer** (`brew install python`). The build installs the packages in
+     [games/fc26/requirements.txt](games/fc26/requirements.txt) into a separate environment (`<work folder>/venv`).
+   - **Internet access** during the build. The build downloads only the Python packages and SPIRV-Cross (the shader
+     translator, at a fixed version). It downloads nothing from the game.
 
-## Building, step by step
+## How to build the app
 
-Nothing is ready to download: the app is built on your Mac. You do not need to know how to program; just copy and paste
-the commands into the **Terminal** app (Applications › Utilities › Terminal).
+You cannot download the app. You build it on your Mac. You do not need to know how to write code. Copy the commands and
+paste them into the **Terminal** app (Applications › Utilities › Terminal).
 
-1. **Install the tools** (once). In Terminal:
+1. **Install the tools** (one time only). In Terminal, run:
 
    ```sh
    xcode-select --install
    ```
 
-   Install Homebrew following the instructions at [brew.sh](https://brew.sh), then:
+   Install Homebrew with the instructions at [brew.sh](https://brew.sh). Then run:
 
    ```sh
    brew install opus libvpx python
    ```
 
-2. **Get this repository.** In Terminal:
+2. **Get this repository.** In Terminal, run:
 
    ```sh
    git clone https://github.com/brunoamador20/fc26-mac-port.git ~/fc26-mac-port
    ```
 
-3. **Put your files** in one folder, for example `~/FC26-files/`: the 1.0.0 base game NSP, the 1.89.6e65 update NSP and
-   `prod.keys`, all dumped from your console.
+3. **Put your files** in one folder, for example `~/FC26-files/`. You need the 1.0.0 base game NSP, the 1.89.6e65
+   update NSP and `prod.keys`. Dump all of them from your console.
 
-4. **Pick a work folder** with ~75 GB free, **outside** the repository and with **no spaces** in its path, for example
-   `~/FC26-work`. It does not need to exist yet.
+4. **Select a work folder** with approximately 75 GB free. It must be **outside** the repository. Its path must have
+   **no spaces**. For example, use `~/FC26-work`. The folder can be new.
 
-5. **Run the build** (a single command; replace the file names with yours):
+5. **Run the build.** It is one command. Replace the file names with the names of your files:
 
    ```sh
    ~/fc26-mac-port/games/fc26/build.sh \
@@ -282,108 +294,128 @@ the commands into the **Terminal** app (Applications › Utilities › Terminal)
      --app    ~/Applications/"FC 26.app"
    ```
 
-   The build shows each step in Portuguese and English. It takes a while (see the table below); keep the Mac plugged in.
-   **If it stops halfway** (an error, no disk space, the Mac shut down, Ctrl-C), fix what the message says and **run
-   exactly the same command again**: finished steps are skipped.
+   The build shows each step in Portuguese and in English. The build takes a long time (see the table below). Keep the
+   Mac connected to power.
 
-   `build.sh --help` lists every option.
+   **If the build stops**, read the message and correct the problem. Then **run the same command again**. The build
+   skips the steps that are complete. A build can stop because of an error, a full disk, a shutdown or Ctrl-C.
 
-6. **Play:** double-click `FC 26.app`. The options window opens (display, full screen, resolution, 60 fps, economy
-   mode...) and then the game. The first launch checks the ~38 GB of game data and takes longer.
+   `build.sh --help` shows all the options.
 
-> **Do not delete or move the work folder.** The app is small and reads the game from there. If you move the folder,
-> run the build again with the new `--work` (finished steps are not reused in a new folder).
+6. **Play.** Double-click `FC 26.app`. The options window opens first. It has the display, full screen, resolution,
+   60 fps and economy mode options. Then the game starts. The first start checks the ~38 GB of game data and takes
+   more time.
 
-### What each step does, how long it takes and how much space it uses
+> **Do not delete or move the work folder.** The app is small and reads the game from this folder. If you move the
+> folder, run the build again with the new `--work`. The build cannot use the completed steps in a new folder.
 
-Times are **rough estimates** for an M1 Mac with its internal SSD; they vary with the Mac and the disk. Space is what
-stays in the work folder.
+### With an AI assistant
+
+You can use an AI assistant in Terminal, for example Claude Code or Codex. Open it in the repository folder. Then ask
+it to install FC 26.
+
+[AGENTS.md](AGENTS.md) is the guide for the assistant. It tells the assistant which files to ask for, which checks to
+do and how to correct the usual errors. It also gives rules: the assistant never downloads games or keys, and never
+shows the contents of `prod.keys`.
+
+You must still give your own files.
+
+### What each step does, its time and its disk space
+
+The times are approximate values for an M1 Mac with its internal SSD. They change with the Mac and the disk. The space
+is the space that stays in the work folder.
 
 | Step | What it does | Approximate time | Space |
 |---|---|---|---|
-| 1. Checks | Mac, macOS, tools, free space, memory | seconds | — |
-| 2. Python environment | creates `<work>/venv` and installs `requirements.txt` | 1 to 3 min | ~0.3 GB |
-| 3. Update code | `extract_exefs.py --update`: the 1.89.6e65 ExeFS | under 1 min | < 1 GB |
-| 4. Game data | `merge_update_romfs.py`: the base game's RomFS merged with the update's, checked block by block | 30 min to 1.5 h | ~38 GB |
-| 5. Rewrite | `make rewrite`: the game code (main and sdk) rewritten for Apple silicon; uses 4 to 5 GB of RAM | 1 to 3 h (the longest) | a few GB |
-| 6. Video module | `make nro`: takes `Engine.Render.Core2.PlatformNvn.nro` out of the RomFS and rewrites it | 5 to 20 min | < 1 GB |
-| 7. Runtime | `make prepare` checks everything against the expected values and generates the tables; `make runtime` compiles | 10 to 30 min | a few GB |
-| 8. App | `make app`: launcher, shader translator, SPIRV-Cross and `FC 26.app` | 3 to 10 min the first time | small |
-| First launch | the game checks its data and builds the shader cache | a few minutes | the cache grows with play |
+| 1. Checks | Examines the Mac, macOS, the tools, the free space and the memory | Seconds | — |
+| 2. Python environment | Makes `<work>/venv` and installs `requirements.txt` | 1 to 3 min | ~0.3 GB |
+| 3. Update code | `extract_exefs.py --update` extracts the 1.89.6e65 ExeFS | Less than 1 min | Less than 1 GB |
+| 4. Game data | `merge_update_romfs.py` merges the base game RomFS and the update RomFS, and checks each block | 30 min to 1.5 h | ~38 GB |
+| 5. Rewrite | `make rewrite` rewrites the game code (main and sdk) for Apple silicon. It uses 4 to 5 GB of RAM. | 1 to 3 h (the longest step) | A few GB |
+| 6. Video module | `make nro` extracts `Engine.Render.Core2.PlatformNvn.nro` from the RomFS and rewrites it | 5 to 20 min | Less than 1 GB |
+| 7. Runtime | `make prepare` compares all files with the expected values and makes the tables. `make runtime` compiles the runtime. | 10 to 30 min | A few GB |
+| 8. App | `make app` builds the launcher, the shader translator, SPIRV-Cross and `FC 26.app` | 3 to 10 min the first time | Small |
+| First start | The game checks its data and makes the shader cache | A few minutes | The cache becomes larger as you play |
 
-## Where things are
+## Where the files are
 
 | What | Where |
 |---|---|
-| The app | wherever `--app` said (it is only the launcher; `~/Applications` or `/Applications` work) |
-| Extracted game data and the runtime | the work folder (`--work`): `extracted/`, `rewritten/`, `build-update/` |
+| The app | The `--app` path. The app is only the launcher. You can put it in `~/Applications` or `/Applications`. |
+| Extracted game data and the runtime | The work folder (`--work`): `extracted/`, `rewritten/`, `build-update/` |
 | Build logs | `<work>/logs/build/<step>.log` |
 | Profile and saves | `~/Library/Application Support/MacNativeGames/FC26/profile` |
 | Game log | `~/Library/Logs/MacNativeGames/fc26.log` |
 | Shader cache | `<work>/build-update/shader-cache/rt-update` |
-| App options | saved at every change (domain `org.macnativegames.fc26`) |
+| App options | The app saves them at each change (domain `org.macnativegames.fc26`) |
 
-`"FC 26.app/Contents/MacOS/FC 26" --dry-run` prints what the app would do (paths and options) without starting the game.
+`"FC 26.app/Contents/MacOS/FC 26" --dry-run` shows the paths and the options of the app. It does not start the game.
 
-## Common problems
+## Usual problems
 
 | Message or symptom | What to do |
 |---|---|
-| "the Xcode Command Line Tools are missing" | `xcode-select --install`, then run the build again. |
-| "/opt/homebrew/opt/opus... is missing" or "...libvpx..." | Install Homebrew ([brew.sh](https://brew.sh)) and `brew install opus libvpx`. |
-| "needs Python 3.10 or newer" or the package install fails | `brew install python` and run again, or pass another Python with `--python /path/python3`. If it still fails, delete `<work>/venv` and run again. |
-| "the Terminal runs under Rosetta" | Quit Terminal, untick "Open using Rosetta" in its Get Info window in Finder, and open it again. |
-| "not enough space" | Free some space or use a work folder on another disk (APFS, no spaces in the path). |
-| "--work cannot contain spaces" | Use a path without spaces, such as `~/FC26-work`. |
-| Step 3 or 4 fails (keys, title, hash) | Check that these are FC 26's **1.0.0** base game and **1.89.6e65** update, and that `prod.keys` is from your console and up to date. |
-| `make prepare` says a size or SHA-256 does not match | The files are not exactly the expected ones (another version or a bad dump). Dump them again from your console. |
-| The rewrite (step 5) stops or the Mac becomes very slow | Out of memory: close other apps and run the same command; only what is missing is redone. |
-| Step 8 fails downloading SPIRV-Cross | It needs internet at that moment only; connect and run again. |
-| The app opens and closes | Read the end of `~/Library/Logs/MacNativeGames/fc26.log`. The work folder must be where it was at build time. |
-| Stutter in the first matches | Shaders being translated the first time; it goes away as the cache fills. |
+| "the Xcode Command Line Tools are not installed" | Run `xcode-select --install`. Then run the build again. |
+| "/opt/homebrew/opt/opus... not found" or "...libvpx..." | Install Homebrew ([brew.sh](https://brew.sh)). Then run `brew install opus libvpx`. |
+| "you must have Python 3.10 or newer", or the package installation fails | Run `brew install python` and run the build again. You can also give a different Python with `--python /path/python3`. If the problem continues, delete `<work>/venv` and run the build again. |
+| "the Terminal runs under Rosetta" | Quit Terminal. In Finder, open the Get Info window of Terminal and clear "Open using Rosetta". Open Terminal again. |
+| "not sufficient disk space" | Make disk space free, or use a work folder on a different disk (APFS, no spaces in the path). |
+| "--work must not contain spaces" | Use a path with no spaces, for example `~/FC26-work`. |
+| Step 3 or 4 fails (keys, title, hash) | Make sure that the files are the FC 26 **1.0.0** base game and the **1.89.6e65** update. Make sure that `prod.keys` is from your console and is current. |
+| `make prepare` tells you that a size or a SHA-256 is different | The files are not the expected files. They are a different version, or the dump is damaged. Dump them again from your console. |
+| The rewrite (step 5) stops, or the Mac becomes very slow | The Mac does not have sufficient memory. Close other apps and run the same command again. The build does only the missing work again. |
+| Step 8 fails during the SPIRV-Cross download | Step 8 needs internet access. Connect the Mac and run the build again. |
+| The app opens and then closes | Read the end of `~/Library/Logs/MacNativeGames/fc26.log`. The work folder must be at the same path as during the build. |
+| Small stops in the first matches | The game translates new shaders the first time. The stops go away when the shader cache is full. |
 
-## What works
+[AGENTS.md](AGENTS.md) has a longer list of error messages and their corrections.
 
-- Menus, **Kick-off** and **Career**: a full match to the final whistle, advancing the calendar, saving, quitting and
-  reopening with the progress intact.
-- 30 frames per second, or **optional 60 fps**, which makes the Mac run hotter.
+## What operates
+
+- Menus, **Kick-off** and **Career**. You can play a full match to the final whistle and go forward in the calendar.
+  You can save, quit and open the game again with your progress.
+- 30 frames per second, or **optional 60 fps**. At 60 fps the Mac becomes hotter.
 - Sound, keyboard and controller.
-- Options in the app:
-  - macOS **Game Mode**, when playing full screen;
-  - **economy mode**, with the Switch's handheld settings: 720p and less heat;
-  - **"More attentive AI" (experimental)**, which turns on AI calculations the Switch version keeps in its economy mode.
+- These options in the app:
+  - macOS **Game Mode**, when you play in full screen;
+  - **economy mode**, with the handheld settings of the Switch: 720p and less heat;
+  - **"More attentive AI" (experimental)**. It turns on AI calculations that the Switch version keeps in its economy
+    mode.
 
-## Limitations
+## Limits
 
-- Only version 1.89.6e65 (on top of the 1.0.0 base game). The build accepts no other version.
-- Nothing online: no EA servers, no Ultimate Team, no online modes.
-- The players' huddle before kick-off sometimes looks too bright.
-- Gameplay is the Switch version's: some PlayStation 5 movement features are off by design.
-- New shaders can cause small stutters the first time.
-- Work in progress.
+- The port operates only on version 1.89.6e65, on the 1.0.0 base game. The build does not accept other versions.
+- The port has no online functions: no EA servers, no Ultimate Team and no online modes.
+- The scene with the players in a circle before kick-off is sometimes too bright.
+- The gameplay is the gameplay of the Switch version. Some movement functions of the PlayStation 5 version are off.
+- New shaders can cause small stops the first time.
+- The work on the port continues.
 
 ## For developers
 
-build.sh only checks, orders and resumes the targets of [games/fc26/Makefile](games/fc26/Makefile) and the scripts in
-`games/fc26/scripts/` (each explains itself with `--help`). Synthetic tests, with no game data:
+`build.sh` only checks, orders and continues the targets of [games/fc26/Makefile](games/fc26/Makefile) and the scripts
+in `games/fc26/scripts/`. Each script shows its options with `--help`.
+
+The synthetic tests use no game data. To run them, use this command:
 
 ```sh
 cd games/fc26 && make test PY=python3
 ```
 
-More in [games/fc26/README.md](games/fc26/README.md) and [games/fc26/docs](games/fc26/docs). The other folders under
-`games/`, `build_app.py` and the top-level `docs/` come from the upstream project and are not part of the FC 26 build.
+For more information, read [games/fc26/README.md](games/fc26/README.md), [games/fc26/docs](games/fc26/docs) and
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Credits
 
-- **[MacNativeGames](https://github.com/ly05010419/MacNativeGames)** (MIT), where the native approach comes from (rewriter,
-  Horizon host, NVN on Metal, launcher), adapted here for FC 26.
-- **[d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)** (MIT), which created this way of running Switch games
-  natively: the NSO rewriter, the host and the NVN-on-Metal layer started as its generic parts.
+- **[MacNativeGames](https://github.com/ly05010419/MacNativeGames)** (MIT). The native approach comes from this
+  project: the rewriter, the Horizon host, NVN on Metal and the launcher. This port adapts it for FC 26.
+- **[d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)** (MIT). It started this method to run Switch games
+  natively. The NSO rewriter, the host and the NVN-on-Metal layer started as its generic parts.
 - **[nxnative](https://github.com/seedds/nxnative)** (MIT): variable shader constants, the GPU profiler and
-  synchronization fixes.
-- **Ryujinx** (MIT): the Maxwell-to-SPIR-V shader translator and parts of the audio; its service code as a reference.
+  synchronization repairs.
+- **Ryujinx** (MIT): the Maxwell-to-SPIR-V shader translator and parts of the audio. Its service code is a reference.
 - **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)** (Apache-2.0): SPIR-V to Metal Shading Language.
 - **deko3d** (zlib), **[bcdec](https://github.com/iOrange/bcdec)** (MIT), **libopus** and **libvpx** (BSD).
 
-Licenses and files for each: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This project: MIT ([LICENSE](LICENSE)).
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) gives the license and the files of each project. This project uses the
+MIT license ([LICENSE](LICENSE)).

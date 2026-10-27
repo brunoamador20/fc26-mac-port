@@ -8,7 +8,8 @@ Esta pasta é o runtime do FC 26: o host do Horizon (`runtime/`), o reescritor (
 Metal (`third_party/d2r_gfx`), o tradutor de shaders (`prebuilt/`), o lançador (`app/`), os scripts (`scripts/`) e os
 valores esperados de cada versão (`assets/`). Não tem nada do jogo nem chaves.
 
-**Requisitos, aviso legal, passo a passo, problemas comuns e créditos: [README da raiz](../../README.md).**
+**Requisitos, aviso legal, passo a passo, problemas comuns e créditos: [README da raiz](../../README.md).** Guia para
+assistentes de IA: [AGENTS.md](../../AGENTS.md).
 
 Resumo do build, de um comando só e retomável:
 
@@ -33,20 +34,33 @@ Testes sintéticos, sem nada do jogo: `make test PY=python3`. Documentos técnic
 
 ## English
 
-This folder is FC 26's runtime: the Horizon host (`runtime/`), the rewriter (`third_party/d2r`), the NVN-on-Metal layer
-(`third_party/d2r_gfx`), the shader translator (`prebuilt/`), the launcher (`app/`), the scripts (`scripts/`) and each
-version's expected values (`assets/`). It holds no game content and no keys.
+This folder contains the FC 26 runtime. It contains no game content and no keys. These are its parts:
 
-**Requirements, legal notice, step-by-step build, common problems and credits: [top-level README](../../README.md).**
+- `runtime/`: the Horizon host;
+- `third_party/d2r`: the rewriter;
+- `third_party/d2r_gfx`: the NVN-on-Metal layer;
+- `prebuilt/`: the shader translator;
+- `app/`: the launcher;
+- `scripts/`: the build scripts;
+- `assets/`: the expected values of each version.
 
-The build in short, one resumable command:
+**The [top-level README](../../README.md) gives the requirements, the legal notice, the build steps, the usual problems
+and the credits.** [AGENTS.md](../../AGENTS.md) is the guide for AI assistants.
+
+To build the app, use this command. If it stops, run it again:
 
 ```sh
 games/fc26/build.sh --base <base game 1.0.0.nsp> --update <update 1.89.6e65.nsp> \
                     --keys <prod.keys> --work <work folder> --app "<folder>/FC 26.app"
 ```
 
-It runs the commands listed in the Portuguese section above, in that order: the update's ExeFS
-(`scripts/extract_exefs.py --update`), the merged RomFS (`scripts/merge_update_romfs.py`), `make rewrite`, `make nro`,
-`make prepare runtime OUT=$WORK/build-update` and `make app` (which uses build-update by itself), skipping what is
-already done. Synthetic tests, with no game data: `make test PY=python3`. Technical notes: [docs/](docs).
+`build.sh` runs the commands of the Portuguese section above, in this sequence. It skips the steps that are complete.
+
+1. `scripts/extract_exefs.py --update` extracts the ExeFS of the update.
+2. `scripts/merge_update_romfs.py` merges the RomFS of the base game and the update.
+3. `make rewrite` rewrites the game code.
+4. `make nro` rewrites the video module.
+5. `make prepare runtime OUT=$WORK/build-update` checks the files and compiles the runtime.
+6. `make app` makes the app from `build-update`.
+
+The synthetic tests use no game data: `make test PY=python3`. The technical notes are in [docs/](docs).
