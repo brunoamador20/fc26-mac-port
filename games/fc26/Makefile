@@ -8,7 +8,7 @@
 #   make probe     # modules mapped and linked, cross-module calls on 4 threads (no game code beyond that)
 #   make boot      # run it from the work folder (cwd: extracted/ and rewritten/ are read relative to it)
 #   make boot-nnmain  # story 2's check: stop with a JSON verdict at the original nnMain's entry
-# The whole sequence for the Mac is in docs/ESTORIA2_NUVEM.md.
+# The whole sequence, from the NSPs to the app, is build.sh (extract, merge_update_romfs.py, rewrite, nro, prepare, app).
 
 PY ?= python3
 GAME_CONFIG := "$(PY)" scripts/game_config.py
@@ -74,6 +74,18 @@ rewrite:
 	  echo "rewrite $$m"; \
 	  env $$($(GAME_CONFIG) rewrite-env) "$(PY)" third_party/d2r/patch_nso.py "$(WORK)/extracted/$(VERSION)/exefs/$$m" "$(WORK)/rewritten/$(VERSION)" $$m || exit 1; \
 	done
+
+# The video module (story 3): Engine.Render.Core2.PlatformNvn.nro is loaded by the game at run time (nn::ro), so it is
+# taken out of the RomFS, wrapped as an NSO, rewritten like main and sdk, and registered for runtime/ro
+# (<work>/rewritten/<version>/PlatformNvn.patched.bin + nro_manifest.tsv). Needs the RomFS (merge_update_romfs.py).
+NRO_NAME := Engine.Render.Core2.PlatformNvn.nro
+.PHONY: nro
+nro:
+	"$(PY)" scripts/romfs_file.py "$(WORK)/extracted/$(VERSION)/romfs" "$(NRO_NAME)" "$(WORK)/nro/$(VERSION)/$(NRO_NAME)"
+	"$(PY)" scripts/nro_to_nso.py wrap "$(WORK)/nro/$(VERSION)/$(NRO_NAME)" "$(WORK)/nro/$(VERSION)/PlatformNvn.nso"
+	@mkdir -p "$(WORK)/rewritten/$(VERSION)"
+	env $$($(GAME_CONFIG) rewrite-env) "$(PY)" third_party/d2r/patch_nso.py "$(WORK)/nro/$(VERSION)/PlatformNvn.nso" "$(WORK)/rewritten/$(VERSION)" PlatformNvn
+	"$(PY)" scripts/nro_to_nso.py register "$(WORK)/nro/$(VERSION)/$(NRO_NAME)" "$(WORK)/rewritten/$(VERSION)" PlatformNvn
 
 # Analysis ELF of every ExeFS module (assets/game.json analysis_modules) for reading the code: <work>/extracted/<version>/elf.
 .PHONY: analysis
@@ -191,7 +203,12 @@ $(OUT)/launcher: app/launcher.m assets/game.json Makefile   # BINARY, VERSION, A
 $(OUT)/AppIcon.icns:
 	@if [ -n "$(GAME)" ] && [ -n "$(KEYS)" ]; then cd scripts && "$(PY)" extract_app_icon.py "$(GAME)" --keys "$(KEYS)" --title $(TITLE_ID) --output "$(abspath $@)"; \
 	 else echo "no GAME= / KEYS=: the app gets no icon"; fi
-app: runtime shader-tools $(OUT)/launcher $(OUT)/AppIcon.icns
+# `make app` builds the runtime the app runs: OUT defaults to <work>/APP_RUNTIME (build-update) instead of <work>/build, so
+# `make prepare runtime OUT=<work>/build-update` followed by `make app` agree without repeating OUT. OUT=<dir> still wins.
+app:
+	$(MAKE) app-bundle OUT="$(WORK)/$(APP_RUNTIME)"
+.PHONY: app-bundle
+app-bundle: runtime shader-tools $(OUT)/launcher $(OUT)/AppIcon.icns
 	rm -rf "$(APP)" && mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources"
 	cp "$(OUT)/launcher" "$(APP)/Contents/MacOS/FC 26"
 	[ -f "$(OUT)/AppIcon.icns" ] && cp "$(OUT)/AppIcon.icns" "$(APP)/Contents/Resources/" || true

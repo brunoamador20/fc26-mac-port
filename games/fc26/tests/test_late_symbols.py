@@ -19,7 +19,7 @@ import unittest
 
 HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE / 'scripts'))
-sys.path.insert(0, str(HERE.parents[1] / 'tests'))
+sys.path.insert(0, str(HERE / 'tests'))
 import prepare_runtime as pr
 import fc26_synth as synth
 import nro_to_nso

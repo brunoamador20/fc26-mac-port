@@ -174,7 +174,7 @@ def program_nca(records, update=False):
     require(len(programs) == 1, 'Expected one base Program NCA; updates, DLC and combined packages are unsupported')
     record, hdr = programs[0]
     require(record['title_id'] == '01004FF021942000',
-            'Expected Tears of the Kingdom base game 1.0.0; updates, DLC and other games are unsupported')
+            'Expected FC 26 base game 1.0.0; updates, DLC and other games are unsupported')
     return record, hdr
 
 

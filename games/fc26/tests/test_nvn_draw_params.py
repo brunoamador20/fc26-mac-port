@@ -19,7 +19,7 @@ import unittest
 
 HERE = Path(__file__).resolve().parents[1]
 NVN_DIR = Path(os.environ.get('FC26_NVN_DIR') or HERE / 'third_party/d2r_gfx/gfx/nvn')
-RYU_CONSTANTS = HERE.parents[1] / 'vendor/ryujinx/src/Ryujinx.Graphics.Shader/Constants.cs'
+RYU_CONSTANTS = HERE / 'vendor/ryujinx/src/Ryujinx.Graphics.Shader/Constants.cs'
 
 # Line 83 of the shader that aborted, with its reflection (the translator's JSON, bindings left out).
 REAL_MSL = '''vertex main0_out main0(main0_in in [[stage_in]], constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]], uint gl_InstanceIndex [[instance_id]], uint gl_BaseInstance [[base_instance]])
