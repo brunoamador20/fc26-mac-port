@@ -12,6 +12,8 @@ ALLOWED = {
     'docs/': 'the briefing, the story notes and the work log say which port this one is modelled on',
     'CHANGELOG.md': 'the work log names the model (games/by3)',
     'README.md': 'says where the folder was forked from',
+    'vendor/ryujinx/': 'the upstream Ryujinx shader translator source, unchanged (its title-ID tables name other games)',
+    'tools/totk_xlate/': 'the translator front end and patches, kept as built (its comments name the game it was made for)',
     'third_party/d2r/': 'the rewriter, copied in story 1 and not touched here (patch_nso.py is another front\'s)',
     'third_party/d2r_gfx/': 'historical comments of the NVN-on-Metal layer (which game first needed each feature); '
                             'kept so fixes can be brought over from games/by3; nothing there is read at run time',

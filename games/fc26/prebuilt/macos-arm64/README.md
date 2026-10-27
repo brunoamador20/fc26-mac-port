@@ -4,13 +4,13 @@ PR #62 was merged (same file, same SHA-256); it is not updated with the Tears of
 # The shader translator, ready-made
 
 `totk_xlate` is the program the game starts to translate its shaders (`totk_xlate --service`): the Ryujinx shader
-translator (`vendor/ryujinx`, MIT) with this project's patches (`games/totk/tools/totk_xlate/patches`) and the service
+translator (`games/fc26/vendor/ryujinx`, MIT) with this project's patches (`games/fc26/tools/totk_xlate/patches`) and the service
 (`games/totk/tools/totk_xlate/Service.cs`: Maxwell code -> SPIR-V -> SPIRV-Cross -> Metal Shading Language and its
 reflection file), compiled ahead of time with .NET NativeAOT for arm64 macOS. It is here so that building the app needs
 no .NET and the app needs no .NET runtime and no Python.
 
-- Built with `games/totk/tools/totk_xlate/publish_native.sh` from the sources in this repository (.NET SDK 10.0.401).
-- `totk_xlate.sha256` is its SHA-256; `build_app.py` refuses to package a different file.
+- Built with `games/fc26/tools/totk_xlate/publish_native.sh` from the sources in this repository (.NET SDK 10.0.401).
+- `totk_xlate.sha256` is its SHA-256; `make shader-tools` (and so `make app`) refuses a different file.
 - NativeAOT builds are not byte-for-byte reproducible across folders (paths end up in the binary), so a rebuild gets a
   different hash; what matters is that it translates the same. Check a rebuild by replaying a shader cache through it
   and comparing every MSL, SPIR-V and reflection file with the previous build (the development tree has
