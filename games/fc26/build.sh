@@ -271,6 +271,11 @@ step app "Etapa 8: montando o app (na primeira vez baixa e compila o SPIRV-Cross
 	"Step 8: the app (make app). The first time, this step downloads and compiles SPIRV-Cross." \
 	make -C "$FC26_DIR" app "${MAKE_VARS[@]}" APP="$APP" GAME="$BASE" KEYS="$KEYS"
 
+for f in build/shader-service/totk_xlate build/spirv-cross/spirv-cross; do   # o runtime procura os dois aqui / the runtime looks here
+	[ -x "$WORK/$f" ] || die "falta $WORK/$f: sem ele o jogo fecha no primeiro shader." \
+		"$WORK/$f is not there. Without it, the game stops at its first shader."
+done
+
 say "Pronto: $APP" "Complete: $APP"
 info "Abra o app com dois cliques. A primeira abertura confere os ~38 GB de dados e demora mais." \
 	"Double-click the app to open it. The first start checks the ~38 GB of data and takes more time."

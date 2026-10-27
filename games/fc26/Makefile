@@ -205,10 +205,13 @@ $(OUT)/AppIcon.icns:
 	 else echo "no GAME= / KEYS=: the app gets no icon"; fi
 # `make app` builds the runtime the app runs: OUT defaults to <work>/APP_RUNTIME (build-update) instead of <work>/build, so
 # `make prepare runtime OUT=<work>/build-update` followed by `make app` agree without repeating OUT. OUT=<dir> still wins.
+# The shader translator and SPIRV-Cross go to <work>/build: the runtime looks for them there whatever its own folder is
+# (runtime/shader_cache_mac.m, third_party/d2r_gfx/gfx/nvn/totk_shader_rt.m). Without them the game stops at its first shader.
 app:
+	$(MAKE) shader-tools OUT="$(WORK)/build"
 	$(MAKE) app-bundle OUT="$(WORK)/$(APP_RUNTIME)"
 .PHONY: app-bundle
-app-bundle: runtime shader-tools $(OUT)/launcher $(OUT)/AppIcon.icns
+app-bundle: runtime $(OUT)/launcher $(OUT)/AppIcon.icns
 	rm -rf "$(APP)" && mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources"
 	cp "$(OUT)/launcher" "$(APP)/Contents/MacOS/FC 26"
 	[ -f "$(OUT)/AppIcon.icns" ] && cp "$(OUT)/AppIcon.icns" "$(APP)/Contents/Resources/" || true
