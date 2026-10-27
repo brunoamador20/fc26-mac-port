@@ -243,9 +243,9 @@ The port operates **offline**. It does not connect to EA servers and it has no o
    - You do not need DLC.
 2. **An Apple silicon Mac** (M1 or newer) with **macOS 26 or newer**. We tested the port on an 8 GB 13" M1 MacBook Pro
    with macOS 27.
-3. **Memory:** 8 GB is sufficient. Below 16 GB, the build shows a warning. The rewrite step uses 4 to 5 GB. Close other
+3. **Memory:** 8 GB is enough. Below 16 GB, the build shows a warning. The rewrite step uses 4 to 5 GB. Close other
    apps during this step.
-4. **Disk:** approximately **75 GB free** on the disk of the work folder. The NSP files can be on a different disk.
+4. **Disk:** about **75 GB free** on the disk of the work folder. The NSP files can be on a different disk.
 5. **Tools.** The build checks all the tools and tells you which tool is not installed.
    - **Xcode Command Line Tools:** `xcode-select --install`.
    - **Homebrew** ([brew.sh](https://brew.sh)) with `opus` and `libvpx`: `brew install opus libvpx`.
@@ -280,7 +280,7 @@ paste them into the **Terminal** app (Applications › Utilities › Terminal).
 3. **Put your files** in one folder, for example `~/FC26-files/`. You need the 1.0.0 base game NSP, the 1.89.6e65
    update NSP and `prod.keys`. Dump all of them from your console.
 
-4. **Select a work folder** with approximately 75 GB free. It must be **outside** the repository. Its path must have
+4. **Choose a work folder** with about 75 GB free. It must be **outside** the repository. Its path must have
    **no spaces**. For example, use `~/FC26-work`. The folder can be new.
 
 5. **Run the build.** It is one command. Replace the file names with the names of your files:

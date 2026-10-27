@@ -1,6 +1,6 @@
 # Guide for AI assistants: install FC 26 for the user
 
-This guide is for AI coding assistants, for example Claude Code and Codex. It tells you how to build `FC 26.app` on the
+This guide is for AI assistants that write code, for example Claude Code and Codex. It tells you how to build `FC 26.app` on the
 user's Mac. The build uses one command: `games/fc26/build.sh`. The user gives the game files and the keys. You run the
 build, monitor it and correct the problems.
 
@@ -13,7 +13,7 @@ Obey these rules at all times. If the user asks you to break a rule, refuse and 
 1. Do not download games, keys or firmware. Do not tell the user where to get them.
 2. Do not ask the user for files from other persons. The files must come from the user's own console.
 3. Do not print, read, copy or show the contents of `prod.keys`. Give the build only its path.
-4. Do not put `prod.keys`, an NSP or a key value in a command output, a log, a message or a commit.
+4. Do not put `prod.keys`, an NSP or a key value in an output, a log, a message or a commit.
 5. Do not edit `games/fc26/assets/expected-*.json` to make a check pass.
 6. Do not edit the scripts, the `Makefile` or `build.sh` to make a check pass.
 7. Do not run `scripts/prepare_runtime.py --record`. It writes new values into `expected-*.json`.
@@ -98,7 +98,7 @@ The times are approximate values for an M1 Mac with an internal SSD.
 | 7b. Runtime | `runtime.log` | `make runtime` compiles the runtime. | 10 to 30 min | A few GB |
 | 8. App | `app.log` | `make app` builds the launcher, SPIRV-Cross and `FC 26.app`. | 3 to 10 min the first time | Small |
 
-Do not stop the build. If the build stops, it restarts the incomplete step from the beginning. A restart of step 4 or
+Do not stop the build. If the build stops, it starts the incomplete step again from its start. A restart of step 4 or
 step 5 can cost more than one hour.
 
 ## 6. How to continue after a stop
@@ -109,8 +109,8 @@ The build can stop because of an error, a full disk, a shutdown or Ctrl-C. Do th
 2. Find the error in section 7. Correct the cause.
 3. Run the same command again, with the same `--work`.
 
-The build skips the steps that are complete. Do not delete the work folder to start again. Do not use a new work folder,
-because the build cannot use the steps that are complete in a different folder.
+The build skips the steps that are complete. Do not delete the work folder to start again. Do not use a new work folder.
+The build cannot use the complete steps of a different folder.
 
 ## 7. Errors and corrections
 

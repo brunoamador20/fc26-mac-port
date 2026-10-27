@@ -44,12 +44,12 @@ This page tells you how the project works. It also gives the rules for a pull re
 - A performance change must not change the picture. Small floating-point differences are acceptable.
 - Measure before you optimize. Use Instruments, the Xcode GPU frame capture and the Metal HUD (`MTL_HUD_ENABLED=1`).
 - Write your own timer only when these tools cannot show the value. Tell what the timer measures.
-- Report the local saving, the added cost and the change of the full frame as three separate values.
+- Report the local time decrease, the added cost and the change of the full frame as three separate values.
 - Keep incomplete or faulty experiments off by default.
 
 ## Pull requests
 
-- Make one pull request for one topic. Do not add unrelated features, debug code or new formatting.
+- Make one pull request for one topic. Do not add unrelated features, debug code or a new format for the code.
 - Do not change keys, defaults or `expected-*.json` unless this is the topic of the pull request.
 - Build the app after your change. If you cannot build it, tell this in the pull request.
 - Run the synthetic tests in `games/fc26`: `make test PY=python3`. GitHub Actions runs them too (`.github/workflows/fc26.yml`).
@@ -57,3 +57,7 @@ This page tells you how the project works. It also gives the rules for a pull re
 - Tests do not replace a played game.
 - Keep diagnostics off by default. Turn them on with an environment variable or an input-file command.
 - Write commit messages as `<type>: <description>`. Use one of these types: feat, fix, refactor, docs, test, chore, perf, ci.
+
+## English text
+
+Write the English text for people in ASD-STE100 Simplified Technical English. Run `games/fc26/tools/ste_check.py` on the file. `make test` runs this check.
