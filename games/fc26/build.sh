@@ -17,7 +17,7 @@ set -uo pipefail
 
 FC26_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_DIR="$(cd "$FC26_DIR/../.." && pwd -P)"
-NEED_GB=75          # total: dados extraídos, reescrita, compilação e cache de gráficos / extracted data, rewrite, build, cache
+NEED_GB=45          # só a pasta de trabalho: RomFS 38 GB + reescrita, compilação e cache (os NSPs ficam fora) / work folder only
 MIN_RAM_GB=16
 MIN_MACOS=26
 
@@ -66,7 +66,7 @@ while [ $# -gt 0 ]; do
 	esac
 done
 for pair in "--base:$BASE" "--update:$UPDATE" "--keys:$KEYS" "--work:$WORK" "--app:$APP"; do
-	[ -n "${pair#*:}" ] || { usage >&2; die "falta ${pair%%:*}." "${pair%%:*} is missing."; }
+	[ -n "${pair#*:}" ] || { usage >&2; die "falta ${pair%%:*}." "Give ${pair%%:*}."; }
 done
 
 # Caminho absoluto de algo cuja pasta-mãe existe / absolute path of something whose parent folder exists.
@@ -118,15 +118,15 @@ RAM_GB=$(( $(sysctl -n hw.memsize) / 1073741824 ))
 info "macOS $MACOS, $RAM_GB GB de RAM" "macOS $MACOS, $RAM_GB GB of RAM"
 [ "$RAM_GB" -ge "$MIN_RAM_GB" ] || warn \
 	"$RAM_GB GB de RAM: funciona, mas a reescrita (etapa 5) usa 4 a 5 GB. Feche os outros apps durante ela." \
-	"$RAM_GB GB of RAM is sufficient, but the rewrite (step 5) uses 4 to 5 GB. Close other apps during step 5."
+	"$RAM_GB GB of RAM is enough, but the rewrite (step 5) uses 4 to 5 GB. Close other apps during step 5."
 
 # --- ferramentas / tools ---
 say "Conferindo as ferramentas" "Check: the tools"
 xcrun --find clang >/dev/null 2>&1 || die "faltam as Command Line Tools do Xcode. Instale com: xcode-select --install" \
-	"the Xcode Command Line Tools are not installed. Install them with: xcode-select --install"
+	"the Mac does not have the Xcode Command Line Tools. Install them with: xcode-select --install"
 for t in make git codesign; do
 	command -v "$t" >/dev/null 2>&1 || die "falta o comando '$t' (vem com as Command Line Tools: xcode-select --install)." \
-		"the '$t' command is not installed. Install the Command Line Tools: xcode-select --install"
+		"the Mac does not have the '$t' command. Install the Command Line Tools: xcode-select --install"
 done
 for lib in opus/lib/libopus.a opus/include/opus libvpx/lib/libvpx.a libvpx/include; do   # caminhos fixos do Makefile
 	[ -e "/opt/homebrew/opt/$lib" ] || die "falta /opt/homebrew/opt/$lib. Instale o Homebrew (https://brew.sh) e rode: brew install opus libvpx" \
@@ -148,7 +148,7 @@ WANT_GB=$(( NEED_GB - USED_GB )); [ "$WANT_GB" -ge 5 ] || WANT_GB=5
 info "livre: $FREE_GB GB; já na pasta de trabalho: $USED_GB GB; faltam: ~$WANT_GB GB" \
 	"free: $FREE_GB GB. In the work folder: $USED_GB GB. Necessary: ~$WANT_GB GB more."
 [ "$FREE_GB" -ge "$WANT_GB" ] || die "pouco espaço: $FREE_GB GB livres em $probe, precisa de ~$WANT_GB GB." \
-	"not sufficient disk space: $FREE_GB GB free at $probe. The build needs ~$WANT_GB GB."
+	"not enough disk space: $FREE_GB GB free at $probe. The build needs ~$WANT_GB GB."
 
 mkdir -p "$WORK/logs/build" || die "não consegui criar $WORK" "cannot make the folder $WORK"
 LOGS="$WORK/logs/build"

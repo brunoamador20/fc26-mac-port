@@ -230,7 +230,7 @@ The port operates **offline**. It does not connect to EA servers and it has no o
   of them from your console.
 - Do not ask for games or keys from other persons. Do not share or download games or keys.
 - Do not distribute the app or the work folder of the build. They contain the game and are for your own use only.
-- This is a non-commercial fan project. It is **not affiliated** with Electronic Arts, Nintendo or Apple.
+- This is a non-commercial fan project. It has **no relation** with Electronic Arts, Nintendo or Apple.
 - EA SPORTS FC is a trademark of Electronic Arts. Nintendo Switch is a trademark of Nintendo. Mac and macOS are
   trademarks of Apple.
 
@@ -246,7 +246,7 @@ The port operates **offline**. It does not connect to EA servers and it has no o
 3. **Memory:** 8 GB is enough. Below 16 GB, the build shows a warning. The rewrite step uses 4 to 5 GB. Close other
    apps during this step.
 4. **Disk:** about **75 GB free** on the disk of the work folder. The NSP files can be on a different disk.
-5. **Tools.** The build checks all the tools and tells you which tool is not installed.
+5. **Tools.** The build checks all the tools and tells you which tool is not on the Mac.
    - **Xcode Command Line Tools:** `xcode-select --install`.
    - **Homebrew** ([brew.sh](https://brew.sh)) with `opus` and `libvpx`: `brew install opus libvpx`.
    - **Python 3.10 or newer** (`brew install python`). The build installs the packages in

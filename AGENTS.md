@@ -53,7 +53,7 @@ Do these checks before you start the build. `build.sh` does them again, but earl
 | Python | `python3 -V` | 3.10 or higher |
 | Input files | `test -s <path> && echo ok` for each file | `ok`. Do not open or print the files. |
 
-If a tool is not installed, tell the user the install command. Ask the user before you install software:
+If the Mac does not have a tool, tell the user the install command. Ask the user before you install software:
 
 - Command Line Tools: `xcode-select --install`. This opens a dialog box. The user must accept it.
 - Homebrew: the user installs it from [brew.sh](https://brew.sh).

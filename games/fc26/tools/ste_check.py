@@ -42,7 +42,8 @@ IMPERATIVE = re.compile(r'^(?:\d+\.\s*)?(?:Do|Use|Run|Open|Put|Give|Keep|Make|Se
 def english_blocks(path):
     text = path.read_text()
     if path.suffix == '.sh':
-        for m in re.finditer(r'^\s*(?:step|die|say)\b[^\n]*', text, re.M):
+        text = re.sub(r'\\\n\s*', ' ', text)   # join continued lines: a message often goes on the next line
+        for m in re.finditer(r'(?:^\s*|[;&|{]\s*|\b(?:then|else|do)\s+)(?:step|die|say|warn|info|skip)\s[^\n]*', text, re.M):
             parts = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(0))
             if len(parts) >= 2:
                 yield text.count('\n', 0, m.start()) + 1, parts[1]   # pt-BR first, English second
@@ -95,14 +96,14 @@ def check(path):
             limit = 20 if IMPERATIVE.match(s) else 25
             if len(words) > limit:
                 problems.append((line, 'length', f'{len(words)} words (max {limit}): {s[:90]}…'))
-            if re.search(BE + r'(\s+\w+ly)?\s+' + PARTICIPLE, s, re.I):
+            if re.search(BE + r'(\s+(?:not|\w+ly))?\s+' + PARTICIPLE, s, re.I):
                 problems.append((line, 'passive', s[:110]))
             for w in re.findall(r"\b[a-z]+ing\b", s):
                 if w not in ING_OK:
                     problems.append((line, '-ing', f'"{w}": {s[:90]}'))
             if re.search(r"\b\w+'(t|s|re|ll|ve|d)\b", s) and re.search(r"\b(n't|it's|that's|there's|you're|we're|they're|you'll|it'll|you've|i'm)\b", s, re.I):
                 problems.append((line, 'contraction', s[:110]))
-            for w in re.findall(r"[A-Za-z][\w.]*", s):
+            for w in re.findall(r"(?<![\w-])[A-Za-z][\w.]*(?![\w-])", s):   # not parts of command names (xcode-select)
                 key = w.lower().rstrip('.') if w.lower() not in UNAPPROVED else w.lower()
                 if key in UNAPPROVED:
                     problems.append((line, 'word', f'"{w}" -> {UNAPPROVED[key]}: {s[:80]}'))
