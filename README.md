@@ -165,6 +165,8 @@ Um build completo levou **38 minutos** num Mac M1 com 8 GB de RAM e SSD interno 
   - **modo economia**, com as configurações de portátil do Switch: 720p e menos calor;
   - **"IA mais atenta" (experimental)**, que liga cálculos de inteligência que a versão de Switch deixa no modo
     econômico.
+  - **"Confirmar com o botão de baixo"**: com controle de PlayStation ou Xbox, o ✕ / A confirma e o ○ / B volta, como no
+    FC do PS5 e do Xbox. Desligada, vale o layout do Switch: o botão de baixo volta.
 
 ## Limitações
 
@@ -381,6 +383,8 @@ One full build took **38 minutes** on an M1 Mac with 8 GB of RAM and an internal
   - **economy mode**, with the handheld settings of the Switch: 720p and less heat;
   - **"More attentive AI" (experimental)**. It turns on AI calculations that the Switch version keeps in its economy
     mode.
+  - **"Confirm with the bottom button"**. With a PlayStation or Xbox controller, Cross / A confirms and Circle / B goes
+    back, as in FC on PS5 and Xbox. When this option is off, the game uses the Switch layout: the bottom button goes back.
 
 ## Limits
 

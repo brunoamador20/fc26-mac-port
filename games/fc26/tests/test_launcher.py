@@ -142,6 +142,14 @@ class Launcher(unittest.TestCase):
                 lines.remove("export FC26_FPS60='1'")
             self.assertEqual(lines, base.stdout.splitlines())
 
+    def test_confirm_bottom_only_when_chosen(self):
+        fresh = self.plan()
+        self.assertNotIn('TOTK_FACE_BUTTONS', fresh['set'])
+        chosen = self.plan('confirmBottom=1')
+        self.assertEqual(chosen['set'].pop('TOTK_FACE_BUTTONS'), 'label')
+        self.assertEqual(chosen, fresh)
+        self.assertEqual(self.plan('confirmBottom=0'), fresh)
+
     def test_smartai_only_when_chosen(self):
         fresh = self.plan()
         self.assertNotIn('FC26_GAMEPLAY_SET', fresh['set'])

@@ -54,7 +54,7 @@ static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
 @property NSWindow *window;
 @property NSPopUpButton *size, *monitor, *output;
 @property NSSegmentedControl *display, *scaler;
-@property NSButton *hud, *fps60, *handheld, *smartai, *play; @property NSTextField *note;
+@property NSButton *hud, *fps60, *handheld, *smartai, *confirmBottom, *play; @property NSTextField *note;
 @property BOOL launch;
 @end
 
@@ -82,6 +82,9 @@ static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
     self.fps60 = [NSButton checkboxWithTitle:T("60 fps (aumenta o calor e o consumo)", "60 fps (increases heat and power use)") target:self action:@selector(changed:)];
     self.handheld = [NSButton checkboxWithTitle:T("Modo economia: portátil do Switch, 720p, menos calor (imagem menos nítida)", "Economy mode: Switch handheld, 720p, less heat (less sharp image)") target:self action:@selector(changed:)];
     self.smartai = [NSButton checkboxWithTitle:T("IA mais atenta (experimental; usa um pouco mais de processador)", "More attentive AI (experimental; uses a little more processor)") target:self action:@selector(changed:)];
+    /* PlayStation and Xbox controllers are mapped by the position of the Switch buttons (runtime/gamepad_layout.h): the
+       bottom button is the Switch's B, "back". This option maps them by label: Cross / A confirms, as in FC on PS5 / Xbox. */
+    self.confirmBottom = [NSButton checkboxWithTitle:T("Confirmar com o botão de baixo (✕ no PlayStation, A no Xbox)", "Confirm with the bottom button (Cross on PlayStation, A on Xbox)") target:self action:@selector(changed:)];
     self.note = [NSTextField wrappingLabelWithString:@""]; self.note.textColor = NSColor.secondaryLabelColor; self.note.font = [NSFont systemFontOfSize:11];
     self.play = [NSButton buttonWithTitle:T("Jogar", "Play") target:self action:@selector(start:)]; self.play.keyEquivalent = @"\r";
     NSButton *quit = [NSButton buttonWithTitle:T("Sair", "Quit") target:NSApp action:@selector(terminate:)]; quit.keyEquivalent = @"\033";
@@ -96,13 +99,14 @@ static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
         @[[self label:T("Fluidez", "Smoothness")], self.fps60],
         @[[self label:T("Economia", "Economy")], self.handheld],
         @[[self label:T("Experimental", "Experimental")], self.smartai],
+        @[[self label:T("Controle", "Controller")], self.confirmBottom],
     ]];
     grid.rowSpacing = 10; grid.columnSpacing = 12; [grid columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
     NSStackView *buttons = [NSStackView stackViewWithViews:@[quit, self.play]];
     NSStackView *stack = [NSStackView stackViewWithViews:@[grid, self.note, buttons]];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical; stack.alignment = NSLayoutAttributeTrailing; stack.spacing = 16;
     stack.edgeInsets = NSEdgeInsetsMake(20, 20, 20, 20);
-    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 780, 360) styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 780, 390) styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                                                 backing:NSBackingStoreBuffered defer:NO];
     self.window.title = @"FC 26"; self.window.contentView = stack; self.window.delegate = self;
     [self.note.widthAnchor constraintEqualToConstant:520].active = YES;
@@ -136,6 +140,7 @@ static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
     self.fps60.state = [d boolForKey:@"FPS60"];
     self.handheld.state = [d boolForKey:@"handheld"];
     self.smartai.state = [d boolForKey:@"smartai"];
+    self.confirmBottom.state = [d boolForKey:@"confirmBottom"];
     self.hud.state = [d objectForKey:@"hud"] ? [d boolForKey:@"hud"] : YES;
 }
 /* Every change is saved at once (and written to disk), so the next start shows the same choices. */
@@ -159,6 +164,7 @@ static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
     [d setBool:self.fps60.state forKey:@"FPS60"];
     [d setBool:self.handheld.state forKey:@"handheld"];
     [d setBool:self.smartai.state forKey:@"smartai"];
+    [d setBool:self.confirmBottom.state forKey:@"confirmBottom"];
     CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);   // persist before launching the separate game app
 }
 - (void)start:(id)sender { (void)sender; [self save]; self.launch = YES; [NSApp stop:nil]; [self.window orderOut:nil];
@@ -207,6 +213,7 @@ static LaunchPlan *launch_plan(NSUserDefaults *d, NSString *work, NSString *home
     if ([d boolForKey:@"FPS60"]) e[@"FC26_FPS60"] = @"1";
     if ([d boolForKey:@"handheld"]) e[@"TOTK_OPERATION_MODE"] = @"handheld";
     if ([d boolForKey:@"smartai"]) e[@"FC26_GAMEPLAY_SET"] = @"EnableHighPrequencyPerceptionUpdate=1,EnableExtraPassEvaluations=1,EnablePPCriticalReducedEvaluation=0";
+    if ([d boolForKey:@"confirmBottom"]) e[@"TOTK_FACE_BUTTONS"] = @"label";   // Cross / A confirms (runtime/gamepad_layout.h)
     e[@"DM_PRESENT_HZ"] = @"60";
     NSUInteger mi = [all indexOfObject:main_screen]; if (mi == NSNotFound) mi = 0;
     for (NSUInteger i = 0; i < all.count; i++) if ([screen_name(all[i]) isEqualToString:[d stringForKey:@"monitor"]]) mi = i;
